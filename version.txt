@@ -1,4 +1,4 @@
 // IDEKA Compiler Version Information
-const byte* IDEKA_COMPILER_VERSION      = g"1.5.5",
-            IDEKA_VERSION_NAME          = g"Spicy Sugar",
+const byte* IDEKA_COMPILER_VERSION      = g"1.6.0",
+            IDEKA_VERSION_NAME          = g"Entangled Excitement",
             IDEKA_COMPILER_RELEASE_DATE = g"20261020"; // YYYYMMDD

@@ -88,8 +88,7 @@ namespace IDEKA
         struct LineList
         {
             byte* text;
-            int* off;
-            int* len;
+            int* off, len;
             int n;
         };
 
@@ -598,7 +597,7 @@ namespace IDEKA
 
         pp_hash(byte* s, int n) -> u64
         {
-            u64 h = (u64)5381;
+            u64 h = 5381;
             int i;
             while (i < n)
             {
@@ -631,7 +630,7 @@ namespace IDEKA
                     this.cap = 0;
                 }
                     default {
-                    this.mem[0] = (byte)0;
+                    this.mem[0] = 0;
                 };
                 };
                 -> this;
@@ -710,7 +709,7 @@ namespace IDEKA
                     {
                         this.mem[this.len] = (byte)b;
                         this.len++;
-                        this.mem[this.len] = (byte)0;
+                        this.mem[this.len] = 0;
                         ->;
                     };
                 };
@@ -736,7 +735,7 @@ namespace IDEKA
                                     i++;
                                 };
                                 this.len = this.len + n;
-                                this.mem[this.len] = (byte)0;
+                                this.mem[this.len] = 0;
                                 ->;
                             };
                         };
@@ -787,7 +786,7 @@ namespace IDEKA
                 this.len = 0;
                 switch (this.mem != (byte*)0)
                 {
-                    case (true) { this.mem[0] = (byte)0; }
+                    case (true) { this.mem[0] = 0; }
                     default {};
                 };
                 ->;
@@ -799,7 +798,7 @@ namespace IDEKA
                 {
                     case (true) {
                     this.len--;
-                    this.mem[this.len] = (byte)0;
+                    this.mem[this.len] = 0;
                 }
                     default {};
                 };
@@ -827,7 +826,7 @@ namespace IDEKA
                                 };
                             };
                         };
-                        this.mem[this.len] = (byte)0;
+                        this.mem[this.len] = 0;
                         ->;
                     };
                 };
@@ -1306,11 +1305,9 @@ namespace IDEKA
 
         object SymTab
         {
-            int* slots;
-            int* ents;
+            int* slots, ents;
             int slot_cap, ent_cap, count;
-            Buf keys;
-            Buf vals;
+            Buf keys, vals;
             bool ok;
 
             __init() -> this
@@ -1590,17 +1587,14 @@ namespace IDEKA
             Buf pool;       // persistent null terminated strings (paths), addressed by offset
             Buf outb;       // output lines joined with LF
             Buf errb;       // error message
-            Buf srcpath;
-            Buf fbuf;
+            Buf srcpath, fbuf;
             Buf sc;         // _substitute_constants result
             Buf ma;         // macro expansion, current text
             Buf mc;         // macro expansion, pass output
-            Buf x1;
-            Buf x2;
+            Buf x1, x2;
             Buf psb;        // #psub definition being collected
             Buf pb;         // #psub parameter names
-            Buf tmp;
-            Buf passb;
+            Buf tmp, passb;
             Buf rbuf;       // last resolved path
             Buf jb;         // last joined path
             Buf js;         // json string value
@@ -1611,22 +1605,15 @@ namespace IDEKA
             IntVec dir_stack;   // pool offsets
             IntVec map_file;    // line_map: file id per output line
             IntVec map_line;    // line_map: local line number per output line
-            IntVec aoff;
-            IntVec alen;
+            IntVec aoff, alen;
 
-            SymTab processed;
-            SymTab consts;
-            SymTab psubs;
+            SymTab processed, consts, psubs;
 
             int line_count, cur_file, cur_lineno, err_kind;
             byte** xpaths;      // paths of lines added with append_map, file id -(k + 1) is xpaths[k]
-            int xcount;
-            int srcdir_off, cwd_off, root_dir_off;
-            int pc_off, pc_len;
+            int xcount, srcdir_off, cwd_off, root_dir_off, pc_off, pc_len;
             bool pc_inv;
-            byte* pathbuf;
-            byte* sub_ptr;
-            byte* ex_ptr;
+            byte* pathbuf, sub_ptr, ex_ptr;
             int sub_len, ex_len;
 
             __init(byte* source_file) -> this
@@ -1763,8 +1750,7 @@ namespace IDEKA
             append_map(int* lines, byte** paths, int n) -> void
             {
                 int i, k, id, pl, c;
-                byte* p;
-                byte* q;
+                byte* p, q;
                 byte** grown;
                 while (i < n)
                 {
@@ -1790,7 +1776,7 @@ namespace IDEKA
                             q[c] = p[c];
                             c++;
                         };
-                        q[pl] = (byte)0;
+                        q[pl] = 0;
                         grown = (byte**)fmalloc((u64)(this.xcount + 1) * (u64)8);
                         c = 0;
                         while (c < this.xcount)
@@ -2933,8 +2919,7 @@ namespace IDEKA
                 int hi = lo + ll.len[i];
                 int s = lo;
                 int e = hi;
-                int a, b, ts, te, nx, semi, q1, q2, j, k, np, w, tcount;
-                int name_off, name_len, paren_open, paren_close, body_off, body_len;
+                int a, b, ts, te, nx, semi, q1, q2, j, k, np, w, tcount, name_off, name_len, paren_open, paren_close, body_off, body_len;
                 bool more, have;
                 int ent;
 

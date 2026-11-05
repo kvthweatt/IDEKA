@@ -3123,6 +3123,7 @@ class IDEKAParser:
         # Tag annotation variables -- always initialized here so they are defined
         # regardless of which branch below is taken.
         is_deprecated = False
+        is_naked = False
         async_uses = []
         effect_ann = None
         attenuate_ann = None
@@ -3526,10 +3527,13 @@ class IDEKAParser:
                     att_expr = self._parse_effect_expr()
                     self.consume(TokenType.RIGHT_BRACE)
                     attenuate_ann = AttenuateAnnotation(att_expr)
+                elif self.expect(TokenType.IDENTIFIER) and self.current_token.value == 'naked':
+                    self.advance()
+                    is_naked = True
                 elif self.expect(TokenType.LESS_THAN):
                     async_uses.append(self._parse_async_use())
                 else:
-                    self.error("Expected 'deprecate', 'effect', 'attenuate' or '<Tag>' after '#'")
+                    self.error("Expected 'deprecate', 'effect', 'attenuate', 'naked' or '<Tag>' after '#'")
             self.consume(TokenType.SEMICOLON)
         
         # Restore the previous active template param set now that the entire function
@@ -3541,7 +3545,7 @@ class IDEKAParser:
             func_def = FunctionDef(name, real_parameters, return_type, body, is_const,
                                    is_volatile, is_prototype, no_mangle, is_variadic, calling_conv,
                                    is_recursive, is_inline, is_deprecated, effect_ann, attenuate_ann,
-                                   error_type=error_type, is_async=is_async, async_uses=async_uses)
+                                   error_type=error_type, is_async=is_async, async_uses=async_uses, is_naked=is_naked)
             if self._in_comptime > 0:
                 func_def._is_comptime_only = True
             self._register_template_function(name, template_params, func_def,
@@ -3558,7 +3562,8 @@ class IDEKAParser:
                                is_recursive, is_inline, is_deprecated, effect_ann, attenuate_ann,
                                error_type=error_type, is_async=is_async, async_uses=async_uses,
                                pre_contracts=len(_pre_contract_names),
-                               post_contracts=len(_post_contract_names)).set_location(tok.line, tok.column)
+                               post_contracts=len(_post_contract_names),
+                               is_naked=is_naked).set_location(tok.line, tok.column)
 
         # Register 'as operator' if present
         if _as_op_symbol is not None:
@@ -5721,6 +5726,9 @@ class IDEKAParser:
                     alignment = bit_width
                     endianness = int(self.consume(TokenType.SINT_LITERAL).value)
 
+                if alignment is not None and alignment < bit_width:
+                    self.error(f"Alignment ({alignment}) cannot be less than bit width ({bit_width}) in data{{{bit_width}:{alignment}}}")
+
                 self.consume(TokenType.RIGHT_BRACE)
 
         # Pointer specification - support multiple levels
@@ -7199,7 +7207,7 @@ class IDEKAParser:
         """
         idkvm_statement -> 'idkvm' IDEKAVM_BLOCK ';'
         Parses inline FVM bytecode. The block content is stored as raw text
-        for assembly by fvmcodegen._visit_idkvm_block at comptime.
+        for assembly by idkvmcodegen._visit_idkvm_block at comptime.
         """
         from iast import IDEKAVMBlock
         from ilexer import TokenType

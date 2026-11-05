@@ -454,7 +454,7 @@ def !!malloc(size_t size) -> void*
         xorq %r9, %r9
         syscall
         movq %rax, $1
-    } : : "r"(total), "r"(@result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "memory";
+    } : : "r"(total), "r"(@result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "memory";
     if (result == (u64)0xFFFFFFFFFFFFFFFF) { return (void*)STDLIB_GVP; };
     u64* header = (u64*)result;
     header[0] = total;
@@ -475,7 +475,7 @@ def !!free(void* ptr) -> void
         movq $0, %rdi
         movq $1, %rsi
         syscall
-    } : : "r"(base), "r"(total) : "rax", "rdi", "rsi", "memory";
+    } : : "r"(base), "r"(total) : "rax", "rdi", "rsi", "rcx", "r11", "memory";
 };
 
 def !!calloc(size_t count, size_t size) -> void*
@@ -538,7 +538,7 @@ def !!malloc(size_t size) -> void*
         xorq %r9, %r9
         syscall
         movq %rax, $1
-    } : : "r"(total), "r"(@result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "memory";
+    } : : "r"(total), "r"(@result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "memory";
     if (result == (u64)0xFFFFFFFFFFFFFFFF) { return (void*)STDLIB_GVP; };
     u64* header = (u64*)result;
     header[0] = total;
@@ -559,7 +559,7 @@ def !!free(void* ptr) -> void
         movq $0, %rdi
         movq $1, %rsi
         syscall
-    } : : "r"(base), "r"(total) : "rax", "rdi", "rsi", "memory";
+    } : : "r"(base), "r"(total) : "rax", "rdi", "rsi", "rcx", "r11", "memory";
 };
 
 def !!calloc(size_t count, size_t size) -> void*

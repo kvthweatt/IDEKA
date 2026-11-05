@@ -975,6 +975,7 @@ class FunctionDef(ASTNode):
     async_uses: List['AsyncTagUse'] = field(default_factory=list)  # #<Tag>(this, ...) clauses
     pre_contracts: int = 0                   # count of pre-contracts applied: -> rtype : A, B
     post_contracts: int = 0                  # count of post-contracts applied: } : A, B
+    is_naked: bool = False                   # } # naked; no prologue or epilogue, body is inline asm only
 
     # Map IDEKA calling-convention keywords to LLVM CC strings
     _CALLING_CONV_MAP: ClassVar[dict] = {

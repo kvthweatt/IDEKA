@@ -49,6 +49,10 @@ namespace standard
             
 
             // OUTPUT FORWARD DECLARATIONS
+            // Output is collected in a buffer and handed to the OS in large writes. It is flushed when the
+            // buffer fills, before input is read, and when the program ends. flush() forces it out now.
+            def flush() -> void # effect {~IO.Console.Output};
+            def out_write(byte* msg, int x) -> void # effect {~IO.Console.Output};
 #ifdef __WINDOWS__
             def win_print(byte* msg, int x) -> void # effect {~IO.Console.Output};
 #endif;
@@ -183,8 +187,8 @@ namespace standard
                     // fd: 0 (STDIN_FILENO)
                     movq $$0, %rax
                     movq $$0, %rdi
-                    movq $0, %rsi
-                    movq $1, %rdx
+                    movq $1, %rsi
+                    movq $2, %rdx
                     syscall
                 } : "r"(bytes_read) : "r"(buffer), "r"(count)
                   : "rax","rdi","rsi","rdx","rcx","r11","memory";
@@ -243,8 +247,8 @@ namespace standard
                     // fd: 0 (STDIN_FILENO)
                     movq $$0x2000003, %rax
                     movq $$0, %rdi
-                    movq $0, %rsi
-                    movq $1, %rdx
+                    movq $1, %rsi
+                    movq $2, %rdx
                     syscall
                 } : "r"(bytes_read) : "r"(buffer), "r"(count)
                   : "rax","rdi","rsi","rdx","rcx","r11","memory";
@@ -293,6 +297,8 @@ namespace standard
 // INPUT WRAPPER
             def input(byte[] buffer, int max_len) -> int
             {
+                // a prompt printed before this call must be on screen before the program waits
+                flush();
 #ifdef __WINDOWS__
                 return win_input(buffer, max_len);
 #endif; // WINDOWS
@@ -362,6 +368,7 @@ namespace standard
             def reset_from_input() -> void
             {
                 char bs = 8;
+                flush();
                 win_print(@bs,1);
                 win_print(@bs,1);
                 return;
@@ -461,34 +468,66 @@ namespace standard
             };
 #endif; // MACOS
 
+            // OUTPUT BUFFER
+            global byte[8192] out_buf;
+            global int out_len;
+
+            // Writes bytes straight to the OS, bypassing the buffer
+            def out_raw(byte* msg, int x) -> void
+            {
+#ifdef __WINDOWS__
+                win_print(msg, x);
+#endif;
+#ifdef __LINUX__
+                nix_print(msg, x);
+#endif;
+#ifdef __MACOS__
+                mac_print(msg, x);
+#endif;
+                return;
+            };
+
+            def flush() -> void
+            {
+                int n = out_len;
+                if (n == 0) { return; };
+                out_len = 0;
+                out_raw(@out_buf[0], n);
+                return;
+            };
+
+            def out_write(byte* msg, int x) -> void
+            {
+                int i = 0;
+                if (x <= 0) { return; };
+                // a write as large as the buffer gains nothing from it
+                if (x >= 8192)
+                {
+                    flush();
+                    out_raw(msg, x);
+                    return;
+                };
+                if (out_len + x > 8192) { flush(); };
+                while (i < x)
+                {
+                    out_buf[out_len + i] = msg[i];
+                    i++;
+                };
+                out_len = out_len + x;
+                return;
+            };
+
             // GENERIC (noopstr)
             def print(noopstr s, int len) -> void
             {
-#ifdef __WINDOWS__
-                win_print(@s, len);
-#endif;
-#ifdef __LINUX__
-                nix_print(@s, len);
-#endif;
-#ifdef __MACOS__
-                mac_print(@s, len);
-#endif;
+                out_write(@s, len);
                 return;
             };
 
             def print(noopstr s) -> void
             {
                 int len = standard::strings::strlen(@s);
-
-#ifdef __WINDOWS__
-                win_print(@s, len);
-#endif;
-#ifdef __LINUX__
-                nix_print(@s, len);
-#endif;
-#ifdef __MACOS__
-                mac_print(@s, len);
-#endif;
+                out_write(@s, len);
                 return;
             };
 
@@ -748,13 +787,13 @@ namespace standard
             def print() -> void
             {
 #ifdef __WINDOWS__
-                win_print("\r\n", 2);
+                out_write("\r\n", 2);
 #endif;
 #ifdef __LINUX__
-                nix_print("\n", 1);
+                out_write("\n", 1);
 #endif;
 #ifdef __MACOS__
-                mac_print("\n", 1);
+                out_write("\n", 1);
 #endif;
                 return;
             };

@@ -284,7 +284,7 @@ namespace IDEKA
                 r[la + lb + k] = c[k];
                 k++;
             };
-            r[la + lb + lc] = (byte)0;
+            r[la + lb + lc] = 0;
             return r;
         };
 
@@ -309,7 +309,7 @@ namespace IDEKA
                 r[i] = s[i];
                 i++;
             };
-            r[n] = (byte)0;
+            r[n] = 0;
             return r;
         };
 
@@ -583,7 +583,7 @@ namespace IDEKA
                 r[i + j] = name[j];
                 j++;
             };
-            r[i + lb] = (byte)0;
+            r[i + lb] = 0;
             ffree(a);
             return r;
         };
@@ -605,13 +605,13 @@ namespace IDEKA
                         r[j] = ns[j];
                         j++;
                     };
-                    r[i - 1] = (byte)0;
+                    r[i - 1] = 0;
                     return r;
                 };
                 i--;
             };
-            byte* e = (byte*)fmalloc((u64)1);
-            e[0] = (byte)0;
+            byte* e = (byte*)fmalloc(1);
+            e[0] = 0;
             return e;
         };
 
@@ -667,7 +667,7 @@ namespace IDEKA
                 r[i + j] = e.name[j];
                 j++;
             };
-            r[i + lb] = (byte)0;
+            r[i + lb] = 0;
             return r;
         };
 

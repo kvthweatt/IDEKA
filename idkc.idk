@@ -31,6 +31,10 @@ module IDEKA_Compiler_Entrypoint
     #import "src/compiler/iasync.idk";
     #import "src/compiler/ieffects.idk";
     #import "src/compiler/imodules.idk";
+    #import "src/compiler/iasm_elf.idk";
+    #import "src/compiler/iasm_coff.idk";
+    #import "src/compiler/ilink_elf.idk";
+    #import "src/compiler/ilink_pe.idk";
 
     using standard::io::console;
     using standard::io::file;
@@ -44,6 +48,9 @@ module IDEKA_Compiler_Entrypoint
     using IDEKA::typer;
     using IDEKA::ir;
     using IDEKA::codegen;
+    using IDEKA::ilink;
+    using IDEKA::backend;
+    using IDEKA::iasm;
     using IDEKA::dce;
     using IDEKA::borrow;
     using IDEKA::asyncl;
@@ -69,6 +76,9 @@ module IDEKA_Compiler_Entrypoint
         println("  -v, --verbose     Show detailed token information\0");
         println("  -c, --count       Show token count summary\0");
         println("  --warn-as-error   Treat all warnings as errors\0");
+        println("  --asm-only        Emit only the AT&T assembly (llc -filetype=asm) instead of an object file\0");
+        println("  --backend <name>  Code generator backend: x64 (native x86_64 assembly, iasm and ilink, the default) or llvm (LLVM IR, llc and a system linker)\0");
+        println("  --abi <name>      x64 backend calling convention and object format: sysv (ELF) or win64 (COFF), default is the host\0");
         print();
         println("Additional:\0");
         println("  --effects           Check the program's effects");
@@ -115,7 +125,7 @@ module IDEKA_Compiler_Entrypoint
             ffree(buf);
             -> (byte*)0;
         };
-        buf[n] = (byte)0;
+        buf[n] = 0;
         *out_len = n;
         -> buf;
     };
@@ -130,7 +140,7 @@ module IDEKA_Compiler_Entrypoint
             switch (b[r] == 13)
             {
                 case (true) {
-                b[w] = (byte)10;
+                b[w] = 10;
                 w++;
                 if (r + 1 < n & b[r + 1] == 10) { r++; };
             }
@@ -141,7 +151,7 @@ module IDEKA_Compiler_Entrypoint
             };
             r++;
         };
-        b[w] = (byte)0;
+        b[w] = 0;
         -> w;
     };
 
@@ -364,8 +374,7 @@ module IDEKA_Compiler_Entrypoint
     env_is_on(byte* v) -> bool
     {
         Buf lo;
-        int i;
-        int c;
+        int i, c;
         bool r;
         lo.__init();
         defer lo.__exit();
@@ -461,11 +470,7 @@ module IDEKA_Compiler_Entrypoint
     cfg_get(byte* key) -> byte*
     {
         int p = 0;
-        int ls;
-        int eq;
-        int ke;
-        int vs;
-        int ve;
+        int ls, eq, ke, vs, ve;
         int kn = 0;
         int i;
         bool same;
@@ -506,7 +511,7 @@ module IDEKA_Compiler_Entrypoint
                                 r[i] = CFG_TEXT[vs + i];
                                 i++;
                             };
-                            r[i] = (byte)0;
+                            r[i] = 0;
                             -> r;
                         };
                     };
@@ -583,7 +588,7 @@ module IDEKA_Compiler_Entrypoint
         #ifdef __WINDOWS__
         if (_getcwd(@cwd[0], 1024) != (byte*)0) { println(@cwd[0]); ->; };
         #else
-        if (getcwd(@cwd[0], (u64)1024) != (byte*)0) { println(@cwd[0]); ->; };
+        if (getcwd(@cwd[0], 1024) != (byte*)0) { println(@cwd[0]); ->; };
         #endif;
         println(".\0");
         ->;
@@ -621,9 +626,7 @@ module IDEKA_Compiler_Entrypoint
     append_src_loc(Buf* out, Preprocessor* pp, int line, int col) -> void
     {
         int i = line - 1;
-        byte* path;
-        byte* text;
-        byte* base;
+        byte* path, text, base;
         int len, k, ln, ls, le, vcol, w, a, wlen;
         byte c;
         Buf ex;
@@ -758,8 +761,7 @@ module IDEKA_Compiler_Entrypoint
     {
         int n = 0;
         int start = 0;
-        int end;
-        int i;
+        int end, i;
         byte* r;
         while (path[n] != 0) { n++; };
         end = n;
@@ -782,7 +784,7 @@ module IDEKA_Compiler_Entrypoint
             r[i] = path[start + i];
             i++;
         };
-        r[i] = (byte)0;
+        r[i] = 0;
         -> r;
     };
 
@@ -793,8 +795,7 @@ module IDEKA_Compiler_Entrypoint
     {
         #ifdef __WINDOWS__
         byte* dir = cfg_get("llvm_path\0");
-        Buf t;
-        Buf probe;
+        Buf t, probe;
         t.__init();
         probe.__init();
         defer t.__exit();
@@ -888,26 +889,159 @@ module IDEKA_Compiler_Entrypoint
     // Source -> build/<stem>/<stem>.ll -> (opt) -> llc -> object -> linked executable, as ic.py does
     // Set once a module's '#[test] = { #[expect_build_fail] }' is known: a failing build is then the expected result
     bool BUILD_EXPECT_FAIL;
+    // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
+    bool ASM_ONLY;
+    int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
+    bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
+
+    // Assembles the x86_64 text the x64 backend emitted into an ELF or COFF object with iasm
+    iasm_object(byte* text, int len, byte* dst) -> bool
+    {
+        Asm* a;
+        if (X64_ABI == 1) { a = iasm_new_for(IA_FMT_COFF); }
+        else { a = iasm_new_for(IA_FMT_ELF); };
+        if (!iasm_assemble(a, text, len))
+        {
+            print("iasm: line \0");
+            print(a.line);
+            print(": \0");
+            println(a.err);
+            -> false;
+        };
+        if (!iasm_finish(a))
+        {
+            print("iasm: \0");
+            println(a.err);
+            -> false;
+        };
+        bool wrote;
+        if (X64_ABI == 1) { wrote = iasm_write_coff(a, dst); }
+        else { wrote = iasm_write_elf(a, dst); };
+        if (!wrote)
+        {
+            print("iasm: \0");
+            println(a.err);
+            -> false;
+        };
+        -> true;
+    };
+
+    // Links one COFF object into an executable with ilink. Imports come from the SDK import libraries in LIB
+    // when they exist, else from the export tables of the DLLs in System32.
+    native_link_pe(byte* obj, byte* exe, int* rc) -> void
+    {
+        byte** objs = (byte**)fmalloc(8 * 2);
+        byte** libs = (byte**)fmalloc(8 * 24);
+        byte** dirs = (byte**)fmalloc(8 * 64);
+        int nd = 0;
+        int nl = 0;
+        int i, st, n, sub;
+        byte* env = getenv(g"LIB\0");
+        byte* sr = getenv(g"SystemRoot\0");
+        byte* d;
+        byte* lkerr;
+        objs[0] = obj;
+        if (env != (byte*)0)
+        {
+            i = 0;
+            while (env[i] != 0 & nd < 60)
+            {
+                st = i;
+                while (env[i] != 0 & env[i] != 59) { i++; };
+                n = i - st;
+                if (n > 0)
+                {
+                    d = (byte*)fmalloc(n + 1);
+                    st = st;
+                    n = 0;
+                    while (env[st + n] != 0 & env[st + n] != 59) { d[n] = env[st + n]; n++; };
+                    d[n] = 0;
+                    dirs[nd] = d;
+                    nd++;
+                };
+                if (env[i] == 59) { i++; };
+            };
+        };
+        if (sr != (byte*)0)
+        {
+            n = 0;
+            while (sr[n] != 0) { n++; };
+            d = (byte*)fmalloc(n + 16);
+            i = 0;
+            while (i < n) { d[i] = sr[i]; i++; };
+            d[n] = 47; d[n + 1] = 83; d[n + 2] = 121; d[n + 3] = 115; d[n + 4] = 116; d[n + 5] = 101; d[n + 6] = 109; d[n + 7] = 51; d[n + 8] = 50; d[n + 9] = 0;
+            dirs[nd] = d;
+            nd++;
+        };
+        libs[nl] = "legacy_stdio_definitions.lib\0"; nl++;
+        libs[nl] = "kernel32.lib\0"; nl++;
+        libs[nl] = "ucrt.lib\0"; nl++;
+        libs[nl] = "opengl32.lib\0"; nl++;
+        libs[nl] = "Ws2_32.lib\0"; nl++;
+        libs[nl] = "shell32.lib\0"; nl++;
+        libs[nl] = "freetype.lib\0"; nl++;
+        libs[nl] = "ole32.lib\0"; nl++;
+        libs[nl] = "mmdevapi.lib\0"; nl++;
+        libs[nl] = "comdlg32.lib\0"; nl++;
+        libs[nl] = "d2d1.lib\0"; nl++;
+        libs[nl] = "dwrite.lib\0"; nl++;
+        libs[nl] = "user32.lib\0"; nl++;
+        libs[nl] = "gdi32.lib\0"; nl++;
+        libs[nl] = "secur32.lib\0"; nl++;
+        libs[nl] = "crypt32.lib\0"; nl++;
+        libs[nl] = "bcrypt.lib\0"; nl++;
+        libs[nl] = "ncrypt.lib\0"; nl++;
+        libs[nl] = "ntdll.lib\0"; nl++;
+        sub = 3;
+        if (lk_streq(cfg_str("subsystem\0", "console\0"), "windows\0")) { sub = 2; };
+        lkerr = lk_pe_link(objs, 1, libs, nl, dirs, nd, cfg_str("entrypoint\0", "FRTStartup\0"), sub, 67108864, exe);
+        if (lkerr == (byte*)0) { *rc = 0; }
+        else
+        {
+            *rc = 1;
+            print("ilink: \0");
+            println(lkerr);
+        };
+        ->;
+    };
+
+    // Links one ELF object into an executable with ilink. The libc import library is the dynamic libc.
+    native_link_elf(byte* obj, byte* exe, byte* errpath, int* rc) -> void
+    {
+        byte** objs = (byte**)fmalloc(8 * 2);
+        byte** libs = (byte**)fmalloc(8 * 2);
+        byte** dirs = (byte**)fmalloc(8 * 5);
+        byte* lkerr;
+        objs[0] = obj;
+        libs[0] = "libc.so.6\0";
+        dirs[0] = "/lib/x86_64-linux-gnu\0";
+        dirs[1] = "/usr/lib/x86_64-linux-gnu\0";
+        dirs[2] = "/lib64\0";
+        dirs[3] = "/usr/lib\0";
+        dirs[4] = "/lib\0";
+        lkerr = lk_elf_link(objs, 1, libs, 1, dirs, 5, "_start\0", "/lib64/ld-linux-x86-64.so.2\0", exe);
+        if (lkerr == (byte*)0) { *rc = 0; }
+        else
+        {
+            *rc = 1;
+            print("ilink: \0");
+            println(lkerr);
+        };
+        ffree((byte*)objs);
+        ffree((byte*)libs);
+        ffree((byte*)dirs);
+        ->;
+    };
 
     build_output(byte* path, byte* ir_text, byte* outname, byte* layout) -> bool
     {
         byte* stem = path_stem(path);
         byte* ostem = stem;
-        byte* tmp;
-        byte* march;
-        byte* mcpu;
-        Buf cmd;
-        Buf ll;
-        Buf optll;
-        Buf obj;
-        Buf exe;
-        Buf tool;
-        Buf errp;
-        Buf msg;
+        byte* tmp, march, mcpu;
+        Buf cmd, ll, optll, obj, exe, tool, errp, msg;
         void* f;
         int len = 0;
-        int rc;
-        int k;
+        int rc, k;
         bool opt_ok;
         if (outname != (byte*)0) { ostem = path_stem(outname); };
         // A module build keeps every file in build/<name>/<Platform>/<Release|Debug>, named after the module
@@ -941,7 +1075,7 @@ module IDEKA_Compiler_Entrypoint
         ll.put_str(bd_s);
         ll.put_str("\\\0");
         ll.put_str(stem);
-        ll.put_str(".ll\0");
+        if (X64_BACKEND) { ll.put_str(".s\0"); } else { ll.put_str(".ll\0"); };
         optll.put_str("build\\\0");
         optll.put_str(bd_s);
         optll.put_str("\\\0");
@@ -971,7 +1105,7 @@ module IDEKA_Compiler_Entrypoint
         ll.put_str(bd_s);
         ll.put_str("/\0");
         ll.put_str(stem);
-        ll.put_str(".ll\0");
+        if (X64_BACKEND) { ll.put_str(".s\0"); } else { ll.put_str(".ll\0"); };
         optll.put_str("build/\0");
         optll.put_str(bd_s);
         optll.put_str("/\0");
@@ -1023,102 +1157,156 @@ module IDEKA_Compiler_Entrypoint
         fclose(f);
 
         #ifdef __WINDOWS__
-        log_step("compiler\0", "Compiling to object file (Windows)\0");
+        if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Windows)\0"); }
+        else { log_step("compiler\0", "Compiling to object file (Windows)\0"); };
         #else
-        log_step("compiler\0", "Compiling to object file (Linux)\0");
+        if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Linux)\0"); }
+        else { log_step("compiler\0", "Compiling to object file (Linux)\0"); };
         #endif;
 
-        // opt cleans the IR before llc: first available of opt-21, opt-20, opt-19, opt-18, opt
-        tmp = (byte*)ll.mem;
-        k = 0;
-        while (k < 5 & !opt_ok)
+        if (X64_BACKEND)
         {
-            tool.clear();
-            if (k == 0) { opt_ok = resolve_tool(@tool, "opt-21\0"); };
-            if (k == 1) { opt_ok = resolve_tool(@tool, "opt-20\0"); };
-            if (k == 2) { opt_ok = resolve_tool(@tool, "opt-19\0"); };
-            if (k == 3) { opt_ok = resolve_tool(@tool, "opt-18\0"); };
-            if (k == 4) { opt_ok = resolve_tool(@tool, "opt\0"); };
-            #ifndef __WINDOWS__
-            if (opt_ok)
+            if (ASM_ONLY)
             {
-                // PATH probe, as `which` does in ic.py
-                cmd.clear();
-                cmd.put_str("which \0");
-                cmd.put_str(tool.mem);
-                cmd.put_str(" >/dev/null 2>&1\0");
-                opt_ok = run_cmd(cmd.mem) == 0;
+                log_success("Assembly emitted\0");
+                ffree(stem);
+                -> true;
             };
-            #endif;
-            if (!opt_ok) { k++; };
+            log_step("assembler\0", "Assembling with iasm\0");
+            if (!iasm_object(ir_text, len, obj.mem)) { ffree(stem); -> false; };
         };
-        switch (opt_ok)
+        if (!X64_BACKEND)
         {
-            case (true) {
-            cmd.clear();
-            cmd.put_str(tool.mem);
-            cmd.put_str(" -passes=mem2reg,sroa,dce,simplifycfg -S \0");
-            cmd.put_str(ll.mem);
-            cmd.put_str(" -o \0");
-            cmd.put_str(optll.mem);
-            switch (run_cmd(cmd.mem) == 0)
+            // opt cleans the IR before llc: first available of opt-21, opt-20, opt-19, opt-18, opt
+            tmp = (byte*)ll.mem;
+            k = 0;
+            while (k < 5 & !opt_ok)
+            {
+                tool.clear();
+                if (k == 0) { opt_ok = resolve_tool(@tool, "opt-21\0"); };
+                if (k == 1) { opt_ok = resolve_tool(@tool, "opt-20\0"); };
+                if (k == 2) { opt_ok = resolve_tool(@tool, "opt-19\0"); };
+                if (k == 3) { opt_ok = resolve_tool(@tool, "opt-18\0"); };
+                if (k == 4) { opt_ok = resolve_tool(@tool, "opt\0"); };
+                #ifndef __WINDOWS__
+                if (opt_ok)
+                {
+                    // PATH probe, as `which` does in ic.py
+                    cmd.clear();
+                    cmd.put_str("which \0");
+                    cmd.put_str(tool.mem);
+                    cmd.put_str(" >/dev/null 2>&1\0");
+                    opt_ok = run_cmd(cmd.mem) == 0;
+                };
+                #endif;
+                if (!opt_ok) { k++; };
+            };
+            switch (opt_ok)
             {
                 case (true) {
-                tmp = (byte*)optll.mem;
-                log_info("llc\0", "opt IR optimization pass complete\0");
+                cmd.clear();
+                cmd.put_str(tool.mem);
+                cmd.put_str(" -passes=mem2reg,sroa,dce,simplifycfg -S \0");
+                cmd.put_str(ll.mem);
+                cmd.put_str(" -o \0");
+                cmd.put_str(optll.mem);
+                switch (run_cmd(cmd.mem) == 0)
+                {
+                    case (true) {
+                    tmp = (byte*)optll.mem;
+                    log_info("llc\0", "opt IR optimization pass complete\0");
+                }
+                    default { log_warn("llc\0", "opt pass failed, continuing with the unoptimized IR\0"); };
+                };
             }
-                default { log_warn("llc\0", "opt pass failed, continuing with the unoptimized IR\0"); };
+                default { log_warn("llc\0", "opt pass skipped (not available)\0"); };
             };
-        }
-            default { log_warn("llc\0", "opt pass skipped (not available)\0"); };
-        };
 
-        // llc
-        tool.clear();
-        if (!resolve_tool(@tool, "llc\0"))
-        {
-            println("Cannot find llc. Set llvm_path in config/IDEKA_config.cfg or add LLVM to PATH.\0");
-            ffree(stem);
-            -> false;
-        };
-        cmd.clear();
-        cmd.put_str(tool.mem);
-        cmd.put_str(" -O3 -filetype=obj\0");
-        #ifdef __WINDOWS__
-        cmd.put_str(" -mtriple=x86_64-pc-windows-msvc\0");
-        #endif;
-        march = cfg_get("architecture\0");
-        mcpu = cfg_get("cpu\0");
-        #ifndef __WINDOWS__
-        if (is_none(march)) { march = "x86-64\0"; };
-        if (is_none(mcpu)) { mcpu = "native\0"; };
-        #endif;
-        if (!is_none(march))
-        {
-            cmd.put_str(" -march=\0");
-            cmd.put_str(march);
-        };
-        if (!is_none(mcpu))
-        {
-            cmd.put_str(" -mcpu=\0");
-            cmd.put_str(mcpu);
-        };
-        cmd.put_str(" -enable-misched -enable-tail-merge -optimize-regalloc -relocation-model=pic -tail-dup-size=3 -tailcallopt -no-x86-call-frame-opt -x86-use-base-pointer -disable-verify \0");
-        #ifdef __WINDOWS__
-        cmd.put_str("-x86-asm-syntax=intel \0");
-        #endif;
-        cmd.put_str(tmp);
-        cmd.put_str(" -o \0");
-        cmd.put_str(obj.mem);
-        rc = run_cmd(cmd.mem);
-        if (rc != 0)
-        {
-            msg.put_str("llc failed with code \0");
-            msg.put_int(rc);
-            msg.put(0);
-            log_error("llc\0", msg.mem);
-            ffree(stem);
-            -> false;
+            // llc
+            tool.clear();
+            if (!resolve_tool(@tool, "llc\0"))
+            {
+                println("Cannot find llc. Set llvm_path in config/IDEKA_config.cfg or add LLVM to PATH.\0");
+                ffree(stem);
+                -> false;
+            };
+            cmd.clear();
+            cmd.put_str(tool.mem);
+            if (ASM_ONLY) { cmd.put_str(" -O3 -filetype=asm\0"); }
+            else { cmd.put_str(" -O3 -filetype=obj\0"); };
+            #ifdef __WINDOWS__
+            cmd.put_str(" -mtriple=x86_64-pc-windows-msvc\0");
+            #endif;
+            march = cfg_get("architecture\0");
+            mcpu = cfg_get("cpu\0");
+            #ifndef __WINDOWS__
+            if (is_none(march)) { march = "x86-64\0"; };
+            if (is_none(mcpu)) { mcpu = "native\0"; };
+            #endif;
+            if (!is_none(march))
+            {
+                cmd.put_str(" -march=\0");
+                cmd.put_str(march);
+            };
+            if (!is_none(mcpu))
+            {
+                cmd.put_str(" -mcpu=\0");
+                cmd.put_str(mcpu);
+            };
+            cmd.put_str(" -enable-misched -enable-tail-merge -optimize-regalloc -relocation-model=pic -tail-dup-size=3 -tailcallopt -no-x86-call-frame-opt -x86-use-base-pointer -disable-verify \0");
+            #ifdef __WINDOWS__
+            if (!ASM_ONLY) { cmd.put_str("-x86-asm-syntax=intel \0"); };
+            #endif;
+            cmd.put_str(tmp);
+            cmd.put_str(" -o \0");
+            if (ASM_ONLY)
+            {
+                if (layout != (byte*)0)
+                {
+                    // Module build: the assembly sits with the other build files, as <stem>.s
+                    msg.clear();
+                    #ifdef __WINDOWS__
+                    msg.put_str("build\\\0");
+                    msg.put_str(bd_s);
+                    msg.put_str("\\\0");
+                    #else
+                    msg.put_str("build/\0");
+                    msg.put_str(bd_s);
+                    msg.put_str("/\0");
+                    #endif;
+                    msg.put_str(stem);
+                    msg.put_str(".s\0");
+                    cmd.put_str(msg.mem);
+                }
+                else
+                {
+                    if (outname != (byte*)0) { cmd.put_str(outname); }
+                    else
+                    {
+                        cmd.put_str(stem);
+                        cmd.put_str(".s\0");
+                    };
+                };
+            }
+            else { cmd.put_str(obj.mem); };
+            rc = run_cmd(cmd.mem);
+            if (rc != 0)
+            {
+                msg.put_str("llc failed with code \0");
+                msg.put_int(rc);
+                msg.put(0);
+                log_error("llc\0", msg.mem);
+                ffree(stem);
+                -> false;
+            };
+
+            if (ASM_ONLY)
+            {
+                log_success("Assembly emitted\0");
+                ffree(stem);
+                -> true;
+            };
+
         };
 
         // Link
@@ -1129,6 +1317,12 @@ module IDEKA_Compiler_Entrypoint
         log_step("linker\0", msg.mem);
         cmd.clear();
         #ifdef __WINDOWS__
+        if (X64_BACKEND)
+        {
+            native_link_pe(obj.mem, exe.mem, @rc);
+        }
+        else
+        {
         tool.clear();
         if (!resolve_tool(@tool, cfg_str("linker\0", "lld-link\0")))
         {
@@ -1172,6 +1366,8 @@ module IDEKA_Compiler_Entrypoint
         cmd.put_str(" \0");
         cmd.put_str(obj.mem);
         put_win_libs(@cmd);
+        // iasm objects carry no default library directives, so the native runtime imports (__chkstk, Rtl*) are named here
+        if (X64_BACKEND) { cmd.put_str(" ntdll.lib\0"); };
         cmd.put_str(" /out:\0");
         cmd.put_str(exe.mem);
         cmd.put_str(" 2>\0");
@@ -1192,14 +1388,25 @@ module IDEKA_Compiler_Entrypoint
                 cmd.put_str(exe.mem);
                 cmd.put_str(" -fuse-ld=lld-link -Os -flto -fvisibility=hidden -fmerge-all-constants -fno-unwind-tables -fno-asynchronous-unwind-tables -nodefaultlibs -Wl,/OPT:REF -Wl,/OPT:ICF -Wl,/DEBUG:NONE -Wl,/INCREMENTAL:NO -Wl,/LTCG -Wl,/MERGE:.rdata=.text -Wl,/ENTRY:\0");
                 cmd.put_str(cfg_str("entrypoint\0", "FRTStartup\0"));
-                cmd.put_str(" -Wl,/SUBSYSTEM:CONSOLE -lkernel32 -lntdll -ldwmapi -lucrt -lWs2_32 -luser32 -lgdi32 -lopengl32 -lcomdlg32 -lole32 -lmmdevapi -ld2d1 -ldwrite -lmsvcrt -lsecur32 -lcrypt32 -lbcrypt -lncrypt -llegacy_stdio_definitions\0");
+                cmd.put_str(" -Wl,/SUBSYSTEM:CONSOLE -Wl,/STACK:67108864 -lkernel32 -lntdll -ldwmapi -lucrt -lWs2_32 -luser32 -lgdi32 -lopengl32 -lcomdlg32 -lole32 -lmmdevapi -ld2d1 -ldwrite -lmsvcrt -lsecur32 -lcrypt32 -lbcrypt -lncrypt -llegacy_stdio_definitions\0");
                 rc = run_cmd(cmd.mem);
             };
         };
+        };
         #else
+        if (X64_BACKEND)
+        {
+            // native linker: the objects iasm wrote become an executable with no system linker
+            native_link_elf(obj.mem, exe.mem, errp.mem, @rc);
+        }
+        else
+        {
         cmd.put_str("ld --gc-sections --as-needed --strip-all --build-id=none --no-eh-frame-hdr --no-ld-generated-unwind-info -z noseparate-code -z norelro -z now -z noexecstack -z max-page-size=0x1000 -z common-page-size=0x1000 -z defs --hash-style=gnu --sort-section=alignment --compress-debug-sections=none --fatal-warnings -Map \0");
         cmd.put_str(exe.mem);
-        cmd.put_str(".map --orphan-handling=place -Ttext-segment=0x400000 --section-start .rodata=0x500000 --section-start .data=0x600000 --section-start .bss=0x700000 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -e _start \0");
+        cmd.put_str(".map --orphan-handling=place -Ttext-segment=0x400000 \0");
+        // the llvm layout pins sections 1MB apart; native x64 code is larger than that, so ld places them
+        if (!X64_BACKEND) { cmd.put_str("--section-start .rodata=0x500000 --section-start .data=0x600000 --section-start .bss=0x700000 \0"); };
+        cmd.put_str("-dynamic-linker /lib64/ld-linux-x86-64.so.2 -e _start \0");
         cmd.put_str(obj.mem);
         cmd.put_str(" -L/usr/lib/x86_64-linux-gnu -L/usr/lib -L/lib/x86_64-linux-gnu -L/lib --start-group -lc --end-group -o \0");
         cmd.put_str(exe.mem);
@@ -1207,6 +1414,7 @@ module IDEKA_Compiler_Entrypoint
         cmd.put_str(errp.mem);
         rc = run_cmd(cmd.mem);
         report_link(errp.mem, rc);
+        };
         #endif;
         if (rc != 0)
         {
@@ -1243,9 +1451,19 @@ module IDEKA_Compiler_Entrypoint
             -> 1;
         };
 
-        bool lex_mode, pp_mode, parse_mode, check_mode, dump_mode, verbose, show_count, emit_mode, full_mode;
-        bool borrow_mode, borrow_warn;
-        bool effects_mode, effects_warn, warn_as_error;
+        // the native x86-64 pipeline is the default where it exists: source -> asm -> iasm -> ilink
+        #ifdef __ARCH_X86_64__
+        #ifdef __LINUX__
+        X64_BACKEND = true;
+        #endif;
+        #ifdef __WINDOWS__
+        X64_BACKEND = true;
+        #endif;
+        #endif;
+        #ifdef __WINDOWS__
+        X64_ABI = 1;
+        #endif;
+        bool lex_mode, pp_mode, parse_mode, check_mode, dump_mode, verbose, show_count, emit_mode, full_mode, borrow_mode, borrow_warn, effects_mode, effects_warn, warn_as_error;
         byte* entry_name = (byte*)0;
         byte* module_sel;
         byte* path = (byte*)0;
@@ -1255,6 +1473,29 @@ module IDEKA_Compiler_Entrypoint
         while (i < argc)
         {
             a = argv[i];
+            if (arg_eq(a, "--backend", 9))
+            {
+                i++;
+                if (i >= argc) { println("--backend needs a name: llvm or x64\0"); usage(); -> 1; };
+                if (arg_eq(argv[i], "x64", 3)) { X64_BACKEND = true; i++; continue; };
+                if (arg_eq(argv[i], "llvm", 4)) { X64_BACKEND = false; i++; continue; };
+                print("Unknown backend: \0");
+                println(argv[i]);
+                usage();
+                -> 1;
+            };
+            if (arg_eq(a, "--abi", 5))
+            {
+                i++;
+                if (i >= argc) { println("--abi needs a name: sysv or win64\0"); usage(); -> 1; };
+                if (arg_eq(argv[i], "sysv", 4)) { X64_ABI = 0; i++; continue; };
+                if (arg_eq(argv[i], "win64", 5)) { X64_ABI = 1; i++; continue; };
+                print("Unknown abi: \0");
+                println(argv[i]);
+                usage();
+                -> 1;
+            };
+            if (arg_eq(a, "--asm-only", 10)) { ASM_ONLY = true; i++; continue; };
             if (arg_eq(a, "--warn-as-error", 15)) { warn_as_error = true; i++; continue; };
             if (arg_eq(a, "--effects-warn", 14)) { effects_mode = true; effects_warn = true; i++; continue; };
             if (arg_eq(a, "--effects", 9)) { effects_mode = true; i++; continue; };
@@ -1776,9 +2017,10 @@ module IDEKA_Compiler_Entrypoint
             };
             if (emit_mode)
             {
-                log_step("codegen\0", "LLVM IR code generation\0");
+                if (X64_BACKEND) { log_step("codegen\0", "x86_64 assembly generation\0"); } else { log_step("codegen\0", "LLVM IR code generation\0"); };
                 IDKC_SYMTABLE* est = st_new();
                 defer st_free(est);
+                if (X64_BACKEND) { set_target(BK.X64); set_abi(X64_ABI); };
                 CodeGen cg(est);
                 defer cg.__exit();
                 cg.null_term = cfg_int("null_terminate_strings\0", 0) == 1;
@@ -1838,7 +2080,34 @@ module IDEKA_Compiler_Entrypoint
                         node_free(prog);
                         -> 1;
                     };
+                    if (X64_BACKEND & cg.mod.unsupported() > 0)
+                    {
+                        print("x64 backend: \0");
+                        print(cg.mod.unsupported());
+                        println(" unsupported construct(s), not assembling.\0");
+                        node_free(prog);
+                        -> 1;
+                    };
                     if (!build_output(path, ob.mem, build_name, layout)) { node_free(prog); -> 1; };
+                    node_free(prog);
+                    -> 0;
+                };
+                if (X64_BACKEND)
+                {
+                    println(ob.mem);
+                    print("# unsupported: \0");
+                    println(cg.mod.unsupported());
+                    print("# bodies generated: \0");
+                    println(cg.nbodies);
+                    print("# skipped: \0");
+                    println(cg.nskipped);
+                    if (cg.nerrors > 0)
+                    {
+                        print("# codegen errors: \0");
+                        println(cg.nerrors);
+                        print("# first: \0");
+                        println(cg.err_msg);
+                    };
                     node_free(prog);
                     -> 0;
                 };
@@ -1988,7 +2257,7 @@ module IDEKA_Compiler_Entrypoint
         int rc;
         #ifdef __WINDOWS__
         u32 old_cp = GetConsoleOutputCP();
-        SetConsoleOutputCP((u32)65001);
+        SetConsoleOutputCP(65001);
         rc = idkc_main(argc, argv);
         SetConsoleOutputCP(old_cp);
         #else

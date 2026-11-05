@@ -260,7 +260,7 @@ namespace IDEKA
                     fixed.put_n(raw + after_start, rn - after_start);
                     // rstrip
                     while (fixed.len > 0 & is_space((int)fixed.mem[fixed.len - 1])) { fixed.len--; };
-                    fixed.mem[fixed.len] = (byte)0;
+                    fixed.mem[fixed.len] = 0;
                     starts = false;
                     if (fixed.len >= bn)
                     {

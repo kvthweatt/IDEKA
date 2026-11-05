@@ -264,7 +264,7 @@ namespace IDEKA
                 this.mb.len = 0;
                 switch (this.mb.mem != (byte*)0)
                 {
-                    case (true) { this.mb.mem[0] = (byte)0; }
+                    case (true) { this.mb.mem[0] = 0; }
                     default {};
                 };
                 ->;
@@ -333,7 +333,7 @@ namespace IDEKA
                         default {};
                     };
                     this.mb.len = mark;
-                    this.mb.mem[mark] = (byte)0;
+                    this.mb.mem[mark] = 0;
                 }
                     default {};
                 };
@@ -469,10 +469,7 @@ namespace IDEKA
                 int i, src_w, dst_w, lw, rw, result_w, max_w, expr_w, ret_w;
                 bool violated, src_match, dst_match;
                 Node* n;
-                TypeSpec* s;
-                TypeSpec* d;
-                TypeSpec* ls;
-                TypeSpec* rs;
+                TypeSpec* s, d, ls, rs;
 
                 while (i < nodes.len)
                 {
@@ -795,11 +792,8 @@ namespace IDEKA
 
                         int r, a, b, k;
                         Node* rel;
-                        byte* op;
-                        byte* lname;
-                        byte* rname;
-                        TypeSpec* lts;
-                        TypeSpec* rts;
+                        byte* op, lname, rname;
+                        TypeSpec* lts, rts;
                         int nl, nr;
                         while (r < relations.len)
                         {
@@ -924,8 +918,7 @@ namespace IDEKA
             // Text after the last "__" of a mangled name
             seg_of(byte* name) -> byte*
             {
-                int i;
-                int cut;
+                int i, cut;
                 while (name[i]!?)
                 {
                     switch (name[i] == '_' & name[i + 1] == '_') { case (true) { cut = i + 2; } default {}; };
@@ -1139,7 +1132,7 @@ namespace IDEKA
                                                                 full[i + 2 + j] = n.text[j];
                                                                 j++;
                                                             };
-                                                            full[i + 2 + lb] = (byte)0;
+                                                            full[i + 2 + lb] = 0;
                                                         };
                                                         };
                                                         st_define(this.st, n.text, SymbolKind.NAMESPACE, (TypeSpec*)0, n);

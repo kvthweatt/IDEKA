@@ -200,17 +200,14 @@ namespace IDEKA
 
         object Dce
         {
-            NameMap* prims;
-            NameMap* live;
+            NameMap* prims, live;
             NameMap* nsf;       // namespace functions by every suffix and by name__N
             NameMap* tlf;       // top level functions
             NameMap* objm;      // object methods by every suffix
             NameMap* objmq;     // object methods by suffixes that contain Object__method
             NameMap* owner;     // method pointer -> bare object name
             PtrVec* keep;       // heap blocks owned until the end
-            Buf sb;
-            Buf kb;
-            Buf kb2;
+            Buf sb, kb, kb2;
             byte* entry;
             PtrVec* extra_roots;    // byte* names a later pass references (mangled with __)
             PtrVec* usedns;         // byte* mangled paths of the top level using statements
@@ -377,11 +374,9 @@ namespace IDEKA
             // _RefCollector._add: a name and all its suffix variants
             add_ref(NameMap* refs, byte* name) -> void
             {
-                Buf nb;
-                Buf db;
+                Buf nb, db;
                 int i = 0;
-                int r;
-                int k;
+                int r, k;
                 bool dot = false;
                 switch (name == (byte*)0)
                 {
@@ -644,9 +639,7 @@ namespace IDEKA
 
             collect(NameMap* refs, Node* n) -> void
             {
-                int k;
-                int i;
-                int c;
+                int k, i, c;
                 Node* o;
                 switch (n == (Node*)0)
                 {
@@ -1029,15 +1022,9 @@ namespace IDEKA
             index_ns(Node* ns, byte* prefix) -> void
             {
                 byte* cur = this.child_prefix(prefix, ns);
-                int c;
-                int i;
-                int j;
-                int mc;
-                Node* f;
-                Node* o;
-                Node* m;
-                byte* full;
-                byte* anchor;
+                int c, i, j, mc;
+                Node* f, o, m;
+                byte* full, anchor;
                 Buf kq;
                 byte* key;
                 c = dce_count(ns, 0);
@@ -1176,7 +1163,12 @@ namespace IDEKA
                             case (true) { -> true; }
                             default
                             {
-                                -> cstr_eq(f.text, g"_start\0");
+                                // _start is the Linux entry, __chkstk is called by the x86-64 Windows backend for large frames
+                                switch (cstr_eq(f.text, g"_start\0"))
+                                {
+                                    case (true) { -> true; }
+                                    default { -> cstr_eq(f.text, g"__chkstk\0"); };
+                                };
                             };
                         };
                     };
@@ -1239,8 +1231,7 @@ namespace IDEKA
             {
                 NameMap* cur = frontier;
                 NameMap* nxt;
-                int e;
-                int i;
+                int e, i;
                 bool has_count;
                 PtrVec* funcs;
                 Node* f;
@@ -1333,9 +1324,7 @@ namespace IDEKA
             type_field_refs(Node* ns, byte* prefix, NameMap* out) -> void
             {
                 byte* cur = this.child_prefix(prefix, ns);
-                int s;
-                int c;
-                int i;
+                int s, c, i;
                 Node* d;
                 while (s < 2)
                 {
@@ -1393,17 +1382,10 @@ namespace IDEKA
             {
                 byte* cur = this.child_prefix(prefix, ns);
                 int c = dce_count(ns, 2);
-                int i;
-                int j;
-                int mc;
-                int e;
-                int q;
-                Node* o;
-                Node* m;
+                int i, j, mc, e, q;
+                Node* o, m;
                 bool refd;
-                byte* full;
-                byte* anchor;
-                byte* v;
+                byte* full, anchor, v;
                 Buf kq;
                 kq.__init();
                 defer kq.__exit();
@@ -1529,9 +1511,7 @@ namespace IDEKA
             seed_externs(Node* ns, NameMap* seed) -> void
             {
                 int c = dce_count(ns, 5);
-                int i;
-                int j;
-                int dc;
+                int i, j, dc;
                 Node* b;
                 while (i < c)
                 {
@@ -1606,8 +1586,7 @@ namespace IDEKA
             seed_ns_operators(Node* ns, byte* prefix, NameMap* seed) -> void
             {
                 byte* cur = this.child_prefix(prefix, ns);
-                int c;
-                int i;
+                int c, i;
                 Node* f;
                 byte* full;
                 switch (this.ns_used(cur))
@@ -1689,21 +1668,14 @@ namespace IDEKA
             compute_live(Node* prog) -> void
             {
                 NameMap* seed = nm_new();
-                NameMap* walked;
-                NameMap* bare;
-                NameMap* types;
-                Node* s;
-                Node* ns;
+                NameMap* walked, bare, types;
+                Node* s, ns;
                 int c = dce_count(prog, 0);
-                int i;
-                int e;
-                int j;
-                int before;
+                int i, e, j, before;
                 bool progressed;
                 PtrVec* ms;
                 Node* m;
-                byte* on;
-                byte* key;
+                byte* on, key;
                 Buf eb;
                 eb.__init();
                 defer eb.__exit();
@@ -1984,8 +1956,7 @@ namespace IDEKA
             // Removes entries of list v (slot of node n) whose name is not live
             prune_named(NodeVec* v, byte* prefix) -> void
             {
-                int i;
-                int k;
+                int i, k;
                 Node* d;
                 bool keepd;
                 switch (v == (NodeVec*)0)
@@ -2038,19 +2009,11 @@ namespace IDEKA
                 byte* cur = this.child_prefix(prefix, ns);
                 NodeVec* v;
                 NameMap* counted;
-                int i;
-                int k;
-                int j;
-                int jk;
-                Node* f;
-                Node* o;
-                Node* m;
-                bool lv;
-                bool keepd;
-                byte* full;
-                byte* anchor;
-                Buf kq;
-                Buf fq;
+                int i, k, j, jk;
+                Node* f, o, m;
+                bool lv, keepd;
+                byte* full, anchor;
+                Buf kq, fq;
                 kq.__init();
                 fq.__init();
                 defer kq.__exit();
@@ -2332,11 +2295,8 @@ namespace IDEKA
             // eliminate(): prunes prog in place and returns the number of removed declarations
             run(Node* prog) -> int
             {
-                int c;
-                int i;
-                int k;
-                Node* s;
-                Node* ns;
+                int c, i, k;
+                Node* s, ns;
                 bool keepd;
                 this.compute_live(prog);
                 c = dce_count(prog, 0);

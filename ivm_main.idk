@@ -1,14 +1,14 @@
 // Author: Karac V. Thweatt
 //
-// ivm_main.idk - IDEKA Virtual Machine, stand alone entry point (port of _fvm_main in idkvm.py)
+// ivm_main.idk - IDEKA Virtual Machine, stand alone entry point (port of _idkvm_main in idkvm.py)
 //
 // Usage:
-//     fvm <program.ivm>
+//     idkvm <program.ivm>
 //
 // Runs a .ivm opcode file on the IDEKA Virtual Machine. The VM itself lives in
 // src/compiler/idkvm.idk, a library with no main, which the compiler uses as well.
 //
-// Errors are printed with the "fvm:" prefix. This project has no stderr facility,
+// Errors are printed with the "idkvm:" prefix. This project has no stderr facility,
 // so they go to standard output.
 
 module IDEKA_Virtual_Machine_Entrypoint
@@ -19,19 +19,19 @@ module IDEKA_Virtual_Machine_Entrypoint
 
     using standard::io::console;
     using standard::io::file;
-    using IDEKA::fvm;
+    using IDEKA::IDKVM;
 
-    fvm_usage() -> void
+    idkvm_usage() -> void
     {
         println("IDEKA VM\0");
-        println("Usage: fvm <program.ivm>\0");
-        println("       fvm <program.idkb>\0");
-        println("       fvm <program.ivm> -o <out.idkb>\0");
-        println("       fvm <program.idkb> -o <out.ivm>\0");
-        println("       fvm --compile <program.ivm> [out.idkb]\0");
-        println("       fvm --decompile <program.idkb> [out.ivm]\0");
-        println("       fvm --inspect <program.ivm|program.idkb>\0");
-        println("       fvm --strings <program.ivm|program.idkb>\0");
+        println("Usage: idkvm <program.ivm>\0");
+        println("       idkvm <program.idkb>\0");
+        println("       idkvm <program.ivm> -o <out.idkb>\0");
+        println("       idkvm <program.idkb> -o <out.ivm>\0");
+        println("       idkvm --compile <program.ivm> [out.idkb]\0");
+        println("       idkvm --decompile <program.idkb> [out.ivm]\0");
+        println("       idkvm --inspect <program.ivm|program.idkb>\0");
+        println("       idkvm --strings <program.ivm|program.idkb>\0");
         println("\0");
         println("Runs a .ivm opcode file or an IDKB binary on the IDEKA Virtual Machine.\0");
         println("The file type is detected from its contents (IDKB binaries start with IDKB).\0");
@@ -52,7 +52,7 @@ module IDEKA_Virtual_Machine_Entrypoint
 
     // Reads the whole file into a heap buffer, null terminated. Returns null on failure.
     // *out_len receives the number of bytes read.
-    fvm_read_text(byte* path, int* out_len) -> byte*
+    idkvm_read_text(byte* path, int* out_len) -> byte*
     {
         void* f = fopen(path, "rb\0");
         if (f == (void*)0) { -> (byte*)0; };
@@ -86,14 +86,14 @@ module IDEKA_Virtual_Machine_Entrypoint
     };
 
     // Lowercase hex digit character of v (0 to 15)
-    fvm_hex_digit(int v) -> int
+    idkvm_hex_digit(int v) -> int
     {
         if (v < 10) { -> 48 + v; };
         -> 87 + v;
     };
 
     // Prints the repr of a Val: Val(<tag>, <data>). BYTES data shows as b'...'.
-    fvm_print_val(int tag, i64 d, i64 m) -> void
+    idkvm_print_val(int tag, i64 d, i64 m) -> void
     {
         FvmBuf nb;
         byte* p;
@@ -101,11 +101,11 @@ module IDEKA_Virtual_Machine_Entrypoint
         nb.__init();
         defer nb.__exit();
         print("Val(\0");
-        print(fvm_ttag_name(tag));
+        print(idkvm_ttag_name(tag));
         print(", \0");
-        if (tag == FVM_T_BYTES)
+        if (tag == IDKVM_T_BYTES)
         {
-            p = fvm_i2p(d);
+            p = idkvm_i2p(d);
             n = (int)m;
             nb.put(98);
             nb.put(39);
@@ -128,8 +128,8 @@ module IDEKA_Virtual_Machine_Entrypoint
                             {
                                 nb.put(92);
                                 nb.put(120);
-                                nb.put(fvm_hex_digit((c >> 4) `& 15));
-                                nb.put(fvm_hex_digit(c `& 15));
+                                nb.put(idkvm_hex_digit((c >> 4) `& 15));
+                                nb.put(idkvm_hex_digit(c `& 15));
                             };
                         };
                     };
@@ -149,7 +149,7 @@ module IDEKA_Virtual_Machine_Entrypoint
     };
 
     // [emit:global] <hex of the snapshot bytes>
-    fvm_print_hex(byte* mem, int n) -> void
+    idkvm_print_hex(byte* mem, int n) -> void
     {
         FvmBuf nb;
         int i;
@@ -157,8 +157,8 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer nb.__exit();
         while (i < n)
         {
-            nb.put(fvm_hex_digit(((int)mem[i] >> 4) `& 15));
-            nb.put(fvm_hex_digit((int)mem[i] `& 15));
+            nb.put(idkvm_hex_digit(((int)mem[i] >> 4) `& 15));
+            nb.put(idkvm_hex_digit((int)mem[i] `& 15));
             i++;
         };
         println(nb.mem);
@@ -167,13 +167,13 @@ module IDEKA_Virtual_Machine_Entrypoint
 
     // Compiles .ivm text to an IDKB binary, written to out or, when out is null, to the input path
     // with its extension replaced by .idkb
-    fvm_compile(byte* inp, byte* outf) -> int
+    idkvm_compile(byte* inp, byte* outf) -> int
     {
         int len, k, dot;
-        byte* text = fvm_read_text(inp, @len);
+        byte* text = idkvm_read_text(inp, @len);
         if (text == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(inp);
             println("'\0");
             -> 1;
@@ -184,14 +184,14 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer vm.__exit();
         if (!vm.ok)
         {
-            println("fvm: out of memory\0");
+            println("idkvm: out of memory\0");
             ffree(text);
             -> 1;
         };
 
-        if (!vm.load_fvm(text, len))
+        if (!vm.load_idkvm(text, len))
         {
-            print("fvm: parse error in \0");
+            print("idkvm: parse error in \0");
             print(inp);
             print(": \0");
             println(vm.err_text());
@@ -231,7 +231,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         void* f = fopen(outp.mem, "wb\0");
         if (f == (void*)0)
         {
-            print("fvm: cannot write '\0");
+            print("idkvm: cannot write '\0");
             print(outp.mem);
             println("'\0");
             -> 1;
@@ -242,13 +242,13 @@ module IDEKA_Virtual_Machine_Entrypoint
     };
 
     // Prints an IDKB binary as .ivm text, or writes it to outf when outf is given
-    fvm_decompile(byte* inp, byte* outf) -> int
+    idkvm_decompile(byte* inp, byte* outf) -> int
     {
         int len;
-        byte* image = fvm_read_text(inp, @len);
+        byte* image = idkvm_read_text(inp, @len);
         if (image == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(inp);
             println("'\0");
             -> 1;
@@ -259,7 +259,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer vm.__exit();
         if (!vm.ok)
         {
-            println("fvm: out of memory\0");
+            println("idkvm: out of memory\0");
             ffree(image);
             -> 1;
         };
@@ -269,7 +269,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer o.__exit();
         if (!vm.decompile_bin(image, len, @o))
         {
-            print("fvm: parse error in \0");
+            print("idkvm: parse error in \0");
             print(inp);
             print(": \0");
             println(vm.err_text());
@@ -283,7 +283,7 @@ module IDEKA_Virtual_Machine_Entrypoint
             void* f = fopen(outf, "w\0");
             if (f == (void*)0)
             {
-                print("fvm: cannot write '\0");
+                print("idkvm: cannot write '\0");
                 print(outf);
                 println("'\0");
                 -> 1;
@@ -297,39 +297,39 @@ module IDEKA_Virtual_Machine_Entrypoint
     };
 
     // True when the file starts with the IDKB magic
-    fvm_is_bin(byte* text, int len) -> bool
+    idkvm_is_bin(byte* text, int len) -> bool
     {
         -> len >= 4 & text[0] == 'I' & text[1] == 'D' & text[2] == 'K' & text[3] == 'B';
     };
 
     // -o on a plain run: the IDKB binary of .ivm text, the .ivm text of an IDKB binary
-    fvm_convert(byte* inp, byte* outf) -> int
+    idkvm_convert(byte* inp, byte* outf) -> int
     {
         int len;
         bool bin;
-        byte* text = fvm_read_text(inp, @len);
+        byte* text = idkvm_read_text(inp, @len);
         if (text == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(inp);
             println("'\0");
             -> 1;
         };
-        bin = fvm_is_bin(text, len);
+        bin = idkvm_is_bin(text, len);
         ffree(text);
-        if (bin) { -> fvm_decompile(inp, outf); };
-        -> fvm_compile(inp, outf);
+        if (bin) { -> idkvm_decompile(inp, outf); };
+        -> idkvm_compile(inp, outf);
     };
 
     // --inspect: the format, sizes, structs, functions and instruction counts of a file
-    fvm_inspect(byte* inp) -> int
+    idkvm_inspect(byte* inp) -> int
     {
         int len;
         bool ok;
-        byte* text = fvm_read_text(inp, @len);
+        byte* text = idkvm_read_text(inp, @len);
         if (text == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(inp);
             println("'\0");
             -> 1;
@@ -340,7 +340,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer vm.__exit();
         if (!vm.ok)
         {
-            println("fvm: out of memory\0");
+            println("idkvm: out of memory\0");
             ffree(text);
             -> 1;
         };
@@ -354,7 +354,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         ok = vm.inspect_file(text, len, @o);
         if (!ok)
         {
-            print("fvm: parse error in \0");
+            print("idkvm: parse error in \0");
             print(inp);
             print(": \0");
             println(vm.err_text());
@@ -367,13 +367,13 @@ module IDEKA_Virtual_Machine_Entrypoint
     };
 
     // --strings: the string table of a file, one escaped string per line in order of first use
-    fvm_strings(byte* inp) -> int
+    idkvm_strings(byte* inp) -> int
     {
         int len;
-        byte* text = fvm_read_text(inp, @len);
+        byte* text = idkvm_read_text(inp, @len);
         if (text == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(inp);
             println("'\0");
             -> 1;
@@ -384,7 +384,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer vm.__exit();
         if (!vm.ok)
         {
-            println("fvm: out of memory\0");
+            println("idkvm: out of memory\0");
             ffree(text);
             -> 1;
         };
@@ -394,7 +394,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer o.__exit();
         if (!vm.strings_file(text, len, @o))
         {
-            print("fvm: parse error in \0");
+            print("idkvm: parse error in \0");
             print(inp);
             print(": \0");
             println(vm.err_text());
@@ -406,12 +406,12 @@ module IDEKA_Virtual_Machine_Entrypoint
         -> 0;
     };
 
-    fvm_run(int argc, byte** argv) -> int
+    idkvm_run(int argc, byte** argv) -> int
     {
         // With no arguments argv must not be indexed.
         if (argc < 2)
         {
-            fvm_usage();
+            idkvm_usage();
             -> 0;
         };
 
@@ -425,24 +425,24 @@ module IDEKA_Virtual_Machine_Entrypoint
         while (i < argc)
         {
             a = argv[i];
-            if (fvm_streq(a, "--compile\0") | fvm_streq(a, "-c\0")) { mode = 1; }
+            if (idkvm_streq(a, "--compile\0") | idkvm_streq(a, "-c\0")) { mode = 1; }
             else
             {
-                if (fvm_streq(a, "--decompile\0") | fvm_streq(a, "-d\0")) { mode = 2; }
+                if (idkvm_streq(a, "--decompile\0") | idkvm_streq(a, "-d\0")) { mode = 2; }
                 else
                 {
-                    if (fvm_streq(a, "--inspect\0") | fvm_streq(a, "-i\0")) { mode = 3; }
+                    if (idkvm_streq(a, "--inspect\0") | idkvm_streq(a, "-i\0")) { mode = 3; }
                     else
                     {
-                      if (fvm_streq(a, "--strings\0") | fvm_streq(a, "-s\0")) { mode = 5; }
+                      if (idkvm_streq(a, "--strings\0") | idkvm_streq(a, "-s\0")) { mode = 5; }
                       else
                       {
-                        if (fvm_streq(a, "-o\0"))
+                        if (idkvm_streq(a, "-o\0"))
                         {
                             i++;
                             if (i >= argc)
                             {
-                                println("fvm: -o needs a file\0");
+                                println("idkvm: -o needs a file\0");
                                 -> 1;
                             };
                             dst = argv[i];
@@ -467,27 +467,27 @@ module IDEKA_Virtual_Machine_Entrypoint
         {
             switch (mode)
             {
-                case (1) { println("fvm: --compile needs a .ivm file\0"); }
-                case (2) { println("fvm: --decompile needs an IDKB file\0"); }
-                case (3) { println("fvm: --inspect needs a file\0"); }
-                case (4) { println("fvm: -o needs an input file\0"); }
-                case (5) { println("fvm: --strings needs a file\0"); }
-                default { println("fvm: no input file\0"); };
+                case (1) { println("idkvm: --compile needs a .ivm file\0"); }
+                case (2) { println("idkvm: --decompile needs an IDKB file\0"); }
+                case (3) { println("idkvm: --inspect needs a file\0"); }
+                case (4) { println("idkvm: -o needs an input file\0"); }
+                case (5) { println("idkvm: --strings needs a file\0"); }
+                default { println("idkvm: no input file\0"); };
             };
             -> 1;
         };
-        if (mode == 1) { -> fvm_compile(src, dst); };
-        if (mode == 2) { -> fvm_decompile(src, dst); };
-        if (mode == 3) { -> fvm_inspect(src); };
-        if (mode == 4) { -> fvm_convert(src, dst); };
-        if (mode == 5) { -> fvm_strings(src); };
+        if (mode == 1) { -> idkvm_compile(src, dst); };
+        if (mode == 2) { -> idkvm_decompile(src, dst); };
+        if (mode == 3) { -> idkvm_inspect(src); };
+        if (mode == 4) { -> idkvm_convert(src, dst); };
+        if (mode == 5) { -> idkvm_strings(src); };
 
         byte* path = src;
         int len;
-        byte* text = fvm_read_text(path, @len);
+        byte* text = idkvm_read_text(path, @len);
         if (text == (byte*)0)
         {
-            print("fvm: cannot open '\0");
+            print("idkvm: cannot open '\0");
             print(path);
             println("'\0");
             -> 1;
@@ -498,7 +498,7 @@ module IDEKA_Virtual_Machine_Entrypoint
         defer vm.__exit();
         if (!vm.ok)
         {
-            println("fvm: out of memory\0");
+            println("idkvm: out of memory\0");
             ffree(text);
             -> 1;
         };
@@ -511,11 +511,11 @@ module IDEKA_Virtual_Machine_Entrypoint
         }
         else
         {
-            loaded = vm.load_fvm(text, len);
+            loaded = vm.load_idkvm(text, len);
         };
         if (!loaded)
         {
-            print("fvm: parse error in \0");
+            print("idkvm: parse error in \0");
             print(path);
             print(": \0");
             println(vm.err_text());
@@ -526,9 +526,9 @@ module IDEKA_Virtual_Machine_Entrypoint
 
         if (!vm.execute_main())
         {
-            print("fvm: runtime error: \0");
+            print("idkvm: runtime error: \0");
             println(vm.err_text());
-            vm.stubs.report("[FVM]\0");
+            vm.stubs.report("[IDKVM]\0");
             -> 1;
         };
 
@@ -540,45 +540,45 @@ module IDEKA_Virtual_Machine_Entrypoint
         {
             switch (vm.e_kind[i])
             {
-                case (FVM_EMIT_K_CONST)
+                case (IDKVM_EMIT_K_CONST)
                 {
                     print("[emit:const] \0");
-                    fvm_print_val(vm.e_tag[i], vm.e_data[i], vm.e_meta[i]);
+                    idkvm_print_val(vm.e_tag[i], vm.e_data[i], vm.e_meta[i]);
                     println("\0");
                 }
-                case (FVM_EMIT_K_GLOBAL)
+                case (IDKVM_EMIT_K_GLOBAL)
                 {
                     print("[emit:global] \0");
-                    fvm_print_hex(vm.e_text[i], (int)vm.e_data[i]);
+                    idkvm_print_hex(vm.e_text[i], (int)vm.e_data[i]);
                 }
-                case (FVM_EMIT_K_TYPE)
+                case (IDKVM_EMIT_K_TYPE)
                 {
                     print("[emit:type] \0");
-                    fvm_print_val(vm.e_tag[i], vm.e_data[i], vm.e_meta[i]);
+                    idkvm_print_val(vm.e_tag[i], vm.e_data[i], vm.e_meta[i]);
                     println("\0");
                 }
                 default
                 {
                     lint_out.len = 0;
                     lint_out.mem[0] = (byte)0;
-                    fvm_lint_IDEKA(@lint_out, g"[emit:IDEKA] \0", vm.e_text[i], @lint_depth);
+                    idkvm_lint_IDEKA(@lint_out, g"[emit:IDEKA] \0", vm.e_text[i], @lint_depth);
                     print(lint_out.mem);
                 };
             };
             i++;
         };
-        vm.stubs.report("[FVM]\0");
+        vm.stubs.report("[IDKVM]\0");
         -> 0;
     };
 
     main() -> int
     {
-        -> fvm_run(1, (byte**)0);
+        -> idkvm_run(1, (byte**)0);
     };
 
     main(int argc, byte** argv) -> int
     {
-        -> fvm_run(argc, argv);
+        -> idkvm_run(argc, argv);
     };
 }
 #build

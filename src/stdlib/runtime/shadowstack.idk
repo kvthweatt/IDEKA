@@ -361,7 +361,7 @@ namespace standard
                     xorq %r9,   %r9
                     syscall
                     movq %rax, $1
-                } : : "r"(length), "m"(result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "memory";
+                } : : "r"(length), "m"(result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "memory";
                 return result;
             };
 
@@ -376,7 +376,7 @@ namespace standard
                     movq $0,    %rdi
                     movq $1,    %rsi
                     syscall
-                } : : "r"(addr), "r"(length) : "rax", "rdi", "rsi", "memory";
+                } : : "r"(addr), "r"(length) : "rax", "rdi", "rsi", "rcx", "r11", "memory";
                 return;
             };
 
@@ -413,7 +413,7 @@ namespace standard
                     xorq %rdx,  %rdx
                     syscall
                     movq %rax, $1
-                } : : "m"(buf), "m"(ret) : "rax", "rdi", "rsi", "rdx", "memory";
+                } : : "m"(buf), "m"(ret) : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory";
                 if (ret != 8)
                 {
                     return fss_rdtsc();

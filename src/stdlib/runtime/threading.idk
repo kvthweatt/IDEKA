@@ -841,14 +841,14 @@ namespace standard
             #ifdef __ARCH_X86_64__
             volatile asm
             {
-                lea  rdi, [rsp - 16]
-                xor  edi, edi
-                mov  rsi, rdi
-                mov  rax, 228
+                leaq -16(%rsp), %rdi
+                xorl %edi, %edi
+                movq %rdi, %rsi
+                movq $$228, %rax
                 syscall
-                lea  rdi, [rsp - 16]
-                mov  $0, [rdi]
-                mov  $1, [rdi + 8]
+                leaq -16(%rsp), %rdi
+                movq (%rdi), $0
+                movq 8(%rdi), $1
             } : "=r"(ts_sec), "=r"(ts_nsec) : : "rax", "rdi", "rsi", "rcx", "r11", "memory";
             #endif;
             #ifdef __ARCH_ARM64__
@@ -887,13 +887,13 @@ namespace standard
             #ifdef __ARCH_X86_64__
             volatile asm
             {
-                xor  edi, edi
-                lea  rsi, [rsp - 16]
-                mov  rax, 0x20000A9
+                xorl %edi, %edi
+                leaq -16(%rsp), %rsi
+                movq $$0x20000A9, %rax
                 syscall
-                lea  rdi, [rsp - 16]
-                mov  $0, [rdi]
-                mov  $1, [rdi + 8]
+                leaq -16(%rsp), %rdi
+                movq (%rdi), $0
+                movq 8(%rdi), $1
             } : "=r"(ts_sec), "=r"(ts_nsec) : : "rax", "rdi", "rsi", "rcx", "r11", "memory";
             #endif;
             #ifdef __ARCH_ARM64__

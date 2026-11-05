@@ -312,7 +312,7 @@ namespace IDEKA
             {
                 r = (byte*)fmalloc((u64)(sep + 1));
                 while (n < sep) { r[n] = key[n]; n++; };
-                r[sep] = (byte)0;
+                r[sep] = 0;
                 return r;
             };
             return ts_dup(key + sep + 1);

@@ -5,9 +5,9 @@
 // Runs on the parsed, DCE pruned AST. Pointer variables are tracked with the
 // allocation site they refer to; violations are collected, never raised, so the
 // whole program is always walked. The walk, the site naming and the violation
-// texts follow idkbc.py exactly. Behaviour that idkbc.py gets from the FVM
-// (_resolve_site_via_fvm, _eval_index_via_fvm, _resolve_fptr_expr) takes the same
-// path idkbc.py takes when the FVM is not available: the result is "unknown" or
+// texts follow idkbc.py exactly. Behaviour that idkbc.py gets from the IDKVM
+// (_resolve_site_via_idkvm, _eval_index_via_idkvm, _resolve_fptr_expr) takes the same
+// path idkbc.py takes when the IDKVM is not available: the result is "unknown" or
 // not determinable. Only integer literal sizes and indices are evaluated.
 //
 // Site names:
@@ -158,7 +158,7 @@ namespace IDEKA
                         r[j] = s[j];
                         j++;
                     };
-                    r[start - 2] = (byte)0;
+                    r[start - 2] = 0;
                     return r;
                 };
                 if (s[pend] == 0) { break; };
@@ -171,9 +171,7 @@ namespace IDEKA
         def bc_mangled_arity(byte* s) -> int
         {
             int start = 0;
-            int pend;
-            int j;
-            int v;
+            int pend, j, v;
             bool digits;
             while (true)
             {
@@ -213,8 +211,7 @@ namespace IDEKA
 
         struct OMap
         {
-            PtrVec* ks;
-            PtrVec* vs;
+            PtrVec* ks, vs;
         };
 
         def om_new() -> OMap*
@@ -315,13 +312,9 @@ namespace IDEKA
 
         struct BPtr
         {
-            byte* var_name;
-            byte* site;
-            byte* func_name;
-            byte* file;
+            byte* var_name, site, func_name, file;
             bool mut;
-            int depth;
-            int line;
+            int depth, line;
         };
 
         struct BPos
@@ -332,9 +325,7 @@ namespace IDEKA
 
         struct BVio
         {
-            byte* kind;
-            byte* msg;
-            byte* file;
+            byte* kind, msg, file;
             int line;
             PtrVec* detail;     // byte*
             byte* func;         // mangled name of the function the violation was found in, or null
@@ -440,8 +431,7 @@ namespace IDEKA
 
             pop_scope() -> void
             {
-                int fi;
-                int k;
+                int fi, k;
                 ScopeFrame* f;
                 BPtr* p;
                 ScopeFrame* frame;
@@ -479,8 +469,7 @@ namespace IDEKA
 
             check_escape_after_pop(OMap* dead) -> void
             {
-                int fi;
-                int k;
+                int fi, k;
                 ScopeFrame* f;
                 BPtr* p;
                 byte* msg;
@@ -565,8 +554,7 @@ namespace IDEKA
                 BPtr* info = this.find_ptr(var_name);
                 byte* old_site;
                 bool still_used;
-                int fi;
-                int k;
+                int fi, k;
                 ScopeFrame* f;
                 BPtr* p;
                 switch (info == (BPtr*)0)
@@ -655,8 +643,7 @@ namespace IDEKA
             check_use_after_free(byte* var_name, byte* file, int line) -> void
             {
                 BPtr* info = this.find_ptr(var_name);
-                byte* site;
-                byte* base;
+                byte* site, base;
                 byte* matched = (byte*)0;
                 BPos* fp;
                 PtrVec* det;
@@ -720,9 +707,7 @@ namespace IDEKA
             check_bounds(byte* var_name, int index, byte* file, int line, bool write) -> void
             {
                 BPtr* info = this.find_ptr(var_name);
-                byte* site;
-                byte* base;
-                byte* lookup;
+                byte* site, base, lookup;
                 int size;
                 PtrVec* det;
                 switch (info == (BPtr*)0)
@@ -834,11 +819,8 @@ namespace IDEKA
             {
                 BPtr* info = this.find_ptr(var_name);
                 BPtr* ex;
-                byte* site;
-                byte* base;
-                byte* ex_base;
-                int fi;
-                int k;
+                byte* site, base, ex_base;
+                int fi, k;
                 ScopeFrame* f;
                 PtrVec* det;
                 switch (info == (BPtr*)0)
@@ -910,10 +892,8 @@ namespace IDEKA
             // names and sites are parallel PtrVecs of byte*.
             check_call_args(PtrVec* names, PtrVec* sites, byte* file, int line) -> void
             {
-                int i;
-                int j;
-                byte* sa;
-                byte* sb2;
+                int i, j;
+                byte* sa, sb2;
                 PtrVec* det;
                 while (i < sites.len)
                 {
@@ -969,8 +949,7 @@ namespace IDEKA
             {
                 BPtr* info = this.find_ptr(ptr_var);
                 BPtr* ex;
-                int fi;
-                int k;
+                int fi, k;
                 ScopeFrame* f;
                 PtrVec* det;
                 switch (info == (BPtr*)0)
@@ -1038,8 +1017,7 @@ namespace IDEKA
             check_use_after_escape(byte* ptr_var, byte* file, int line) -> void
             {
                 BPtr* info = this.find_ptr(ptr_var);
-                byte* site;
-                byte* base;
+                byte* site, base;
                 byte* matched = (byte*)0;
                 BPos* sp;
                 PtrVec* det;
@@ -1334,9 +1312,7 @@ namespace IDEKA
             {
                 int c = bc_count(program, 0);
                 int i;
-                byte* mangled;
-                byte* short_name;
-                byte* base;
+                byte* mangled, short_name, base;
                 NameMap* short_count = nm_new();
                 int* cnt;
                 PtrVec* lst;
@@ -1418,9 +1394,7 @@ namespace IDEKA
 
             collect_node(Node* node, byte* ns_prefix) -> void
             {
-                int k;
-                int i;
-                int c;
+                int k, i, c;
                 Node* f;
                 byte* prefix;
                 switch (node == (Node*)0)
@@ -1559,11 +1533,9 @@ namespace IDEKA
 
             collect_object(Node* obj, byte* prefix) -> void
             {
-                int c;
-                int i;
+                int c, i;
                 Node* m;
-                byte* mangled;
-                byte* inner;
+                byte* mangled, inner;
                 switch (obj == (Node*)0)
                 {
                     case (true) { ->; }
@@ -1619,8 +1591,7 @@ namespace IDEKA
         {
             CallGraph* cg;
             byte* entry;
-            bool check_threads;
-            bool check_leaks;
+            bool check_threads, check_leaks;
             Preprocessor* pp;
             AliasMap alias;
             PtrVec* violations;         // BVio*
@@ -1706,8 +1677,7 @@ namespace IDEKA
                 int first = -1;
                 int i = 0;
                 int colon = -1;
-                int j;
-                int merged;
+                int j, merged;
                 bool digits;
                 // find the first " at "
                 while (i + 4 <= n)
@@ -1827,8 +1797,7 @@ namespace IDEKA
             // Known allocator wrapper whose fmalloc result is returned to the caller
             func_returns_allocation(Node* func) -> bool
             {
-                Node* s;
-                Node* e;
+                Node* s, e;
                 switch (cstr_eq(func.text, g"fmalloc\0") | cstr_eq(func.text, g"ffree\0"))
                 {
                     case (true) { -> true; }
@@ -1953,17 +1922,11 @@ namespace IDEKA
                 bool prev_thread;
                 Node* prev_node;
                 PtrVec* prev_frames;
-                OMap* prev_heap;
-                OMap* prev_freed;
-                OMap* prev_alloc;
-                OMap* prev_array;
-                PtrVec* params;
-                PtrVec* names;
-                PtrVec* sites;
+                OMap* prev_heap, prev_freed, prev_alloc, prev_array;
+                PtrVec* params, names, sites;
                 Node* param;
                 byte* site;
-                int idx;
-                int i;
+                int idx, i;
                 BVio* v;
                 int merged;
                 PtrVec* nd;
@@ -2207,19 +2170,10 @@ namespace IDEKA
             walk_stmt(Node* node) -> void
             {
                 int k = node.kind;
-                OMap* pre_freed;
-                OMap* pre_heap;
-                OMap* then_freed;
-                OMap* then_heap;
-                OMap* else_freed;
-                OMap* else_heap;
-                OMap* merged;
-                OMap* inter;
-                PtrVec* case_freeds;
-                PtrVec* case_heaps;
+                OMap* pre_freed, pre_heap, then_freed, then_heap, else_freed, else_heap, merged, inter;
+                PtrVec* case_freeds, case_heaps;
                 Node* cs;
-                int i;
-                int c;
+                int i, c;
 
                 switch (k == NodeKind.VARIABLE_DECLARATION)
                 {
@@ -2506,12 +2460,11 @@ namespace IDEKA
 
             // ----- declarations and assignments -----
 
-            // Value of a constant integer expression, as the FVM folds it. Sets lit_val.
+            // Value of a constant integer expression, as the IDKVM folds it. Sets lit_val.
             // Literals, casts, unary minus and the arithmetic and bit operators of constants.
             const_int(Node* e) -> bool
             {
-                i64 lv;
-                i64 rv;
+                i64 lv, rv;
                 switch (e == (Node*)0)
                 {
                     case (true) { -> false; }
@@ -2620,8 +2573,7 @@ namespace IDEKA
                 byte* file = bc_unk();
                 int line = node.line;
                 bool is_ptr = bc_is_pointer_type(node.ts);
-                byte* site;
-                byte* ptr_site;
+                byte* site, ptr_site;
                 ScopeFrame* frame;
                 switch (!is_ptr & this.check_leaks & this.rhs_is_heap_alloc(node.a))
                 {
@@ -2655,7 +2607,7 @@ namespace IDEKA
                             case (true) {
                             switch (this.const_int(node.ts.array_size))
                             {
-                                case (true) { this.alias.record_alloc_size(site, (int)this.lit_val); }
+                                case (true) { this.alias.record_alloc_size(site, this.lit_val); }
                                 default {};
                             };
                         }
@@ -2721,8 +2673,7 @@ namespace IDEKA
             {
                 byte* file = bc_unk();
                 int line = node.line;
-                byte* var_name;
-                byte* new_site;
+                byte* var_name, new_site;
                 this.walk_expr(node.b);
                 switch (node.a.kind == NodeKind.IDENTIFIER)
                 {
@@ -2852,11 +2803,8 @@ namespace IDEKA
                 PtrVec* r = pv_new();
                 PtrVec* pp2 = this.ptr_params(func);
                 int c = bc_count(func, 0);
-                int i;
-                int j;
-                int full_idx;
-                Node* p;
-                Node* q;
+                int i, j, full_idx;
+                Node* p, q;
                 int nargs;
                 switch (pp2.len == 0)
                 {
@@ -3012,8 +2960,7 @@ namespace IDEKA
             {
                 int n = (int)e.ival;
                 int a = 0;
-                int b;
-                int c;
+                int b, c;
                 bool going = true;
                 switch (n <= 0) { case (true) { n = bc_len(e.text); } default {}; };
                 while (a < n & going)
@@ -3043,8 +2990,7 @@ namespace IDEKA
             resolve_site(Node* expr, byte* var_name, byte* file, int line) -> byte*
             {
                 Node* inner;
-                byte* s;
-                byte* t;
+                byte* s, t;
                 BPtr* info;
                 switch (expr == (Node*)0)
                 {
@@ -3139,7 +3085,7 @@ namespace IDEKA
                                                 }
                                                     default
                                                     {
-                                                        // string literal: the FVM leaves its bytes on the stack, which idkbc.py names as a param site
+                                                        // string literal: the IDKVM leaves its bytes on the stack, which idkbc.py names as a param site
                                                         switch (expr.kind == NodeKind.STRING_LITERAL)
                                                         {
                                                             case (true) { -> this.str_site(expr); }
@@ -3181,9 +3127,7 @@ namespace IDEKA
 
             check_bounds_at_access(byte* var_name, Node* index_expr, byte* file, int line, bool write) -> void
             {
-                int idx;
-                int fi;
-                int k;
+                int idx, fi, k;
                 ScopeFrame* f;
                 byte* site;
                 int size;
@@ -3193,13 +3137,13 @@ namespace IDEKA
                     case (true) { ->; }
                     default
                     {
-                        // only a constant integer index is determinable without the FVM
+                        // only a constant integer index is determinable without the IDKVM
                         switch (!this.const_int(index_expr))
                         {
                             case (true) { ->; }
                             default
                             {
-                                idx = (int)this.lit_val;
+                                idx = this.lit_val;
                                 switch (this.alias.find_ptr(var_name) != (BPtr*)0)
                                 {
                                     case (true) {
@@ -3312,8 +3256,7 @@ namespace IDEKA
                 byte* cand;
                 int i;
                 Node* sf;
-                PtrVec* ctx;
-                PtrVec* mp;
+                PtrVec* ctx, mp;
                 int* sc;
                 int prev_count;
                 PtrVec* det;
@@ -3434,12 +3377,9 @@ namespace IDEKA
             handle_call(Node* node, byte* file, int line) -> void
             {
                 byte* callee = node.text;
-                byte* resolved;
-                byte* base_name;
+                byte* resolved, base_name;
                 bool is_alloc;
-                PtrVec* ov;
-                PtrVec* names;
-                PtrVec* sites;
+                PtrVec* ov, names, sites;
                 int i;
                 switch (callee != (byte*)0)
                 {
@@ -3526,13 +3466,9 @@ namespace IDEKA
                 byte* method = node.text;
                 byte* hint;
                 byte* resolved = (byte*)0;
-                byte* cand;
-                byte* sfx;
-                byte* shortn;
-                int pass;
-                int i;
-                PtrVec* names;
-                PtrVec* sites;
+                byte* cand, sfx, shortn;
+                int pass, i;
+                PtrVec* names, sites;
                 this.walk_expr(node.a);
                 this.walk_args(node.l0);
                 switch (method == (byte*)0)
@@ -3702,8 +3638,7 @@ namespace IDEKA
             walk_expr(Node* node) -> void
             {
                 byte* file;
-                int line;
-                int k;
+                int line, k;
                 Node* fnode;
                 byte* site;
                 Node* arg;
@@ -3738,7 +3673,7 @@ namespace IDEKA
                                     case (true) {
                                     switch (this.const_int(node_child(fnode, 0, 0)))
                                     {
-                                        case (true) { this.alias.record_alloc_size(site, (int)this.lit_val); }
+                                        case (true) { this.alias.record_alloc_size(site, this.lit_val); }
                                         default {};
                                     };
                                 }
@@ -3928,8 +3863,7 @@ namespace IDEKA
 
         def bc_print_violations(PtrVec* vs, bool warn) -> void
         {
-            int i;
-            int j;
+            int i, j;
             BVio* v;
             switch (vs.len == 0)
             {
@@ -3965,8 +3899,7 @@ namespace IDEKA
 
         def bc_print_summary(PtrVec* vs, int files_checked, int funcs_checked) -> void
         {
-            int i;
-            int j;
+            int i, j;
             int n = vs.len;
             BVio* v;
             OMap* kinds;
@@ -5076,8 +5009,7 @@ namespace IDEKA
             PtrVec* defers;         // PtrVec* of DEFER nodes
             PtrVec* returns;        // LRet*
             PtrVec* blks;           // Node* seen as block ids
-            int cur_line;
-            int call_col;
+            int cur_line, call_col;
             LAl* al;
             bool warn_mode;
             OMap* fp;               // footprint of the function being walked
@@ -6229,8 +6161,7 @@ namespace IDEKA
             {
                 PtrVec* cands;
                 int i;
-                byte* c;
-                byte* base;
+                byte* c, base;
                 Node* f;
                 if (name == (byte*)0) { -> (byte*)0; };
                 if (name[0] == 0) { -> (byte*)0; };

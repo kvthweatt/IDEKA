@@ -1293,8 +1293,7 @@ namespace IDEKA
         mu_free(ModUnit* u) -> void
         {
             int i, k;
-            ModInfo* mi;
-            ModInfo* pm;
+            ModInfo* mi, pm;
             bool seen;
             if (u == (ModUnit*)0) { ->; };
             while (i < u.mods.len)

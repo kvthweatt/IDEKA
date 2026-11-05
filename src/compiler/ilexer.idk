@@ -1310,7 +1310,7 @@ namespace IDEKA
 
                 this.arena_cap = len * 2 + 64;
                 this.arena_len = 0;
-                this.arena = (byte*)fmalloc((u64)this.arena_cap);
+                this.arena = (byte*)fmalloc(this.arena_cap);
 
                 switch (this.tokens == (Token*)0 | this.arena == (byte*)0)
                 {
@@ -1476,7 +1476,7 @@ namespace IDEKA
             grow() -> void
             {
                 int new_cap = this.arena_cap * 2;
-                u64 np = frealloc((u64)this.arena, (size_t)new_cap);
+                u64 np = frealloc((u64)this.arena, new_cap);
                 switch (np == (u64)0)
                 {
                     case (true) {
@@ -3085,8 +3085,7 @@ namespace IDEKA
 
             tokenize() -> bool
             {
-                int c, ln, col, tt, vb, vl, cnt, i, oplen, optype, cp, extra, wstart;
-                int saved_pos, saved_line, saved_col;
+                int c, ln, col, tt, vb, vl, cnt, i, oplen, optype, cp, extra, wstart, saved_pos, saved_line, saved_col;
 
                 while (this.position < this.length)
                 {

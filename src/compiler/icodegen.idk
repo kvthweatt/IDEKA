@@ -25,8 +25,8 @@
 #import "itypesys.idk";
 #endif;
 
-#ifndef IDEKA_LLVMIR
-#import "i_llvmir.idk";
+#ifndef IDEKA_BACKEND
+#import "ibackend.idk";
 #endif;
 
 #ifndef IDEKA_LEXER
@@ -37,7 +37,7 @@
 #import "iparser.idk";
 #endif;
 
-#ifndef IDEKA_FVMCODEGEN
+#ifndef IDEKA_IDKVMCODEGEN
 #import "ivmcodegen.idk";
 #endif;
 
@@ -54,12 +54,13 @@ using IDEKA::ast;
 using IDEKA::preprocessor;
 using IDEKA::types;
 using IDEKA::ir;
+using IDEKA::backend;
 using IDEKA::check;
 using IDEKA::typer;
 using IDEKA::lexer;
 using IDEKA::parser;
-using IDEKA::fvm;
-using IDEKA::fvmcodegen;
+using IDEKA::IDKVM;
+using IDEKA::idkvmcodegen;
 
 namespace IDEKA
 {
@@ -77,12 +78,12 @@ namespace IDEKA
             i64[16] w;
             i64 a, b, c, d, f, t;
             int total = ((len + 8) / 64 + 1) * 64;
-            byte* buf = (byte*)fmalloc((u64)total);
+            byte* buf = (byte*)fmalloc(total);
             int i, blk, g, j;
             i64 bits = (i64)len * (i64)8;
             while (i < total)
             {
-                buf[i] = (byte)0;
+                buf[i] = 0;
                 i++;
             };
             i = 0;
@@ -91,17 +92,17 @@ namespace IDEKA
                 buf[i] = src[i];
                 i++;
             };
-            buf[len] = (byte)128;
+            buf[len] = 128;
             i = 0;
             while (i < 8)
             {
                 buf[total - 8 + i] = (byte)((bits >> (i * 8)) `& (i64)255);
                 i++;
             };
-            st[0] = (i64)1732584193;
+            st[0] = 1732584193;
             st[1] = (((i64)61389 << 16) `| (i64)43913);
             st[2] = (((i64)39098 << 16) `| (i64)56574);
-            st[3] = (i64)271733878;
+            st[3] = 271733878;
             blk = 0;
             while (blk < total / 64)
             {
@@ -164,16 +165,14 @@ namespace IDEKA
                 switch (g < 10) { case (true) { res[i * 2 + 1] = (byte)(48 + g); } default { res[i * 2 + 1] = (byte)(87 + g); }; };
                 i++;
             };
-            res[8] = (byte)0;
+            res[8] = 0;
         };
 
         // dict{K:V} layout bookkeeping, keyed by variable name like fcodegen's module._dict_types
         struct DictInfo
         {
-            TypeSpec* kts;
-            TypeSpec* vts;
-            IRType* kl;
-            IRType* vl;
+            TypeSpec* kts, vts;
+            IRType* kl, vl;
             int cap;
             IRType* st;
             byte** kc;      // constant text of each key slot (global dicts only)
@@ -190,11 +189,8 @@ namespace IDEKA
             byte** names;
             TypeSpec** specs;
             IRType** ftys;
-            int* offs;
-            int* bits;
-            int* aligns;
-            int total_bits;
-            int max_align;
+            int* offs, bits, aligns;
+            int total_bits, max_align;
             bool is_object;
         };
 
@@ -203,8 +199,7 @@ namespace IDEKA
         {
             IRValue* ptr;
             TypeSpec* ts;
-            bool vol;
-            bool is_heap;
+            bool vol, is_heap;
         };
 
         // Heap copy of s from index start
@@ -224,7 +219,7 @@ namespace IDEKA
                 r[i] = s[start + i];
                 i++;
             };
-            r[n] = (byte)0;
+            r[n] = 0;
             -> r;
         };
 
@@ -370,7 +365,7 @@ namespace IDEKA
 
         object CodeGen
         {
-            IRModule* mod;
+            CodeBackend* mod;
             IDKC_SYMTABLE* st;
             IDKC_SYMTABLE* pst;      // parse time symbol table, built before DCE
             NameMap* structs;       // mangled name to SInfo*
@@ -390,8 +385,7 @@ namespace IDEKA
             PtrVec* ct_macros;      // macroDef nodes of the top level statements
             NameMap* defined;       // function names that have a body
             PtrVec* owned;
-            byte* cur_ns;
-            byte* cur_obj;
+            byte* cur_ns, cur_obj;
             NameMap* ifc_call;      // "caller|callee" to method set (CALL_ON protocols)
             NameMap* ifc_ret;       // "provider|consumer" to method set (RETURN_TO protocols)
             NameMap* ifc_pass;      // "provider|consumer" to method set (PASS_INTO protocols)
@@ -400,7 +394,7 @@ namespace IDEKA
             byte* ct_srcfile;       // path of the program source, where a local import resolves from
             int ct_imports;         // imports served so far, makes the wrapper file names unique
             IDEKAVM* ct_vm;          // persistent comptime VM, made by the first block
-            PtrVec* ct_cgs;         // FVMCodegen* of every block, alive while the VM may run their code
+            PtrVec* ct_cgs;         // IDKVMCodegen* of every block, alive while the VM may run their code
             PtrVec* ct_lex;         // Lexer* made for emitted text, nodes borrow their strings
             PtrVec* ct_par;         // Parser* made for emitted text
             PtrVec* ct_persist;     // FvmCap* of locals kept for later blocks
@@ -413,22 +407,12 @@ namespace IDEKA
             PtrVec* ct_refl_vec;    // FvmRefl* of the snapshot, given to the VM
             PtrVec* ct_cck;         // preprocessor constant names, borrowed, given to the VM
             PtrVec* ct_ccv;         // preprocessor constant values, borrowed
-            int nerrors;
-            int err_line;
+            int nerrors, err_line;
             int err_col;            // column of the first error's node, 0 when unknown
             int pend_col;           // column handed to the next fail() by fail_at
             byte* err_msg;
-            IRType* t_i1;
-            IRType* t_i8;
-            IRType* t_i32;
-            IRType* t_i64;
-            IRType* t_void;
-            IRType* t_float;
-            IRType* t_double;
-            IRType* t_i8p;
-            int nfuncs;
-            int ntypes;
-            int al_tmp;
+            IRType* t_i1, t_i8, t_i32, t_i64, t_void, t_float, t_double, t_i8p;
+            int nfuncs, ntypes, al_tmp;
             Buf sc;             // text scratch
             int q_len;          // next_quoted results
             int q_end;
@@ -439,8 +423,7 @@ namespace IDEKA
             IRFunc* fn;         // function whose body is being generated
             Node* fnd;
             IRType* fret;
-            IRBlock* brk;
-            IRBlock* cont;
+            IRBlock* brk, cont;
             IRValue* exc_flag;      // innermost try block exception flag and value slots
             IRValue* exc_value;
             IRBlock* exc_handler;
@@ -448,13 +431,9 @@ namespace IDEKA
             byte* bad_what;
             byte* bad_detail;       // name involved in the first unsupported construct, null when none
             PtrVec* skip_log;       // heap texts: one line per function left as a declaration
-            int bad_line;
-            int body_errs;
+            int bad_line, body_errs;
             bool in_member;
-            IRValue* va_list_v;
-            IRValue* va_list_p;
-            IRValue* nra;
-            IRValue* nrb;
+            IRValue* va_list_v, va_list_p, nra, nrb;
             TypeSpec** lspecs;
             NameMap* ucounts;   // construct name to count of bodies it stopped
             NameMap* gvars;     // mangled global name to its LVar
@@ -464,8 +443,7 @@ namespace IDEKA
             PtrVec* inited_unions;   // union variables assigned in the current function
             bool gmv_full;           // global_member_value text already carries its type
             NameMap* fdefs;     // function name to its FUNCTION_DEF
-            int nbodies;
-            int nskipped;
+            int nbodies, nskipped;
             Node* cur_fd;       // function definition whose body is being generated
             NameMap* gcache;    // g-string bytes (escaped) to its global
             int nstr;           // .str.N counter
@@ -480,8 +458,7 @@ namespace IDEKA
             int tid_n;          // last id handed out by typeof_id
             PtrVec* arr_ptrs;   // pointer types that came from array decay (_is_array_pointer)
             PtrVec* al_names;   // type aliases in declaration order
-            PtrVec* al_tys;
-            PtrVec* al_specs;
+            PtrVec* al_tys, al_specs;
             PtrVec* al_idx;     // top level statement index of each alias
             int cur_stmt;       // top level statement being generated
             bool si_closed;     // a top level function body has been generated
@@ -490,7 +467,7 @@ namespace IDEKA
             {
                 this.st = s;
                 this.pst = (IDKC_SYMTABLE*)0;
-                this.mod = (IRModule*)fmalloc((u64)((sizeof(IRModule) + 7) / 8));
+                this.mod = (CodeBackend*)fmalloc((u64)((sizeof(CodeBackend) + 7) / 8));
                 this.mod.__init(g"IDEKA_module\0");
                 this.structs = nm_new();
                 this.fwd_hit = false;
@@ -572,7 +549,7 @@ namespace IDEKA
                 this.gcache = nm_new();
                 this.nstr = 0;
                 this.null_term = false;
-                this.ct_v = (i64)0;
+                this.ct_v = 0;
                 this.ct_k = 0;
                 this.enumvals = nm_new();
                 this.enum_defs = nm_new();
@@ -721,7 +698,7 @@ namespace IDEKA
 
             add_const(byte* mangled, i64 v) -> void
             {
-                i64* box = (i64*)fmalloc((u64)8);
+                i64* box = (i64*)fmalloc(8);
                 box[0] = v;
                 this.keep((void*)box);
                 -> nm_put(this.consts, mangled, (void*)box);
@@ -880,7 +857,7 @@ namespace IDEKA
                             while (n > 0 & cur[n - 1] != ':') { n--; };
                             switch (n > 0) { case (true) { n = n - 1; } default {}; };
                             while (n > 0 & cur[n - 1] == ':') { n--; };
-                            cur[n] = (byte)0;
+                            cur[n] = 0;
                             switch (n == 0 & !found)
                             {
                                 case (true) {
@@ -911,7 +888,7 @@ namespace IDEKA
                         switch (e.op == DataType.BOOL)
                         {
                             case (true) {
-                                switch (e.ival != (i64)0) { case (true) { *out = (i64)1; } default { *out = (i64)0; }; };
+                                switch (e.ival != (i64)0) { case (true) { *out = 1; } default { *out = 0; }; };
                                 -> true;
                             }
                             default {};
@@ -1015,8 +992,7 @@ namespace IDEKA
                 Node* ini = n.a;
                 byte* m;
                 i64 v;
-                int w;
-                int bt;
+                int w, bt;
                 bool got = false;
                 switch (n.text == (byte*)0 | ts == (TypeSpec*)0) { case (true) { ->; } default {}; };
                 bt = ts.base_type;
@@ -1031,7 +1007,7 @@ namespace IDEKA
                 switch (w <= 0 | w > 64) { case (true) { ->; } default {}; };
                 m = mangle_namespace_name(ns, n.text);
                 switch (this.const_base_seen(m)) { case (true) { ffree(m); ->; } default {}; };
-                v = (i64)0;
+                v = 0;
                 switch (ini == (Node*)0)
                 {
                     case (true) { got = true; }
@@ -1051,7 +1027,7 @@ namespace IDEKA
                                 switch (ini.op == DataType.BOOL)
                                 {
                                     case (true) {
-                                        switch (ini.ival != (i64)0) { case (true) { v = (i64)1; } default {}; };
+                                        switch (ini.ival != (i64)0) { case (true) { v = 1; } default {}; };
                                         got = true;
                                     }
                                     default {};
@@ -1071,7 +1047,7 @@ namespace IDEKA
                             }
                             default
                             {
-                                switch (!this.ginit_eval(ini, ns, @v)) { case (true) { v = (i64)0; } default {}; };
+                                switch (!this.ginit_eval(ini, ns, @v)) { case (true) { v = 0; } default {}; };
                                 got = true;
                             };
                         };
@@ -1594,9 +1570,7 @@ namespace IDEKA
             // Text of the {total_bits, field_count, [fields]} TLD constant and its type
             tld_global(SInfo* si) -> void
             {
-                IRType* ft;
-                IRType* at;
-                IRType* vt;
+                IRType* ft, at, vt;
                 IRType** parts;
                 int i;
                 byte* nm;
@@ -1693,11 +1667,9 @@ namespace IDEKA
             {
                 byte* name = mangle_namespace_name(ns, sd.text);
                 int i, j, idx, total, nm_, k;
-                Node* mem;
-                Node* b;
+                Node* mem, b;
                 void* p;
-                SInfo* si;
-                SInfo* bi;
+                SInfo* si, bi;
                 IRType* ft;
 
                 switch (sd.l4 != (NodeVec*)0)
@@ -2067,7 +2039,7 @@ namespace IDEKA
                         g.constant = true;
                     };
                     };
-                    eb = (i64*)fmalloc((u64)8);
+                    eb = (i64*)fmalloc(8);
                     eb[0] = item.ival;
                     this.keep((void*)eb);
                     nm_put(this.enumvals, this.mod.own(cn), (void*)eb);
@@ -2333,8 +2305,7 @@ namespace IDEKA
             {
                 int n = node_count(fd, 0);
                 IRType* ret = this.lower_sig(fd.ts, fd.line);
-                IRType** ps;
-                IRType** rp;
+                IRType** ps, rp;
                 int i;
                 switch (fd.ts2 != (TypeSpec*)0)
                 {
@@ -2379,8 +2350,7 @@ namespace IDEKA
                                 IRType* ft = this.func_type_of(fd, 0, (IRType*)0);
                                 byte* base = mangle_namespace_name(ns, fd.text);
                                 byte* mn;
-                                IRFunc* f;
-                                IRFunc* ex;
+                                IRFunc* f, ex;
                                 bool proto = (fd.flags `& NF_PROTOTYPE) != 0;
                                 switch ((fd.flags `& NF_NO_MANGLE) != 0)
                                 {
@@ -2444,6 +2414,14 @@ namespace IDEKA
                                         case (true) { pv_push(f.attrs, (void*)this.mod.own(g"alwaysinline\0")); }
                                         default {};
                                     };
+                                    switch ((fd.flags `& NF_NAKED) != 0)
+                                    {
+                                        case (true) {
+                                            pv_push(f.attrs, (void*)this.mod.own(g"naked\0"));
+                                            pv_push(f.attrs, (void*)this.mod.own(g"noinline\0"));
+                                        }
+                                        default {};
+                                    };
                                     this.name_args(f, fd, 0);
                                 }
                                     default {};
@@ -2461,8 +2439,7 @@ namespace IDEKA
             declare_extern(Node* fd, byte* ns) -> void
             {
                 IRType* ft;
-                byte* base;
-                byte* fin;
+                byte* base, fin;
                 IRFunc* f;
                 IRType* vt;
                 IRGlobal* g;
@@ -2571,8 +2548,7 @@ namespace IDEKA
                 byte* prev = this.cur_obj;
                 IRType* ft;
                 IRFunc* f;
-                byte* mn;
-                byte* full;
+                byte* mn, full;
                 int passes, pass, dd;
                 switch (m.text == (byte*)0)
                 {
@@ -2848,8 +2824,7 @@ namespace IDEKA
             {
                 PtrVec* tmp;
                 Node* p0;
-                int i;
-                int n;
+                int i, n;
                 switch (d.ts2 == (TypeSpec*)0 | d.text == (byte*)0 | d.text2 == (byte*)0)
                 {
                     case (true) { -> false; }
@@ -3039,9 +3014,9 @@ namespace IDEKA
                         switch (box == (i64*)0)
                         {
                             case (true) {
-                            box = (i64*)fmalloc((u64)8);
+                            box = (i64*)fmalloc(8);
                             this.keep((void*)box);
-                            *box = (i64)0;
+                            *box = 0;
                             nm_put(this.ucounts, what, (void*)box);
                         }
                             default {};
@@ -3220,9 +3195,9 @@ namespace IDEKA
                 switch (box == (i64*)0)
                 {
                     case (true) {
-                    box = (i64*)fmalloc((u64)8);
+                    box = (i64*)fmalloc(8);
                     this.keep((void*)box);
-                    *box = (i64)0;
+                    *box = 0;
                     nm_put(this.ucounts, what, (void*)box);
                 }
                     default {};
@@ -3234,8 +3209,7 @@ namespace IDEKA
             // Last "__" separated segment of name
             last_seg(byte* name) -> byte*
             {
-                int i;
-                int cut;
+                int i, cut;
                 while (name[i] != 0)
                 {
                     switch (name[i] == '_' & name[i + 1] == '_')
@@ -3376,7 +3350,7 @@ namespace IDEKA
                 IRValue* cv;
                 IRGlobal* gl;
                 memcpy((void*)buf, (void*)src, (u64)len);
-                buf[len] = (byte)0;
+                buf[len] = 0;
                 md5_hex8(buf, n, @hx[0]);
                 gn.__init();
                 defer gn.__exit();
@@ -3435,8 +3409,7 @@ namespace IDEKA
                 Buf b;
                 byte* src;
                 int dt;
-                i64 v;
-                i64 lim;
+                i64 v, lim;
                 b.__init();
                 defer b.__exit();
                 switch (e.kind == NodeKind.STRING_LITERAL)
@@ -3472,7 +3445,7 @@ namespace IDEKA
                             switch (dt == DataType.BOOL)
                             {
                                 case (true) {
-                                switch (v != (i64)0) { case (true) { v = (i64)1; } default {}; };
+                                switch (v != (i64)0) { case (true) { v = 1; } default {}; };
                             }
                                 default {
                                 switch (dt == DataType.UINT | dt == DataType.ULONG | dt == DataType.DATA)
@@ -3621,10 +3594,8 @@ namespace IDEKA
             // create_global_initializer, dict merge: BinaryOp(+) on two global dicts
             dict_merge_text(Node* ini, DictInfo* di) -> byte*
             {
-                DictInfo* li;
-                DictInfo* ri;
-                int nc;
-                int i;
+                DictInfo* li, ri;
+                int nc, i;
                 switch (ini.op != Operator.ADD)
                 {
                     case (true) { -> (byte*)0; }
@@ -3683,8 +3654,7 @@ namespace IDEKA
                 Node* ini = n.a;
                 DictInfo* di = this.dict_make(n.text, ts, n.line);
                 IRGlobal* gl;
-                byte* m;
-                byte* it;
+                byte* m, it;
                 switch (ini == (Node*)0)
                 {
                     case (true) { it = this.mod.c_null(di.st).text; }
@@ -3743,10 +3713,8 @@ namespace IDEKA
             // VariableTypeHandler._eval_const_expr for integers: value and bit width
             const_eval(Node* e, i64* ov, int* ow) -> bool
             {
-                i64 lv;
-                i64 rv;
-                int lw;
-                int rw;
+                i64 lv, rv;
+                int lw, rw;
                 int k = e.kind;
                 int op;
                 IRGlobal* gg;
@@ -3763,8 +3731,8 @@ namespace IDEKA
                     switch (e.op == DataType.BOOL)
                     {
                         case (true) {
-                        *ov = (i64)0;
-                        switch (e.ival != (i64)0) { case (true) { *ov = (i64)1; } default {}; };
+                        *ov = 0;
+                        switch (e.ival != (i64)0) { case (true) { *ov = 1; } default {}; };
                         *ow = 1;
                         -> true;
                     }
@@ -3816,7 +3784,7 @@ namespace IDEKA
                                 case (true) { -> false; }
                                 default {};
                             };
-                            *ov = (i64)0;
+                            *ov = 0;
                             *ow = si.ftys[fi].width;
                             -> true;
                         }
@@ -3900,10 +3868,8 @@ namespace IDEKA
                 Node* dn = ini.a;
                 int cnt = node_count(dn, 0);
                 int i;
-                i64 lv;
-                i64 kv;
-                int lw;
-                int kw;
+                i64 lv, kv;
+                int lw, kw;
                 i64 mm;
                 Node* ve;
                 Buf b;
@@ -3959,8 +3925,7 @@ namespace IDEKA
             {
                 Node* ini = n.a;
                 int dt;
-                i64 v;
-                i64 mask;
+                i64 v, mask;
                 int w;
                 byte* r;
                 bool neg = false;
@@ -4271,11 +4236,8 @@ namespace IDEKA
             {
                 int n = node_count(ini, 0);
                 int i = n - 1;
-                int off;
-                int w;
-                int dt;
-                i64 v;
-                i64 packed;
+                int off, w, dt;
+                i64 v, packed;
                 Node* e;
                 IRGlobal* g;
                 Buf ab;
@@ -4295,7 +4257,7 @@ namespace IDEKA
                         {
                             case (true) {
                             w = 1;
-                            switch (v != (i64)0) { case (true) { v = (i64)1; } default {}; };
+                            switch (v != (i64)0) { case (true) { v = 1; } default {}; };
                         }
                             default {};
                         };
@@ -4365,7 +4327,7 @@ namespace IDEKA
             {
                 int i = 0;
                 bool neg = false;
-                i64 v = (i64)0;
+                i64 v = 0;
                 switch (t == (byte*)0)
                 {
                     case (true) { -> false; }
@@ -4415,8 +4377,7 @@ namespace IDEKA
             global_elem_value(Node* e, IRType* et, i64* out) -> bool
             {
                 i64 v;
-                int sw;
-                int dt;
+                int sw, dt;
                 i64 mask;
                 switch (et.kind != LK.INT)
                 {
@@ -4462,7 +4423,7 @@ namespace IDEKA
                                             sw = 1;
                                             switch (v != (i64)0)
                                             {
-                                                case (true) { v = (i64)1; }
+                                                case (true) { v = 1; }
                                                 default {};
                                             };
                                         }
@@ -4594,8 +4555,7 @@ namespace IDEKA
             global_fp_array_init(Node* ini, IRType* lt) -> byte*
             {
                 int n = node_count(ini, 0);
-                int i;
-                int want;
+                int i, want;
                 Node* e;
                 Buf ab;
                 byte* r;
@@ -4659,15 +4619,9 @@ namespace IDEKA
             global_struct_array_init(Node* ini, IRType* lt) -> byte*
             {
                 int n = node_count(ini, 0);
-                int i;
-                int k;
-                int f;
-                int nf;
-                int np;
-                int nn;
+                int i, k, f, nf, np, nn;
                 Node* e;
-                byte* it;
-                byte* fv;
+                byte* it, fv;
                 SInfo* si = this.sinfo_of(lt.elem);
                 Buf ab;
                 byte* r;
@@ -4793,8 +4747,7 @@ namespace IDEKA
             split_agg(byte* t, int open, int* st, int* en, int max) -> int
             {
                 int i = open + 1;
-                int depth;
-                int cnt;
+                int depth, cnt;
                 int b = i;
                 bool q;
                 byte c;
@@ -4866,9 +4819,7 @@ namespace IDEKA
             {
                 int* sts = (int*)this.zbuf(64);
                 int* ens = (int*)this.zbuf(64);
-                int cnt;
-                int i;
-                int o;
+                int cnt, i, o;
                 Buf ab;
                 byte* r;
                 switch (si.n > 64)
@@ -5000,24 +4951,16 @@ namespace IDEKA
             global_assign(Node* es) -> void
             {
                 Node* asn = es.a;
-                Node* t;
-                Node* v;
-                Node* o;
+                Node* t, v, o;
                 IRGlobal* gl;
                 SInfo* si;
-                int idx;
-                int ai;
+                int idx, ai;
                 int* sts = (int*)this.zbuf(512);
                 int* ens = (int*)this.zbuf(512);
-                int cnt;
-                int i;
-                int j;
-                byte* fv;
-                byte* body;
-                byte* nb;
+                int cnt, i, j;
+                byte* fv, body, nb;
                 IRType* et;
-                Buf ab;
-                Buf pb;
+                Buf ab, pb;
                 switch (asn == (Node*)0)
                 {
                     case (true) { ->; }
@@ -5288,11 +5231,11 @@ namespace IDEKA
                     case (true) {
                     switch (len == 0)
                     {
-                        case (true) { buf[0] = (byte)0; len = 1; }
+                        case (true) { buf[0] = 0; len = 1; }
                         default {
                             switch (buf[len - 1] != (byte)0)
                             {
-                                case (true) { buf[len] = (byte)0; len++; }
+                                case (true) { buf[len] = 0; len++; }
                                 default {};
                             };
                         };
@@ -5406,11 +5349,9 @@ namespace IDEKA
 
             global_string_init(Node* ini, IRType* lt) -> byte*
             {
-                int len;
-                int i;
+                int len, i;
                 i64* vals;
-                byte* r;
-                byte* src;
+                byte* r, src;
                 Buf pb;
                 switch (lt.kind == LK.PTR & lt.elem.kind == LK.INT & lt.elem.width == 8)
                 {
@@ -5500,7 +5441,7 @@ namespace IDEKA
                 r.array_dims = (NodeVec*)0;
                 zn = node_new(NodeKind.LITERAL, n.line, n.col);
                 zn.op = DataType.SINT;
-                zn.ival = (i64)asz;
+                zn.ival = asz;
                 r.array_size = zn;
                 -> r;
             };
@@ -5531,8 +5472,7 @@ namespace IDEKA
                 TypeSpec* ts = n.ts;
                 IRType* lt;
                 IRGlobal* gl;
-                byte* m;
-                byte* it;
+                byte* m, it;
                 switch (n.text == (byte*)0)
                 {
                     case (true) { ->; }
@@ -5742,11 +5682,9 @@ namespace IDEKA
                 IRType** ps = (IRType**)fmalloc((u64)4 * (u64)((sizeof(IRType*) + 7) / 8));
                 IRType* i8p = this.mod.t_ptr(this.t_i8);
                 IRFunc* f;
-                IRValue* dp;
-                IRValue* sp;
-                i64 eb = (i64)8;
-                i64 dst_bytes;
-                i64 src_bytes;
+                IRValue* dp, sp;
+                i64 eb = 8;
+                i64 dst_bytes, src_bytes;
                 this.keep((void*)ps);
                 switch (mt.elem.kind == LK.INT)
                 {
@@ -5754,7 +5692,7 @@ namespace IDEKA
                     eb = (i64)(mt.elem.width / 8);
                     switch (eb < (i64)1)
                     {
-                        case (true) { eb = (i64)1; }
+                        case (true) { eb = 1; }
                         default {};
                     };
                 }
@@ -5769,7 +5707,7 @@ namespace IDEKA
                 f = this.intrinsic(g"llvm.memset.p0i8.i64\0", this.mod.t_func(this.t_void, ps, 4, false));
                 dp = this.mod.cast(g"bitcast\0", mp, i8p, (byte*)0);
                 this.mod.ia[0] = dp;
-                this.mod.ia[1] = this.mod.c_int(this.t_i8, (i64)0);
+                this.mod.ia[1] = this.mod.c_int(this.t_i8, 0);
                 this.mod.ia[2] = this.mod.c_int(this.t_i64, dst_bytes);
                 this.mod.ia[3] = this.mod.c_null(this.t_i1);
                 this.mod.call(f.self, this.mod.ia, 4, (byte*)0);
@@ -5795,9 +5733,7 @@ namespace IDEKA
                 IRType** ps = (IRType**)fmalloc((u64)4 * (u64)((sizeof(IRType*) + 7) / 8));
                 IRType* i8p = this.mod.t_ptr(this.t_i8);
                 IRFunc* f;
-                IRValue* szp;
-                IRValue* sz;
-                IRValue* cp;
+                IRValue* szp, sz, cp;
                 this.keep((void*)ps);
                 ps[0] = i8p;
                 ps[1] = this.t_i8;
@@ -5809,7 +5745,7 @@ namespace IDEKA
                 sz = this.mod.cast(g"ptrtoint\0", szp, this.t_i64, g"obj_sizeof\0");
                 cp = this.mod.cast(g"bitcast\0", alloca, i8p, g"obj_memset_ptr\0");
                 this.mod.ia[0] = cp;
-                this.mod.ia[1] = this.mod.c_int(this.t_i8, (i64)0);
+                this.mod.ia[1] = this.mod.c_int(this.t_i8, 0);
                 this.mod.ia[2] = sz;
                 this.mod.ia[3] = this.mod.c_null(this.t_i1);
                 this.mod.call(f.self, this.mod.ia, 4, (byte*)0);
@@ -5821,14 +5757,12 @@ namespace IDEKA
             {
                 int argc = node_count(ini, 0);
                 int i;
-                IRValue* probe;
-                IRValue* v;
+                IRValue* probe, v;
                 IRValue** args;
                 IRFunc* f;
                 IRType* ft;
                 int j;
-                bool large;
-                bool isstr;
+                bool large, isstr;
                 switch (argc == 1 & lt.kind == LK.ISTRUCT)
                 {
                     case (true) {
@@ -6005,14 +5939,14 @@ namespace IDEKA
                     switch (len == 0)
                     {
                         case (true) {
-                        buf[0] = (byte)0;
+                        buf[0] = 0;
                         len = 1;
                     }
                         default {
                             switch (buf[len - 1] != (byte)0)
                             {
                                 case (true) {
-                        buf[len] = (byte)0;
+                        buf[len] = 0;
                         len++;
                     }
                                 default {};
@@ -6067,9 +6001,7 @@ namespace IDEKA
                 byte* buf = this.str_bytes(ini);
                 int len = this.q_len;
                 int i;
-                IRValue* sa;
-                IRValue* sp;
-                IRValue* ep;
+                IRValue* sa, sp, ep;
                 switch (this.is_i8_ptr(lt))
                 {
                     case (true) {
@@ -6094,7 +6026,7 @@ namespace IDEKA
                             this.mod.ia[0] = this.ci32(0);
                             this.mod.ia[1] = this.ci32(i);
                             ep = this.mod.gep(alloca, this.mod.ia, 2, false, (byte*)0);
-                            this.mod.store(this.mod.c_int(this.t_i8, (i64)0), ep);
+                            this.mod.store(this.mod.c_int(this.t_i8, 0), ep);
                             i++;
                         };
                         ->;
@@ -6214,8 +6146,7 @@ namespace IDEKA
             // StructTypeHandler._struct_bits: total bit width of the members of a struct type
             struct_bits(IRType* st) -> int
             {
-                int i;
-                int total;
+                int i, total;
                 IRType* e;
                 while (i < st.nitems)
                 {
@@ -6240,10 +6171,7 @@ namespace IDEKA
             {
                 int i;
                 int c = node_count(ini, 0);
-                IRValue* ev;
-                IRValue* ep;
-                IRValue* stmp;
-                IRValue* sip;
+                IRValue* ev, ep, stmp, sip;
                 while (i < c & i < lt.count)
                 {
                     switch (lt.elem.kind == LK.ARRAY & node_child(ini, 0, i).kind == NodeKind.ARRAY_LITERAL)
@@ -6408,7 +6336,7 @@ namespace IDEKA
                 };
                 cp = this.mod.cast(g"bitcast\0", alloca, i8p, g"memset_ptr\0");
                 this.mod.ia[0] = cp;
-                this.mod.ia[1] = this.mod.c_int(this.t_i8, (i64)0);
+                this.mod.ia[1] = this.mod.c_int(this.t_i8, 0);
                 this.mod.ia[2] = this.mod.c_int(this.t_i64, (i64)lt.count * (i64)eb);
                 this.mod.ia[3] = this.mod.c_null(this.t_i1);
                 this.mod.call(f.self, this.mod.ia, 4, (byte*)0);
@@ -6468,9 +6396,7 @@ namespace IDEKA
             x_recast(Node* n) -> IRValue*
             {
                 IRType* st = this.resolve_custom(n.text);
-                IRValue* src;
-                IRValue* sv;
-                IRValue* start;
+                IRValue* src, sv, start;
                 Node* sl;
                 switch (st == (IRType*)0)
                 {
@@ -6600,7 +6526,7 @@ namespace IDEKA
                     buf[i] = text[i];
                     i++;
                 };
-                buf[len] = (byte)0;
+                buf[len] = 0;
                 cv = this.mod.c_bytes(aty, buf, len + 1);
                 gn.__init();
                 defer gn.__exit();
@@ -6719,20 +6645,9 @@ namespace IDEKA
             // visit_VariadicAccess: ...[N]
             x_vaaccess(Node* n) -> IRValue*
             {
-                IRValue* idx;
-                IRValue* cl;
-                IRValue* cp;
-                IRValue* res;
-                IRValue* ctr;
-                IRValue* cv;
-                IRValue* c;
-                IRValue* t;
+                IRValue* idx, cl, cp, res, ctr, cv, c, t;
                 IRFunc* f;
-                IRBlock* binit;
-                IRBlock* bcond;
-                IRBlock* bbody;
-                IRBlock* bend;
-                IRBlock* bmerge;
+                IRBlock* binit, bcond, bbody, bend, bmerge;
                 switch (this.va_list_v == (IRValue*)0)
                 {
                     case (true) {
@@ -6773,7 +6688,7 @@ namespace IDEKA
                                 this.mod.br(binit);
                                 this.mod.position(this.fn, binit);
                                 ctr = this.mod.alloca_here(this.t_i32, g"va_counter\0");
-                                this.mod.store(this.mod.c_int(this.t_i32, (i64)0), ctr);
+                                this.mod.store(this.mod.c_int(this.t_i32, 0), ctr);
                                 this.mod.br(bcond);
                                 this.mod.position(this.fn, bcond);
                                 cv = this.mod.load(ctr, g"va_cnt_load\0");
@@ -6782,7 +6697,7 @@ namespace IDEKA
                                 this.mod.position(this.fn, bbody);
                                 this.mod.va_arg(cp, this.t_i64, g"va_discard\0");
                                 cv = this.mod.load(ctr, g"va_cnt_inc_load\0");
-                                t = this.mod.binop(g"add\0", cv, this.mod.c_int(this.t_i32, (i64)1), g"va_cnt_inc\0");
+                                t = this.mod.binop(g"add\0", cv, this.mod.c_int(this.t_i32, 1), g"va_cnt_inc\0");
                                 this.mod.store(t, ctr);
                                 this.mod.br(bcond);
                                 this.mod.position(this.fn, bend);
@@ -6967,7 +6882,7 @@ namespace IDEKA
                         case (true) { -> v; }
                         default {};
                     };
-                    -> this.mod.icmp(g"ne\0", v, this.mod.c_int(t, (i64)0), g"tobool\0");
+                    -> this.mod.icmp(g"ne\0", v, this.mod.c_int(t, 0), g"tobool\0");
                 }
                     default
                     {
@@ -7713,12 +7628,10 @@ namespace IDEKA
             // load rules.
             try_expr_method(IRValue* ptr) -> IRValue*
             {
-                IRType* pe;
-                IRType* st_ty;
+                IRType* pe, st_ty;
                 IRValue* this_ptr;
                 PtrVec* list;
-                Overload* o;
-                Overload* oc;
+                Overload* o, oc;
                 int oi;
                 IRFunc* f;
                 byte* key;
@@ -7815,9 +7728,7 @@ namespace IDEKA
             x_ident(Node* n) -> IRValue*
             {
                 LVar* lv = this.find_var(n.text);
-                IRValue* ptr;
-                IRValue* r;
-                IRValue* e;
+                IRValue* ptr, r, e;
                 TypeSpec* ts;
                 switch (lv == (LVar*)0)
                 {
@@ -8030,8 +7941,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Overload* o;
                 IRFunc* f;
                 IRFunc* pf = (IRFunc*)0;
-                LVar* ll;
-                LVar* rl;
+                LVar* ll, rl;
                 IRValue** args;
                 int i = 0;
                 switch (list == (PtrVec*)0)
@@ -8117,7 +8027,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             };
 
             // An operand fits an overload parameter: same type, a pointer to the same
-            // pointee, or a pointer to an array whose element is the parameter's pointee
+            // pointee, or a pointer to an array whose element is the parameter's pointee,
+            // or a pointer to a named struct passed to a by-value parameter of that struct
             ov_arg_ok(IRValue* v, IRType* pt) -> bool
             {
                 IRType* rt = v.ty;
@@ -8142,15 +8053,22 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     }
                     default {};
                 };
+                switch (rt.kind == LK.PTR)
+                {
+                    case (true) { -> rt.elem.kind == LK.ISTRUCT & lt_eq(rt.elem, pt); }
+                    default {};
+                };
                 -> false;
             };
 
             // visit_BinaryOp built-in operator overload check: the first two-parameter
             // overload (not the function being compiled) whose parameter types fit the
-            // operands is called. Returns null when none fits.
-            binop_overload(Node* n, int op, IRValue* lhs, IRValue* rhs) -> IRValue*
+            // operands is called. Returns null when none fits; *handled tells a call (whose
+            // result is null for a void overload) from no match.
+            binop_overload(Node* n, int op, IRValue* lhs, IRValue* rhs, bool* handled) -> IRValue*
             {
                 PtrVec* list = this.op_overloads(op);
+                *handled = false;
                 Overload* o;
                 IRFunc* f;
                 IRValue** args;
@@ -8221,11 +8139,18 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             case (true) { av = this.mod.load(av, g"op_deref\0"); }
                                             default
                                             {
-                                                av = this.convert_arg(av, pt, k, n);
-                                                switch (this.bad)
+                                                switch (av.ty.kind == LK.PTR & av.ty.elem.kind == LK.ISTRUCT & lt_eq(av.ty.elem, pt))
                                                 {
-                                                    case (true) { -> (IRValue*)0; }
-                                                    default {};
+                                                    case (true) { av = this.mod.load(av, g"op_deref\0"); }
+                                                    default
+                                                    {
+                                                        av = this.convert_arg(av, pt, k, n);
+                                                        switch (this.bad)
+                                                        {
+                                                            case (true) { -> (IRValue*)0; }
+                                                            default {};
+                                                        };
+                                                    };
                                                 };
                                             };
                                         };
@@ -8236,6 +8161,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         args[k] = av;
                         k++;
                     };
+                    *handled = true;
                     -> this.mod.call_ex(f.self, args, 2, g"op_overload_result\0", f.cconv, false);
                 };
                 -> (IRValue*)0;
@@ -8292,13 +8218,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int ll = lhs.ty.elem.count;
                 int rl = rhs.ty.elem.count;
                 int nt = 0;
-                int rlen;
-                int lcopy;
-                int eb;
+                int rlen, lcopy, eb;
                 IRType* rt;
-                IRValue* res;
-                IRValue* dst;
-                IRValue* src;
+                IRValue* res, dst, src;
                 switch (le.kind != re.kind | le.width != re.width)
                 {
                     case (true) {
@@ -8369,7 +8291,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Appends a decimal i64 to cb
             put_i64(Buf* cb, i64 v) -> void
             {
-                byte* tmp = (byte*)fmalloc((u64)24);
+                byte* tmp = (byte*)fmalloc(24);
                 int n = 0;
                 int j;
                 u64 u;
@@ -8404,19 +8326,15 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             ctv(Node* e) -> int
             {
                 int k = e.kind;
-                int st;
-                int op;
-                i64 lv;
-                i64 rv;
-                int lk;
-                int rk;
+                int st, op;
+                i64 lv, rv;
+                int lk, rk;
                 bool b;
                 int cm;
                 i64 res;
                 IRGlobal* gl;
                 IDKC_SYMENTRY* se;
-                byte* sm;
-                byte* sn;
+                byte* sm, sn;
                 int sfx;
                 switch (k == NodeKind.LITERAL)
                 {
@@ -8480,8 +8398,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             switch (op == Operator.GREATER_THAN) { case (true) { b = lv > rv; cm = 1; } default {}; };
                             switch (op == Operator.GREATER_EQUAL) { case (true) { b = lv >= rv; cm = 1; } default {}; };
                             switch (cm == 0) { case (true) { -> 1; } default {}; };
-                            res = (i64)0;
-                            switch (b) { case (true) { res = (i64)1; } default {}; };
+                            res = 0;
+                            switch (b) { case (true) { res = 1; } default {}; };
                             this.ct_v = res;
                             -> 0;
                         }
@@ -8496,8 +8414,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     switch (op == Operator.NOT)
                                     {
                                         case (true) {
-                                        res = (i64)0;
-                                        switch (this.ct_v == (i64)0) { case (true) { res = (i64)1; } default {}; };
+                                        res = 0;
+                                        switch (this.ct_v == (i64)0) { case (true) { res = 1; } default {}; };
                                         this.ct_v = res;
                                         this.ct_k = 1;
                                         -> 0;
@@ -8590,8 +8508,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int total = len;
                 int i;
                 IRType* aty;
-                IRValue* arr;
-                IRValue* gp;
+                IRValue* arr, gp;
                 switch (this.null_term & (len == 0 | text[len - 1] != (byte)0)) { case (true) { total = len + 1; } default {}; };
                 aty = this.mod.t_array(this.t_i8, total);
                 arr = this.mod.alloca_here(aty, g"str_stack\0");
@@ -8605,7 +8522,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     switch (i < len)
                     {
                         case (true) { this.mod.store(this.mod.c_int(this.t_i8, (i64)((int)text[i])), gp); }
-                        default { this.mod.store(this.mod.c_int(this.t_i8, (i64)0), gp); };
+                        default { this.mod.store(this.mod.c_int(this.t_i8, 0), gp); };
                     };
                     i++;
                 };
@@ -8643,32 +8560,19 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_fstring(Node* n) -> IRValue*
             {
                 int c = node_count(n, 0);
-                int i;
-                int st;
+                int i, st;
                 int rt = 0;
                 int size = 256;
                 Node* p;
                 Buf* cb;
                 byte* txt;
                 int tl;
-                IRValue* val;
-                IRValue* pos;
-                IRValue* dest;
-                IRValue* sp;
-                IRValue* buffer;
-                IRValue* pos_ptr;
-                IRValue* r;
-                IRValue* bp;
+                IRValue* val, pos, dest, sp, buffer, pos_ptr, r, bp;
                 IRFunc* cf;
-                IRType* aty;
-                IRType* vt;
+                IRType* aty, vt;
                 byte* fname;
-                int j;
-                int w;
-                int wt;
-                int ec;
-                bool uns;
-                bool istext;
+                int j, w, wt, ec;
+                bool uns, istext;
                 // Compile time attempt
                 cb = (Buf*)fmalloc((u64)((sizeof(Buf) + 7) / 8));
                 cb.__init();
@@ -8703,7 +8607,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     switch (this.ct_v != (i64)0) { case (true) { cb.put_str(g"True\0"); } default { cb.put_str(g"False\0"); }; };
                                                 }
                                                     default {
-                                                    switch (this.ct_k == 2) { case (true) { cb.put((int)this.ct_v); } default { this.put_i64(cb, this.ct_v); }; };
+                                                    switch (this.ct_k == 2) { case (true) { cb.put(this.ct_v); } default { this.put_i64(cb, this.ct_v); }; };
                                                 };
                                             };
                                         };
@@ -8883,7 +8787,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         this.mod.ia[0] = this.ci32(0);
                         this.mod.ia[1] = pos;
                         dest = this.mod.gep(buffer, this.mod.ia, 2, false, (byte*)0);
-                        this.mod.store(this.mod.c_int(this.t_i8, (i64)0), dest);
+                        this.mod.store(this.mod.c_int(this.t_i8, 0), dest);
                         this.mod.ia[0] = this.ci32(0);
                         this.mod.ia[1] = this.ci32(0);
                         r = this.mod.gep(buffer, this.mod.ia, 2, false, g"fstring_result\0");
@@ -8893,16 +8797,208 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // Decays a byte string operand to an i8* (array pointer, i8*, or a slot holding i8*);
+            // cnt receives the array length, or -1 when unknown. Null when it is not a byte string.
+            streq_decay(IRValue* v, int* cnt) -> IRValue*
+            {
+                IRType* t = v.ty;
+                *cnt = -1;
+                switch (t.kind == LK.PTR)
+                {
+                    case (true) {
+                    switch (t.elem.kind == LK.ARRAY)
+                    {
+                        case (true) {
+                        switch (t.elem.elem.kind == LK.INT)
+                        {
+                            case (true) {
+                            switch (t.elem.elem.width == 8)
+                            {
+                                case (true) {
+                                *cnt = t.elem.count;
+                                this.mod.ia[0] = this.ci32(0);
+                                this.mod.ia[1] = this.ci32(0);
+                                -> this.mod.gep(v, this.mod.ia, 2, false, g"streq_decay\0");
+                            }
+                                default {};
+                            };
+                        }
+                            default {};
+                        };
+                    }
+                        default
+                        {
+                            switch (t.elem.kind == LK.INT)
+                            {
+                                case (true) {
+                                switch (t.elem.width == 8) { case (true) { -> v; } default {}; };
+                            }
+                                default
+                                {
+                                    switch (t.elem.kind == LK.PTR)
+                                    {
+                                        case (true) {
+                                        switch (t.elem.elem.kind == LK.INT)
+                                        {
+                                            case (true) {
+                                            switch (t.elem.elem.width == 8) { case (true) { -> this.mod.load(v, g"streq_load\0"); } default {}; };
+                                        }
+                                            default {};
+                                        };
+                                    }
+                                        default {};
+                                    };
+                                };
+                            };
+                        };
+                    };
+                }
+                    default {};
+                };
+                -> (IRValue*)0;
+            };
+
+            // String literal == byte string: compares contents, not addresses. Null when the
+            // operands are not both byte strings (visit_BinaryOp, _emit_string_literal_eq)
+            str_lit_eq(IRValue* lit, IRValue* oth) -> IRValue*
+            {
+                int lcount, ocount, bound;
+                IRValue* lp, op, idx, iv, a, b, tb;
+                IRValue** pv;
+                IRBlock** pb;
+                IRBlock* cond_b, body_b, step_b, next_b, tail_b, yes_b, no_b, end_b;
+                lp = this.streq_decay(lit, @lcount);
+                switch (lp == (IRValue*)0) { case (true) { -> (IRValue*)0; } default {}; };
+                op = this.streq_decay(oth, @ocount);
+                switch (op == (IRValue*)0) { case (true) { -> (IRValue*)0; } default {}; };
+                switch (lcount < 0) { case (true) { -> (IRValue*)0; } default {}; };
+                bound = lcount;
+                switch (ocount >= 0 & ocount < lcount) { case (true) { bound = ocount; } default {}; };
+                idx = this.mod.alloca_here(this.t_i32, g"streq_i\0");
+                this.mod.store(this.ci32(0), idx);
+                cond_b = this.mod.append_block(this.fn, g"streq.cond\0");
+                body_b = this.mod.append_block(this.fn, g"streq.body\0");
+                step_b = this.mod.append_block(this.fn, g"streq.step\0");
+                next_b = this.mod.append_block(this.fn, g"streq.next\0");
+                tail_b = this.mod.append_block(this.fn, g"streq.tail\0");
+                yes_b = this.mod.append_block(this.fn, g"streq.yes\0");
+                no_b = this.mod.append_block(this.fn, g"streq.no\0");
+                end_b = this.mod.append_block(this.fn, g"streq.end\0");
+                this.mod.br(cond_b);
+                this.mod.position(this.fn, cond_b);
+                iv = this.mod.load(idx, g"streq_iv\0");
+                this.mod.cbr(this.mod.icmp(g"ult\0", iv, this.ci32(bound), (byte*)0), body_b, tail_b);
+                this.mod.position(this.fn, body_b);
+                this.mod.ia[0] = iv;
+                a = this.mod.load(this.mod.gep(lp, this.mod.ia, 1, false, (byte*)0), g"streq_a\0");
+                this.mod.ia[0] = iv;
+                b = this.mod.load(this.mod.gep(op, this.mod.ia, 1, false, (byte*)0), g"streq_b\0");
+                this.mod.cbr(this.mod.icmp(g"eq\0", a, b, (byte*)0), step_b, no_b);
+                this.mod.position(this.fn, step_b);
+                this.mod.cbr(this.mod.icmp(g"eq\0", a, this.mod.c_int(this.t_i8, 0), (byte*)0), yes_b, next_b);
+                this.mod.position(this.fn, next_b);
+                this.mod.store(this.mod.binop(g"add\0", iv, this.ci32(1), (byte*)0), idx);
+                this.mod.br(cond_b);
+                this.mod.position(this.fn, tail_b);
+                switch (ocount < 0 | lcount < ocount)
+                {
+                    case (true) {
+                    this.mod.ia[0] = this.ci32(lcount);
+                    tb = this.mod.load(this.mod.gep(op, this.mod.ia, 1, false, (byte*)0), g"streq_tail\0");
+                    this.mod.cbr(this.mod.icmp(g"eq\0", tb, this.mod.c_int(this.t_i8, 0), (byte*)0), yes_b, no_b);
+                }
+                    default { this.mod.br(no_b); };
+                };
+                this.mod.position(this.fn, yes_b);
+                this.mod.br(end_b);
+                this.mod.position(this.fn, no_b);
+                this.mod.br(end_b);
+                this.mod.position(this.fn, end_b);
+                pv = (IRValue**)this.zbuf(2);
+                pb = (IRBlock**)this.zbuf(2);
+                pv[0] = this.mod.c_int(this.t_i1, 1);
+                pv[1] = this.mod.c_int(this.t_i1, 0);
+                pb[0] = yes_b;
+                pb[1] = no_b;
+                -> this.mod.phi(this.t_i1, pv, pb, 2, g"streq\0");
+            };
+
+            // Logical & and | short-circuit: the right operand only runs when the left one
+            // does not already decide the result. lhs is a bool (i1) value.
+            short_circuit(Node* n, IRValue* lhs) -> IRValue*
+            {
+                IRBlock* lb;
+                IRBlock* rb;
+                IRBlock* eb;
+                IRBlock* re;
+                IRValue* rhs;
+                IRValue* r;
+                IRValue** pv;
+                IRBlock** pb;
+                bool is_and = n.op == Operator.AND;
+                lb = this.mod.cur_block();
+                rb = this.mod.append_block(this.fn, g"sc_rhs\0");
+                eb = this.mod.append_block(this.fn, g"sc_end\0");
+                switch (is_and)
+                {
+                    case (true) { this.mod.cbr(lhs, rb, eb); }
+                    default { this.mod.cbr(lhs, eb, rb); };
+                };
+                this.mod.position(this.fn, rb);
+                rhs = this.visit(n.b);
+                switch (this.bad)
+                {
+                    case (true) { -> (IRValue*)0; }
+                    default {};
+                };
+                switch (rhs == (IRValue*)0)
+                {
+                    case (true) {
+                        this.unsup(n, g"binary void operand\0");
+                        -> (IRValue*)0;
+                    }
+                    default {};
+                };
+                switch (rhs.ty.kind == LK.PTR)
+                {
+                    case (true) { rhs = this.mod.icmp(g"ne\0", rhs, this.mod.c_null(rhs.ty), (byte*)0); }
+                    default {
+                        switch (rhs.ty.kind == LK.INT)
+                        {
+                            case (true) {
+                                switch (rhs.ty.width != 1)
+                                {
+                                    case (true) { rhs = this.mod.icmp(g"ne\0", rhs, this.mod.c_int(rhs.ty, 0), (byte*)0); }
+                                    default {};
+                                };
+                            }
+                            default {};
+                        };
+                    };
+                };
+                re = this.mod.cur_block();
+                this.mod.br(eb);
+                this.mod.position(this.fn, eb);
+                pv = (IRValue**)this.zbuf(2);
+                pb = (IRBlock**)this.zbuf(2);
+                switch (is_and)
+                {
+                    case (true) { pv[0] = this.mod.c_int(this.t_i1, 0); }
+                    default { pv[0] = this.mod.c_int(this.t_i1, 1); };
+                };
+                pv[1] = rhs;
+                pb[0] = lb;
+                pb[1] = re;
+                r = this.mod.phi(this.t_i1, pv, pb, 2, g"sc_result\0");
+                r.spec = this.lit_spec(DataType.UINT);
+                -> r;
+            };
+
             x_binary(Node* n) -> IRValue*
             {
                 int op = n.op;
-                IRValue* lhs;
-                IRValue* rhs;
-                IRValue* r;
-                IRValue* ovp;
-                bool uns, is_cmp, might_ptr, lp, rp, li, ri;
-                bool lzero, rzero;
-                bool dhandled;
+                IRValue* lhs, rhs, r, ovp;
+                bool uns, is_cmp, might_ptr, lp, rp, li, ri, lzero, rzero, dhandled, ohandled;
                 IRType* pe;
                 int lcat, rcat, bare_cat, other_cat;
                 Node* other_n;
@@ -8984,6 +9080,23 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     case (true) { -> (IRValue*)0; }
                                     default
                                     {
+                                        switch ((op == Operator.AND | op == Operator.OR) & lhs != (IRValue*)0)
+                                        {
+                                            case (true) {
+                                                switch (lhs.ty.kind == LK.INT)
+                                                {
+                                                    case (true) {
+                                                        switch (lhs.ty.width == 1)
+                                                        {
+                                                            case (true) { -> this.short_circuit(n, lhs); }
+                                                            default {};
+                                                        };
+                                                    }
+                                                    default {};
+                                                };
+                                            }
+                                            default {};
+                                        };
                                         rhs = this.visit(n.b);
                                         switch (this.bad)
                                         {
@@ -8998,19 +9111,43 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 }
                                                     default
                                                     {
+                                                        r = (IRValue*)0;
+                                                        switch (op == Operator.EQUAL | op == Operator.NOT_EQUAL)
+                                                        {
+                                                            case (true) {
+                                                            switch ((n.a.kind == NodeKind.STRING_LITERAL) != (n.b.kind == NodeKind.STRING_LITERAL))
+                                                            {
+                                                                case (true) {
+                                                                switch (n.a.kind == NodeKind.STRING_LITERAL)
+                                                                {
+                                                                    case (true) { r = this.str_lit_eq(lhs, rhs); }
+                                                                    default { r = this.str_lit_eq(rhs, lhs); };
+                                                                };
+                                                                switch (r != (IRValue*)0 & op == Operator.NOT_EQUAL)
+                                                                {
+                                                                    case (true) { r = this.mod.binop(g"xor\0", r, this.mod.c_int(this.t_i1, 1), (byte*)0); }
+                                                                    default {};
+                                                                };
+                                                                switch (r != (IRValue*)0) { case (true) { -> r; } default {}; };
+                                                            }
+                                                                default {};
+                                                            };
+                                                        }
+                                                            default {};
+                                                        };
                                                         r = this.dict_binary(n, lhs, rhs, @dhandled);
                                                         switch (dhandled)
                                                         {
                                                             case (true) { -> r; }
                                                             default
                                                             {
-                                                                ovp = this.binop_overload(n, op, lhs, rhs);
+                                                                ovp = this.binop_overload(n, op, lhs, rhs, @ohandled);
                                                                 switch (this.bad)
                                                                 {
                                                                     case (true) { -> (IRValue*)0; }
                                                                     default {};
                                                                 };
-                                                                switch (ovp != (IRValue*)0)
+                                                                switch (ohandled)
                                                                 {
                                                                     case (true) { -> ovp; }
                                                                     default {};
@@ -9255,7 +9392,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         switch (op == Operator.SUB)
                                                                         {
                                                                             case (true) {
-                                                                            off = this.mod.binop(g"sub\0", this.mod.c_int(rhs.ty, (i64)0), rhs, (byte*)0);
+                                                                            off = this.mod.binop(g"sub\0", this.mod.c_int(rhs.ty, 0), rhs, (byte*)0);
                                                                         }
                                                                             default {};
                                                                         };
@@ -9709,12 +9846,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_fpcall(Node* n) -> IRValue*
             {
                 Node* idn = node_new(NodeKind.IDENTIFIER, n.line, n.col);
-                IRValue* pv;
-                IRValue* fpv;
-                IRValue* v;
+                IRValue* pv, fpv, v;
                 IRValue** args;
-                IRType* pe;
-                IRType* ft;
+                IRType* pe, ft;
                 Node* an;
                 int argc = node_count(n, 0);
                 int i;
@@ -9817,16 +9951,15 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_call(Node* n) -> IRValue*
             {
                 int argc = node_count(n, 0);
-                int i;
-                int total;
+                int i, total;
                 IRFunc* f;
                 IRValue** args;
-                IRValue* v;
-                IRValue* r;
+                IRValue* v, r;
                 IRType* ft;
-                Node* an;
-                Node* dn;
+                Node* an, dn;
                 IRValue** pslot;
+                Node* fd_e, pe;
+                int se_v, te_v, ne_v;
                 switch (n.text != (byte*)0)
                 {
                     case (true) {
@@ -9940,6 +10073,40 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 };
                                             };
                                         };
+                                        // Endianness-parameter contract (visit_FunctionCall): assignment auto-swaps,
+                                        // parameter passing does not
+                                        fd_e = (Node*)nm_get(this.fdefs, f.name);
+                                        ne_v = 0;
+                                        switch (fd_e != (Node*)0) { case (true) { ne_v = node_count(fd_e, 0); } default {}; };
+                                        i = 0;
+                                        while (i < argc & i < ne_v)
+                                        {
+                                            pe = node_child(fd_e, 0, i);
+                                            se_v = this.endian_of(args[i].spec);
+                                            te_v = this.endian_of(pe.ts);
+                                            switch (se_v != te_v)
+                                            {
+                                                case (true) {
+                                                this.sc.clear();
+                                                this.sc.put_str(g"Compile error: Passing argument \0");
+                                                this.sc.put_int(i);
+                                                this.sc.put_str(g" of function \0");
+                                                this.sc.put_str(n.text);
+                                                this.sc.put_str(g" is \0");
+                                                switch (se_v == 0) { case (true) { this.sc.put_str(g"little-endian\0"); } default { this.sc.put_str(g"big-endian\0"); }; };
+                                                this.sc.put_str(g", but parameter \0");
+                                                this.sc.put_int(i);
+                                                this.sc.put_str(g" expects \0");
+                                                switch (te_v == 0) { case (true) { this.sc.put_str(g"little-endian\0"); } default { this.sc.put_str(g"big-endian\0"); }; };
+                                                this.sc.put_str(g".\nEndianness mismatch in function call disallowed (assignment auto-swaps, parameter passing does not). \0");
+                                                this.fail_at(n, this.sc.mem);
+                                                this.unsup(n, g"endianness mismatch\0");
+                                                -> (IRValue*)0;
+                                            }
+                                                default {};
+                                            };
+                                            i++;
+                                        };
                                         i = 0;
                                         while (i < total & i < ft.nitems)
                                         {
@@ -9975,8 +10142,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // __<digits>__ group, -1 when the name has none
             ov_key_end(byte* s) -> int
             {
-                int i;
-                int j;
+                int i, j;
                 while (s[i] != 0)
                 {
                     switch (s[i] == '_' & s[i + 1] == '_' & s[i + 2] >= '0' & s[i + 2] <= '9')
@@ -9996,8 +10162,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // True when the registered overload name f has the key text equal to name or ending in __name
             ov_key_matches(byte* fname, int e, byte* name) -> bool
             {
-                int nl;
-                int i;
+                int nl, i;
                 while (name[nl] != 0) { nl++; };
                 switch (e == nl)
                 {
@@ -10035,10 +10200,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             ptr_overload_call(Node* n, int argc, IRValue** out) -> bool
             {
                 byte* name;
-                int nl;
-                int i;
-                int j;
-                int e;
+                int nl, i, j, e;
                 int ke = -1;
                 IRFunc* g;
                 IRFunc* key_f = (IRFunc*)0;
@@ -10383,7 +10545,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int i;
                 while (i < 8 * n)
                 {
-                    r[i] = (byte)0;
+                    r[i] = 0;
                     i++;
                 };
                 this.keep((void*)r);
@@ -10394,8 +10556,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // this.q_len to its length and this.q_end past the closing quote, null when none
             next_quoted(byte* s, int p) -> int
             {
-                int a;
-                int b;
+                int a, b;
                 while (s[p] != 0 & s[p] != '"') { p++; };
                 switch (s[p] == 0)
                 {
@@ -10429,7 +10590,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     r[i] = s[a + i];
                     i++;
                 };
-                r[len] = (byte)0;
+                r[len] = 0;
                 this.keep((void*)r);
                 -> r;
             };
@@ -10439,10 +10600,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 int p = a;
                 int n = 0;
-                int qs;
-                int ql;
-                int vs0;
-                int ve;
+                int qs, ql, vs0, ve;
                 while (p < b & n < 16)
                 {
                     while (p < b & s[p] != '"') { p++; };
@@ -10507,29 +10665,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRType** itys = (IRType**)this.zbuf(40);
                 IRType** otys = (IRType**)this.zbuf(16);
                 IRValue** ro_ptr = (IRValue**)this.zbuf(16);
-                int ncs;
-                int no;
-                int ni;
-                int nclob;
-                int nfin;
-                int nfc;
-                int nro;
-                int i;
-                int j;
-                int p0;
-                int p1;
-                int len;
-                int a;
-                int ls;
-                int le;
-                int ts;
-                int te;
-                int qs;
-                IRValue* v;
-                IRValue* res;
-                IRValue* callee;
-                IRType* rty;
-                IRType* ft;
+                int ncs, no, ni, nclob, nfin, nfc, nro, i, j, p0, p1, len, a, ls, le, ts, te, qs;
+                IRValue* v, res, callee;
+                IRType* rty, ft;
                 LVar* lv;
                 byte* c;
                 bool first = true;
@@ -11027,10 +11165,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // unsized array type function, declared here and given its body once the caller is finished
             tf_specialize(Node* n, byte* tn, IRType* sp, TypeSpec* cts) -> IRFunc*
             {
-                Node* orig;
-                Node* fd;
-                Node* p0;
-                Node* pc;
+                Node* orig, fd, p0, pc;
                 IRFunc* f;
                 byte* nm;
                 int i;
@@ -11091,15 +11226,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int argc = node_count(n, 0);
                 int i;
                 LVar* lv;
-                IRValue* objp;
-                IRValue* recv;
-                IRValue* v;
+                IRValue* objp, recv, v;
                 IRValue** args;
                 IRFunc* f;
-                IRType* ft;
-                IRType* sp;
-                byte* tn;
-                byte* om;
+                IRType* ft, sp;
+                byte* tn, om;
                 int nm;
                 bool spec_arr;
                 switch (o.kind == NodeKind.IDENTIFIER)
@@ -11283,13 +11414,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int argc = node_count(n, 0);
                 int i;
                 LVar* lv;
-                IRValue* objp;
-                IRValue* thisp;
-                IRValue* v;
+                IRValue* objp, thisp, v;
                 IRValue** args;
                 IRFunc* f;
-                IRType* ft;
-                IRType* sp;
+                IRType* ft, sp;
                 byte* vname = (byte*)0;
                 switch (n.text3 == (byte*)0)
                 {
@@ -11581,15 +11709,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 SInfo* si;
                 Node** exprs;
                 IRValue** vals;
-                IRValue* fv;
-                IRValue* res;
+                IRValue* fv, res;
                 IRType* ft;
                 Buf cb;
-                int nf;
-                int np;
-                int nn;
-                int i;
-                int j;
+                int nf, np, nn, i, j;
                 bool has_non = false;
                 switch (st == (IRType*)0)
                 {
@@ -11856,20 +11979,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // visit_TernaryOp
             x_ternary(Node* n) -> IRValue*
             {
-                IRValue* cv;
-                IRValue* tv;
-                IRValue* fv;
-                IRValue* phi;
+                IRValue* cv, tv, fv, phi;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* tb;
-                IRBlock* fb;
-                IRBlock* mb;
-                IRBlock* te;
-                IRBlock* fe;
+                IRBlock* tb, fb, mb, te, fe;
                 void* tl;
-                bool tp;
-                bool fpp;
+                bool tp, fpp;
                 cv = this.cond_value(n.a);
                 switch (this.bad)
                 {
@@ -11888,7 +12003,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             case (true) { -> (IRValue*)0; }
                             default
                             {
-                                te = this.mod.cb;
+                                te = this.mod.cur_block();
                                 switch (!te.terminated)
                                 {
                                     case (true) { this.mod.br(mb); }
@@ -11902,7 +12017,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     case (true) { -> (IRValue*)0; }
                                     default
                                     {
-                                        fe = this.mod.cb;
+                                        fe = this.mod.cur_block();
                                         switch (!fe.terminated)
                                         {
                                             case (true) { this.mod.br(mb); }
@@ -12038,14 +12153,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int i;
                 bool allc = true;
                 IRValue** ev;
-                IRValue* v;
-                IRValue* arr;
-                IRValue* ep;
-                IRType* et;
-                IRType* aty;
+                IRValue* v, arr, ep;
+                IRType* et, aty;
                 Node* sn;
-                int sl;
-                int k;
+                int sl, k;
                 i64 pk;
                 int mw;
                 switch (c == 0 | this.fn == (IRFunc*)0)
@@ -12078,7 +12189,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     default {};
                                 };
                                 switch (sl > 4) { case (true) { sl = 4; } default {}; };
-                                pk = (i64)0;
+                                pk = 0;
                                 k = 0;
                                 while (k < sl)
                                 {
@@ -12184,17 +12295,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
 
             x_ifexpr(Node* n) -> IRValue*
             {
-                IRValue* cv;
-                IRValue* tv;
-                IRValue* fv;
-                IRValue* phi;
+                IRValue* cv, tv, fv, phi;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* tb;
-                IRBlock* fb;
-                IRBlock* mb;
-                IRBlock* te;
-                IRBlock* fe;
+                IRBlock* tb, fb, mb, te, fe;
         bool isstr = false;
                 cv = this.cond_value(n.b);
                 switch (this.bad) { case (true) { -> (IRValue*)0; } default
@@ -12208,14 +12312,14 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         tv = this.visit(n.a);
                         switch (this.bad) { case (true) { -> (IRValue*)0; } default
                             {
-                                te = this.mod.cb;
+                                te = this.mod.cur_block();
                                 switch (!te.terminated) { case (true) { this.mod.br(mb); } default {}; };
 
                                 switch (tv == (IRValue*)0 & n.c == (Node*)0)
                                 {
                                     case (true) {
                                     this.mod.position(this.fn, fb);
-                                    switch (!this.mod.cb.terminated) { case (true) { this.mod.br(mb); } default {}; };
+                                    switch (!this.mod.cur_block().terminated) { case (true) { this.mod.br(mb); } default {}; };
                                     this.mod.position(this.fn, mb);
                                     -> (IRValue*)0;
                                 }
@@ -12232,7 +12336,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 this.mod.position(this.fn, fb);
                                                 switch (n.c == (Node*)0)
                                                 {
-                                                    case (true) { fv = this.mod.c_int(tv.ty, (i64)0); }
+                                                    case (true) { fv = this.mod.c_int(tv.ty, 0); }
                                                     default {
                                                         switch (n.c.kind == NodeKind.NO_INIT)
                                                         {
@@ -12252,7 +12356,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 }
                                                     default
                                                     {
-                                                        fe = this.mod.cb;
+                                                        fe = this.mod.cur_block();
                                                         switch (!fe.terminated) { case (true) { this.mod.br(mb); } default {}; };
 
                                                         this.mod.position(this.fn, mb);
@@ -12374,22 +12478,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_rangeassign(Node* n) -> IRValue*
             {
                 IRValue* arr = this.visit(n.a);
-                IRValue* sv;
-                IRValue* ev;
-                IRValue* fv;
-                IRValue* tmp;
-                IRValue* kp;
-                IRValue* kv;
-                IRValue* cnt;
-                IRValue* cmp;
-                IRValue* sp;
-                IRValue* dp;
-                IRValue* el;
-                IRValue* di;
+                IRValue* sv, ev, fv, tmp, kp, kv, cnt, cmp, sp, dp, el, di;
                 IRType* et;
-                IRBlock* cb;
-                IRBlock* bb;
-                IRBlock* eb;
+                IRBlock* cb, bb, eb;
                 bool arr2d = false;
                 bool src2d = false;
                 bool valform = n.ival == (i64)1;
@@ -12570,11 +12661,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_ternassign(Node* n) -> IRValue*
             {
                 LVar* lv;
-                IRValue* cur;
-                IRValue* iz;
-                IRValue* nv;
-                IRBlock* tb;
-                IRBlock* mb;
+                IRValue* cur, iz, nv;
+                IRBlock* tb, mb;
                 switch (n.a.kind != NodeKind.IDENTIFIER)
                 {
                     case (true) {
@@ -12635,16 +12723,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
 
             x_coalesce(Node* n) -> IRValue*
             {
-                IRValue* lv;
-                IRValue* rv;
-                IRValue* isn;
-                IRValue* phi;
+                IRValue* lv, rv, isn, phi;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* rb;
-                IRBlock* mb;
-                IRBlock* lb;
-                IRBlock* re;
+                IRBlock* rb, mb, lb, re;
                 lv = this.visit(n.a);
                 switch (this.bad) { case (true) { -> (IRValue*)0; } default
                     {
@@ -12662,7 +12744,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     default {
                                         switch (lv.ty.kind == LK.INT)
                                         {
-                                            case (true) { isn = this.mod.icmp(g"eq\0", lv, this.mod.c_int(lv.ty, (i64)0), g"is_zero\0"); }
+                                            case (true) { isn = this.mod.icmp(g"eq\0", lv, this.mod.c_int(lv.ty, 0), g"is_zero\0"); }
                                             default {
                                                 this.unsup(n, g"null coalesce operand type\0");
                                                 -> (IRValue*)0;
@@ -12672,13 +12754,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 };
                                 rb = this.mod.append_block(this.fn, g"coalesce_right\0");
                                 mb = this.mod.append_block(this.fn, g"coalesce_merge\0");
-                                lb = this.mod.cb;
+                                lb = this.mod.cur_block();
                                 this.mod.cbr(isn, rb, mb);
                                 this.mod.position(this.fn, rb);
                                 rv = this.visit(n.b);
                                 switch (this.bad) { case (true) { -> (IRValue*)0; } default
                                     {
-                                        re = this.mod.cb;
+                                        re = this.mod.cur_block();
                                         this.mod.br(mb);
                                         this.mod.position(this.fn, mb);
                                         switch (rv == (IRValue*)0)
@@ -12719,8 +12801,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_fpdecl(Node* n) -> IRValue*
             {
                 IRType* pt = this.lower(n.ts, false, n.line);
-                IRValue* al;
-                IRValue* iv;
+                IRValue* al, iv;
                 switch (this.bad)
                 {
                     case (true) { -> (IRValue*)0; }
@@ -12790,25 +12871,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 IRValue* hy = this.visit(n.b);
                 IRValue* nv = nd;
-                IRValue* pos_ptr;
-                IRValue* pos;
-                IRValue* pos2;
-                IRValue* done;
-                IRValue* ph;
-                IRValue* sh;
-                IRValue* win;
-                IRValue* hit;
-                IRValue* res;
+                IRValue* pos_ptr, pos, pos2, done, ph, sh, win, hit, res;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* fb;
-                IRBlock* nb;
-                IRBlock* mb;
-                IRBlock* cb;
-                IRBlock* bb;
+                IRBlock* fb, nb, mb, cb, bb;
                 IRType* ht;
-                int hw;
-                int nw;
+                int hw, nw;
                 u64 mk;
                 switch (this.bad)
                 {
@@ -12840,7 +12908,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         nb = this.mod.append_block(this.fn, g"in.notfound\0");
                                         mb = this.mod.append_block(this.fn, g"in.merge\0");
                                         pos_ptr = this.mod.alloca_here(this.t_i32, g"in.pos\0");
-                                        this.mod.store(this.mod.c_int(this.t_i32, (i64)0), pos_ptr);
+                                        this.mod.store(this.mod.c_int(this.t_i32, 0), pos_ptr);
                                         cb = this.mod.append_block(this.fn, g"in.bit.cond\0");
                                         bb = this.mod.append_block(this.fn, g"in.bit.body\0");
                                         this.mod.br(cb);
@@ -12858,7 +12926,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         sh = this.mod.binop(g"lshr\0", hy, ph, g"in.shifted\0");
                                         win = this.mod.binop(g"and\0", sh, this.mod.c_u64(ht, mk), g"in.window\0");
                                         hit = this.mod.icmp(g"eq\0", win, nv, g"in.hit\0");
-                                        this.mod.store(this.mod.binop(g"add\0", pos2, this.mod.c_int(this.t_i32, (i64)1), (byte*)0), pos_ptr);
+                                        this.mod.store(this.mod.binop(g"add\0", pos2, this.mod.c_int(this.t_i32, 1), (byte*)0), pos_ptr);
                                         this.mod.cbr(hit, fb, cb);
 
                                         this.mod.position(this.fn, fb);
@@ -12926,44 +12994,18 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // when it was already visited, null otherwise.
             x_in_seq(Node* n, IRValue* nd, IRValue* hy0) -> IRValue*
             {
-                IRType* ne_t;
-                IRType* he_t;
+                IRType* ne_t, he_t;
                 int ncount = -1;
                 int hcount = -1;
-                IRValue* np;
-                IRValue* hp;
+                IRValue* np, hp;
                 IRValue* hy = hy0;
-                IRValue* i0 = this.mod.c_int(this.t_i32, (i64)0);
-                IRValue* i1v = this.mod.c_int(this.t_i32, (i64)1);
-                IRValue* oidx;
-                IRValue* oi;
-                IRValue* oi2;
-                IRValue* oi3;
-                IRValue* nidx;
-                IRValue* hidx;
-                IRValue* ni;
-                IRValue* ni2;
-                IRValue* hi2;
-                IRValue* t1;
-                IRValue* t2;
-                IRValue* hel;
-                IRValue* nel;
-                IRValue* oob;
-                IRValue* nev;
-                IRValue* mm;
-                IRValue* res;
+                IRValue* i0 = this.mod.c_int(this.t_i32, 0);
+                IRValue* i1v = this.mod.c_int(this.t_i32, 1);
+                IRValue* oidx, oi, oi2, oi3, nidx, hidx, ni, ni2, hi2, t1, t2, hel, nel, oob, nev, mm, res;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* found_b;
-                IRBlock* nf_b;
-                IRBlock* merge_b;
-                IRBlock* oc_b;
-                IRBlock* ob_b;
-                IRBlock* ic_b;
-                IRBlock* ib_b;
-                IRBlock* if_b;
-                bool nul_h;
-                bool nul_n;
+                IRBlock* found_b, nf_b, merge_b, oc_b, ob_b, ic_b, ib_b, if_b;
+                bool nul_h, nul_n;
                 void** sl;
                 sl = this.zbuf(2);
                 np = this.in_decay(nd, sl);
@@ -13038,11 +13080,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     case (true) {
                                                     t1 = this.mod.gep_ptr(hp, oi, false, g"hay.ep\0");
                                                     t2 = this.mod.load(t1, g"hay.ch\0");
-                                                    t1 = this.mod.icmp(g"eq\0", t2, this.mod.c_int(he_t, (i64)0), g"hay.end\0");
+                                                    t1 = this.mod.icmp(g"eq\0", t2, this.mod.c_int(he_t, 0), g"hay.end\0");
                                                     this.mod.cbr(t1, nf_b, ob_b);
                                                 }
                                                     default {
-                                                    t1 = this.mod.icmp(g"eq\0", oi, this.mod.c_int(this.t_i32, (i64)hcount), g"hay.done\0");
+                                                    t1 = this.mod.icmp(g"eq\0", oi, this.mod.c_int(this.t_i32, hcount), g"hay.done\0");
                                                     this.mod.cbr(t1, nf_b, ob_b);
                                                 };
                                                 };
@@ -13060,11 +13102,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     case (true) {
                                                     t1 = this.mod.gep_ptr(np, ni, false, g"ndl.ep\0");
                                                     t2 = this.mod.load(t1, g"ndl.ch\0");
-                                                    t1 = this.mod.icmp(g"eq\0", t2, this.mod.c_int(ne_t, (i64)0), g"ndl.end\0");
+                                                    t1 = this.mod.icmp(g"eq\0", t2, this.mod.c_int(ne_t, 0), g"ndl.end\0");
                                                     this.mod.cbr(t1, found_b, ib_b);
                                                 }
                                                     default {
-                                                    t1 = this.mod.icmp(g"eq\0", ni, this.mod.c_int(this.t_i32, (i64)ncount), g"ndl.done\0");
+                                                    t1 = this.mod.icmp(g"eq\0", ni, this.mod.c_int(this.t_i32, ncount), g"ndl.done\0");
                                                     this.mod.cbr(t1, found_b, ib_b);
                                                 };
                                                 };
@@ -13078,10 +13120,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     case (true) {
                                                     t1 = this.mod.gep_ptr(hp, hi2, false, g"hay.ep2\0");
                                                     hel = this.mod.load(t1, g"hay.el\0");
-                                                    oob = this.mod.icmp(g"eq\0", hel, this.mod.c_int(he_t, (i64)0), g"hay.oob\0");
+                                                    oob = this.mod.icmp(g"eq\0", hel, this.mod.c_int(he_t, 0), g"hay.oob\0");
                                                 }
                                                     default {
-                                                    oob = this.mod.icmp(g"eq\0", hi2, this.mod.c_int(this.t_i32, (i64)hcount), g"hay.oob\0");
+                                                    oob = this.mod.icmp(g"eq\0", hi2, this.mod.c_int(this.t_i32, hcount), g"hay.oob\0");
                                                     t1 = this.mod.gep_ptr(hp, hi2, false, g"hay.ep2\0");
                                                     hel = this.mod.load(t1, g"hay.el\0");
                                                 };
@@ -13140,40 +13182,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 IRValue* nd = this.visit(n.a);
                 IRValue* hy;
-                IRValue* i0 = this.mod.c_int(this.t_i32, (i64)0);
-                IRValue* i1v = this.mod.c_int(this.t_i32, (i64)1);
-                IRValue* oidx;
-                IRValue* oi;
-                IRValue* hp;
-                IRValue* hc;
-                IRValue* ae;
-                IRValue* ni;
-                IRValue* oi2;
-                IRValue* ni2;
-                IRValue* hi2;
-                IRValue* np;
-                IRValue* nc;
-                IRValue* ne;
-                IRValue* nel;
-                IRValue* hp2;
-                IRValue* hel;
-                IRValue* oob;
-                IRValue* nev;
-                IRValue* mm;
-                IRValue* oi3;
-                IRValue* nidx;
-                IRValue* hidx;
-                IRValue* res;
+                IRValue* i0 = this.mod.c_int(this.t_i32, 0);
+                IRValue* i1v = this.mod.c_int(this.t_i32, 1);
+                IRValue* oidx, oi, hp, hc, ae, ni, oi2, ni2, hi2, np, nc, ne, nel, hp2, hel, oob, nev, mm, oi3, nidx, hidx, res;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* found_b;
-                IRBlock* nf_b;
-                IRBlock* merge_b;
-                IRBlock* oc_b;
-                IRBlock* ob_b;
-                IRBlock* ic_b;
-                IRBlock* ib_b;
-                IRBlock* if_b;
+                IRBlock* found_b, nf_b, merge_b, oc_b, ob_b, ic_b, ib_b, if_b;
                 switch (this.bad)
                 {
                     case (true) { -> (IRValue*)0; }
@@ -13221,7 +13235,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 oi = this.mod.load(oidx, g"o.idx\0");
                                                 hp = this.mod.gep_ptr(hy, oi, false, g"hay.ep\0");
                                                 hc = this.mod.load(hp, g"hay.ch\0");
-                                                ae = this.mod.icmp(g"eq\0", hc, this.mod.c_int(this.t_i8, (i64)0), g"hay.end\0");
+                                                ae = this.mod.icmp(g"eq\0", hc, this.mod.c_int(this.t_i8, 0), g"hay.end\0");
                                                 this.mod.cbr(ae, nf_b, ob_b);
                                                 this.mod.position(this.fn, ob_b);
                                                 nidx = this.mod.alloca_here(this.t_i32, g"in.ndl.idx\0");
@@ -13234,7 +13248,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 ni = this.mod.load(nidx, g"n.idx\0");
                                                 np = this.mod.gep_ptr(nd, ni, false, g"ndl.ep\0");
                                                 nc = this.mod.load(np, g"ndl.ch\0");
-                                                ne = this.mod.icmp(g"eq\0", nc, this.mod.c_int(this.t_i8, (i64)0), g"ndl.end\0");
+                                                ne = this.mod.icmp(g"eq\0", nc, this.mod.c_int(this.t_i8, 0), g"ndl.end\0");
                                                 this.mod.cbr(ne, found_b, ib_b);
                                                 this.mod.position(this.fn, ib_b);
                                                 ni2 = this.mod.load(nidx, g"n.idx2\0");
@@ -13243,7 +13257,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 nel = this.mod.load(np, g"ndl.el\0");
                                                 hp2 = this.mod.gep_ptr(hy, hi2, false, g"hay.ep2\0");
                                                 hel = this.mod.load(hp2, g"hay.el\0");
-                                                oob = this.mod.icmp(g"eq\0", hel, this.mod.c_int(this.t_i8, (i64)0), g"hay.oob\0");
+                                                oob = this.mod.icmp(g"eq\0", hel, this.mod.c_int(this.t_i8, 0), g"hay.oob\0");
                                                 nev = this.mod.icmp(g"ne\0", hel, nel, g"el.ne\0");
                                                 mm = this.mod.binop(g"or\0", oob, nev, g"mismatch\0");
                                                 this.mod.store(this.mod.binop(g"add\0", ni2, i1v, (byte*)0), nidx);
@@ -13306,7 +13320,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     default {
                                         switch (v.ty.kind == LK.INT)
                                         {
-                                            case (true) { c = this.mod.icmp(g"ne\0", v, this.mod.c_int(v.ty, (i64)0), g"not_zero\0"); }
+                                            case (true) { c = this.mod.icmp(g"ne\0", v, this.mod.c_int(v.ty, 0), g"not_zero\0"); }
                                             default {
                                                 switch (v.ty.kind == LK.FLOAT | v.ty.kind == LK.DOUBLE)
                                                 {
@@ -13361,10 +13375,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_compound(Node* n) -> IRValue*
             {
                 int op = this.compound_op(n.op);
-                Node* bin;
-                Node* asg;
-                IRValue* pre;
-                IRValue* r;
+                Node* bin, asg;
+                IRValue* pre, r;
                 switch (op < 0)
                 {
                     case (true) {
@@ -13441,25 +13453,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 LVar* lv;
                 IRValue* ptr;
                 IRValue* val = val0;
-                IRValue* sv;
-                IRValue* ev;
-                IRValue* iv;
-                IRValue* cur;
-                IRValue* cleared;
-                IRValue* rm;
-                IRValue* rs;
-                IRValue* sh;
-                IRValue* one;
-                IRValue* bm;
+                IRValue* sv, ev, iv, cur, cleared, rm, rs, sh, one, bm;
                 IRType* it;
-                i64 sc;
-                i64 ec;
-                u64 full;
-                u64 mask;
-                u64 inv;
-                int w;
-                int swid;
-                int lsb;
+                i64 sc, ec;
+                u64 full, mask, inv;
+                int w, swid, lsb;
                 switch (o.kind != NodeKind.IDENTIFIER)
                 {
                     case (true) {
@@ -13532,7 +13530,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     switch (val.ty.width < w) { case (true) { val = this.mod.cast(g"zext\0", val, it, g"bsa_widen\0"); } default {}; };
                                                     switch (val.ty.width > w) { case (true) { val = this.mod.cast(g"trunc\0", val, it, g"bsa_trunc\0"); } default {}; };
                                                     rm = this.mod.binop(g"and\0", val, this.mod.c_u64(it, mask), g"bsa_rhs_mask\0");
-                                                    rs = this.mod.binop(g"shl\0", rm, this.mod.c_int(it, (i64)lsb), g"bsa_rhs_shift\0");
+                                                    rs = this.mod.binop(g"shl\0", rm, this.mod.c_int(it, lsb), g"bsa_rhs_shift\0");
                                                     iv = this.mod.binop(g"or\0", cleared, rs, g"bsa_result\0");
                                                     this.mod.store(iv, ptr);
                                                     -> iv;
@@ -13555,10 +13553,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         sh = this.mod.binop(g"sub\0", this.mod.c_int(this.t_i32, (i64)(w - 1)), iv, g"bia_shift\0");
                                                                         switch (w < 32) { case (true) { sh = this.mod.cast(g"trunc\0", sh, it, g"bia_shift_trunc\0"); } default {}; };
                                                                         switch (sh.ty.width < w) { case (true) { sh = this.mod.cast(g"zext\0", sh, it, g"bia_shift_e\0"); } default {}; };
-                                                                        one = this.mod.c_int(it, (i64)1);
+                                                                        one = this.mod.c_int(it, 1);
                                                                         bm = this.mod.binop(g"shl\0", one, sh, g"bia_mask\0");
                                                                         inv = full;
-                                                                        cleared = this.mod.binop(g"xor\0", bm, this.mod.c_int(it, (i64)-1), g"bia_inv_mask\0");
+                                                                        cleared = this.mod.binop(g"xor\0", bm, this.mod.c_int(it, -1), g"bia_inv_mask\0");
                                                                         cur = this.mod.load(ptr, g"bia_cur\0");
                                                                         cleared = this.mod.binop(g"and\0", cur, cleared, g"bia_cleared\0");
                                                                         switch (val.ty.width < w) { case (true) { val = this.mod.cast(g"zext\0", val, it, g"bia_rhs_widen\0"); } default {}; };
@@ -13749,16 +13747,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRType* pt = this.mod.t_ptr(lt);
                 IRFunc* mf = this.heap_alloc_fn();
                 IRValue* np = this.mod.c_null(pt);
-                IRValue* szp;
-                IRValue* sz;
-                IRValue* raw;
-                IRValue* ip;
-                IRValue* tp;
-                IRValue* slot;
+                IRValue* szp, sz, raw, ip, tp, slot;
                 TypeSpec* pts;
                 LVar* lv;
-                IRValue* iv;
-                IRValue* tmpa;
+                IRValue* iv, tmpa;
                 bool has_ini;
                 this.mod.ia[0] = this.ci32(1);
                 szp = this.mod.gep(np, this.mod.ia, 1, false, g"sizeof_gep\0");
@@ -13845,14 +13837,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // _vardecl_singinit: function scoped variable with program lifetime
             vardecl_singinit(Node* n, IRType* lt, TypeSpec* ts) -> IRValue*
             {
-                IRGlobal* gv;
-                IRGlobal* gg;
-                IRBlock* ib;
-                IRBlock* db;
-                IRValue* guard;
-                IRValue* one;
-                byte* gname;
-                byte* uname;
+                IRGlobal* gv, gg;
+                IRBlock* ib, db;
+                IRValue* guard, one;
+                byte* gname, uname;
                 this.sc.clear();
                 this.sc.put_str(f"__singinit__{this.fn.name}__{n.text}\0");
                 gname = ts_dup(this.sc.mem);
@@ -13949,25 +13937,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             bs_struct_buf(IRType* st, IRValue* sp) -> IRValue*
             {
                 SInfo* si = this.sinfo_of(st);
-                int total;
-                int i;
-                int bi;
-                int off;
-                int nb;
-                int bits;
-                IRType* ft;
-                IRType* wty;
-                IRType* at;
-                IRValue* buf;
-                IRValue* i8buf;
-                IRValue* fp;
-                IRValue* fv;
-                IRValue* wv;
-                IRValue* sh;
-                IRValue* bv;
-                IRValue* bp;
-                IRValue* fsrc;
-                IRValue* sb;
+                int total, i, bi, off, nb, bits;
+                IRType* ft, wty, at;
+                IRValue* buf, i8buf, fp, fv, wv, sh, bv, bp, fsrc, sb;
                 int* sizes;
                 switch (si == (SInfo*)0)
                 {
@@ -14070,13 +14042,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int first = (int)(sc / (i64)8);
                 int last = (int)(ec / (i64)8);
                 int nb = last - first + 1;
-                int j;
-                int shin;
-                int shout;
+                int j, shin, shout;
                 IRType* wty;
-                IRValue* acc;
-                IRValue* bp;
-                IRValue* bv;
+                IRValue* acc, bp, bv;
                 switch (nb * 8 > 64)
                 {
                     case (true) {
@@ -14086,7 +14054,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     default {};
                 };
                 wty = this.mod.t_int(nb * 8);
-                acc = this.mod.c_int(wty, (i64)0);
+                acc = this.mod.c_int(wty, 0);
                 j = 0;
                 while (j < nb)
                 {
@@ -14100,7 +14068,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     shin = (nb - 1 - j) * 8;
                     switch (shin != 0)
                     {
-                        case (true) { bv = this.mod.binop(g"shl\0", bv, this.mod.c_int(wty, (i64)shin), g"bs_mb_sh\0"); }
+                        case (true) { bv = this.mod.binop(g"shl\0", bv, this.mod.c_int(wty, shin), g"bs_mb_sh\0"); }
                         default {};
                     };
                     acc = this.mod.binop(g"or\0", acc, bv, g"bs_mb_acc\0");
@@ -14109,7 +14077,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 shout = 7 - (int)(ec % (i64)8);
                 switch (shout != 0)
                 {
-                    case (true) { acc = this.mod.binop(g"lshr\0", acc, this.mod.c_int(wty, (i64)shout), g"bs_mb_down\0"); }
+                    case (true) { acc = this.mod.binop(g"lshr\0", acc, this.mod.c_int(wty, shout), g"bs_mb_down\0"); }
                     default {};
                 };
                 switch (sw < wty.width)
@@ -14126,46 +14094,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_bitslice_raw(Node* n) -> IRValue*
             {
                 IRValue* val = this.visit(n.a);
-                IRValue* sv;
-                IRValue* ev;
-                IRValue* base;
-                IRValue* tmp;
-                IRValue* wv;
-                IRValue* sh;
-                IRValue* bv;
-                IRValue* res;
-                IRValue* bval;
-                IRValue* ext;
-                IRValue* plc;
-                IRValue* si32;
-                IRValue* ei32;
-                IRValue* eight;
-                IRValue* bidx;
-                IRValue* bstart;
-                IRValue* bend;
-                IRValue* bp;
-                IRValue* bbyte;
-                IRValue* e8;
-                IRValue* s8;
-                IRValue* shamt;
-                IRValue* shd;
-                IRValue* slen;
-                IRValue* swid;
-                IRValue* mraw;
-                IRValue* mask;
-                IRValue* masked;
+                IRValue* sv, ev, base, tmp, wv, sh, bv, res, bval, ext, plc, si32, ei32, eight, bidx, bstart, bend, bp, bbyte, e8, s8, shamt, shd, slen, swid, mraw, mask, masked;
                 IRType* vt;
                 IRType* i8t = this.t_i8;
                 IRType* i8ptr = this.mod.t_ptr(this.t_i8);
-                i64 sc;
-                i64 ec;
-                bool has_s;
-                bool has_e;
-                int nbytes;
-                int nbits;
-                int i;
-                int bit_pos;
-                int width;
+                i64 sc, ec;
+                bool has_s, has_e;
+                int nbytes, nbits, i, bit_pos, width;
                 switch (this.bad)
                 {
                     case (true) { -> (IRValue*)0; }
@@ -14248,7 +14183,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         };
                                                     };
                                                     nbits = (int)(sc - ec + (i64)1);
-                                                    res = this.mod.c_int(i8t, (i64)0);
+                                                    res = this.mod.c_int(i8t, 0);
                                                     i = 0;
                                                     bit_pos = (int)sc;
                                                     while (bit_pos >= (int)ec)
@@ -14256,7 +14191,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         bp = this.bs_gep(base, this.ci32(bit_pos / 8), (byte*)0);
                                                         bval = this.mod.load(bp, this.nm_ab(g"rev_byte_\0", i, -1));
                                                         sh = this.mod.binop(g"lshr\0", bval, this.mod.c_int(i8t, (i64)(7 - bit_pos % 8)), this.nm_ab(g"rev_ext_\0", i, -1));
-                                                        ext = this.mod.binop(g"and\0", sh, this.mod.c_int(i8t, (i64)1), this.nm_ab(g"rev_bit_\0", i, -1));
+                                                        ext = this.mod.binop(g"and\0", sh, this.mod.c_int(i8t, 1), this.nm_ab(g"rev_bit_\0", i, -1));
                                                         plc = this.mod.binop(g"shl\0", ext, this.mod.c_int(i8t, (i64)(nbits - 1 - i)), this.nm_ab(g"rev_place_\0", i, -1));
                                                         res = this.mod.binop(g"or\0", res, plc, this.nm_ab(g"rev_acc_\0", i, -1));
                                                         i++;
@@ -14405,10 +14340,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                 bbyte = this.mod.load(bp, g"bs_byte\0");
                                                                 e8 = this.mod.cast(g"trunc\0", bend, i8t, g"bs_bit_end_i8\0");
                                                                 s8 = this.mod.cast(g"trunc\0", bstart, i8t, g"bs_bit_start_i8\0");
-                                                                shamt = this.mod.binop(g"sub\0", this.mod.c_int(i8t, (i64)7), e8, g"bs_shift_amt\0");
+                                                                shamt = this.mod.binop(g"sub\0", this.mod.c_int(i8t, 7), e8, g"bs_shift_amt\0");
                                                                 shd = this.mod.binop(g"lshr\0", bbyte, shamt, g"bs_shift\0");
                                                                 slen = this.mod.binop(g"sub\0", e8, s8, g"bs_slen\0");
-                                                                swid = this.mod.binop(g"add\0", slen, this.mod.c_int(i8t, (i64)1), g"bs_swidth\0");
+                                                                swid = this.mod.binop(g"add\0", slen, this.mod.c_int(i8t, 1), g"bs_swidth\0");
                                                                 mraw = this.mod.binop(g"shl\0", this.ci32(1), this.mod.cast(g"zext\0", swid, this.t_i32, g"bs_swidth32\0"), g"bs_mask_raw\0");
                                                                 mask = this.mod.cast(g"trunc\0", this.mod.binop(g"sub\0", mraw, this.ci32(1), g"bs_mask32\0"), i8t, g"bs_mask\0");
                                                                 masked = this.mod.binop(g"and\0", shd, mask, g"bs_result\0");
@@ -14443,12 +14378,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_bitindex(Node* n) -> IRValue*
             {
                 IRValue* val = this.visit(n.a);
-                IRValue* iv;
-                IRValue* ix;
-                IRValue* sh;
-                IRValue* wv;
-                IRValue* shd;
-                IRValue* bit;
+                IRValue* iv, ix, sh, wv, shd, bit;
                 switch (this.bad)
                 {
                     case (true) { -> (IRValue*)0; }
@@ -14544,29 +14474,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRType* et = this.t_i32;
                 TypeSpec* vts = n.ts;
                 Node* it = n.b;
-                Node* sn;
-                Node* en;
-                IRType* at;
-                IRType* rt;
+                Node* sn, en;
+                IRType* at, rt;
                 IRType** fl;
-                IRValue* arr;
-                IRValue* itarr;
-                IRValue* rp;
-                IRValue* sp;
-                IRValue* sv;
-                IRValue* ev;
-                IRValue* xv;
-                IRValue* idxp;
-                IRValue* varp;
-                IRValue* cur;
-                IRValue* cidx;
-                IRValue* ep;
-                IRValue* cv;
-                IRBlock* cond_b;
-                IRBlock* body_b;
-                IRBlock* end_b;
-                int cnt;
-                int i;
+                IRValue* arr, itarr, rp, sp, sv, ev, xv, idxp, varp, cur, cidx, ep, cv;
+                IRBlock* cond_b, body_b, end_b;
+                int cnt, i;
                 switch (vts != (TypeSpec*)0)
                 {
                     case (true) {
@@ -14762,7 +14675,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         ep = this.mod.gep(arr, this.mod.ia, 2, true, (byte*)0);
                                                                         this.mod.store(xv, ep);
                                                                         this.mod.store(this.mod.binop(g"add\0", cidx, this.ci32(1), g"next_index\0"), idxp);
-                                                                        this.mod.store(this.mod.binop(g"add\0", cur, this.mod.c_int(et, (i64)1), g"next_var\0"), varp);
+                                                                        this.mod.store(this.mod.binop(g"add\0", cur, this.mod.c_int(et, 1), g"next_var\0"), varp);
                                                                         this.mod.br(cond_b);
                                                                         this.mod.position(this.fn, end_b);
                                                                         -> arr;
@@ -14918,13 +14831,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             vardecl_auto(Node* n) -> IRValue*
             {
                 Node* ini = n.a;
-                IRValue* rv;
-                IRValue* alloca;
+                IRValue* rv, alloca;
                 TypeSpec* its;
-                int k;
-                int w;
-                int d;
-                int bt;
+                int k, w, d, bt;
                 IRType* et;
                 switch (ini == (Node*)0)
                 {
@@ -15329,8 +15238,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Emits the deferred statements of the current block in reverse order
             run_defers() -> void
             {
-                int i;
-                int j;
+                int i, j;
                 Node* d;
                 switch (this.defers == (PtrVec*)0)
                 {
@@ -15424,19 +15332,14 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 IRValue* cv = this.cond_value(n.a);
                 bool bad_msg;
-                IRBlock* pass_b;
-                IRBlock* fail_b;
-                IRFunc* pf;
-                IRFunc* ef;
+                IRBlock* pass_b, fail_b;
+                IRFunc* pf, ef;
                 IRType** ps;
-                IRValue* mp;
-                IRValue* cvs;
+                IRValue* mp, cvs;
                 IRGlobal* gl;
                 IRType* aty;
-                byte* src;
-                byte* buf;
-                int len;
-                int i;
+                byte* src, buf;
+                int len, i;
                 byte[24] dig;
                 int nd;
                 u64 id = (u64)n;
@@ -15481,7 +15384,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         case (true) {
                                         switch (len == 0 | buf[len - 1] != (byte)0)
                                         {
-                                            case (true) { buf[len] = (byte)0; len++; }
+                                            case (true) { buf[len] = 0; len++; }
                                             default {};
                                         };
                                     }
@@ -15558,11 +15461,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             s_if(Node* n) -> void
             {
                 IRValue* cv;
-                IRBlock* then_b;
-                IRBlock* else_b;
-                IRBlock* merge_b;
-                IRBlock* et;
-                IRBlock* ee;
+                IRBlock* then_b, else_b, merge_b, et, ee;
                 int i;
                 int ne = node_count(n, 0);
                 cv = this.cond_value(n.a);
@@ -15655,12 +15554,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 bool neg;
                 switch (t[0] == 't')
                 {
-                    case (true) { -> (i64)1; }
+                    case (true) { -> 1; }
                     default
                     {
                         switch (t[0] == 'f')
                         {
-                            case (true) { -> (i64)0; }
+                            case (true) { -> 0; }
                             default
                             {
                                 switch (t[0] == '-')
@@ -15689,11 +15588,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // a literal, a negated constant, or a global constant found by name
             case_value(Node* e) -> IRValue*
             {
-                IRValue* r;
-                IRValue* o;
+                IRValue* r, o;
                 IRGlobal* g;
-                byte* nm;
-                byte* sfx;
+                byte* nm, sfx;
                 int i, ln, ls, c0;
                 bool hit;
                 switch (e.kind == NodeKind.UNARY_OP)
@@ -15800,21 +15697,17 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // a typeof(), the pointer equality chain is used instead.
             s_switch_typeof(Node* n) -> void
             {
-                int i;
-                int j;
+                int i, j;
                 int nc = node_count(n, 0);
-                int ncase;
-                int cid;
+                int ncase, cid;
                 bool dup;
                 bool all_typeof = true;
                 byte* nm;
                 Node* c;
                 IRValue* sv;
                 IRValue** vals;
-                IRBlock** blocks;
-                IRBlock** bodies;
-                IRBlock* merge_b;
-                IRBlock* dflt_b;
+                IRBlock** blocks, bodies;
+                IRBlock* merge_b, dflt_b;
                 int* ids;
                 while (i < nc)
                 {
@@ -15935,14 +15828,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int nc = node_count(n, 0);
                 bool done;
                 Node* c;
-                IRValue* sp;
-                IRValue* si8;
-                IRValue* cp;
-                IRValue* ci8;
-                IRValue* cmpv;
-                IRBlock* merge_b;
-                IRBlock* dflt_b;
-                IRBlock* next_b;
+                IRValue* sp, si8, cp, ci8, cmpv;
+                IRBlock* merge_b, dflt_b, next_b;
                 IRBlock** bodies;
                 sp = this.visit(n.a);
                 switch (this.bad)
@@ -16094,8 +15981,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             find_union_key(byte* name) -> byte*
             {
                 IDKC_SYMENTRY* e;
-                byte* m;
-                byte* key;
+                byte* m, key;
                 switch (nm_has(this.unions, name))
                 {
                     case (true) { -> name; }
@@ -16150,21 +16036,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             check_tag_cover(Node* n) -> void
             {
                 Node* ex = n.a;
-                Node* c;
-                Node* ed;
-                Node* ud;
-                Node* item;
+                Node* c, ed, ud, item;
                 LVar* lv;
-                byte* ukey;
-                byte* ekey;
-                byte* uname;
-                byte* tname;
-                byte* tmp;
+                byte* ukey, ekey, uname, tname, tmp;
                 PtrVec* missing;
                 void* p;
                 int i, j, nc, ni;
-                bool found;
-                bool has_default;
+                bool found, has_default;
                 switch (ex.kind != NodeKind.MEMBER_ACCESS)
                 {
                     case (true) { ->; }
@@ -16382,13 +16260,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int nc = node_count(n, 0);
                 int ncase;
                 Node* c;
-                IRValue* sv;
-                IRValue* cv;
+                IRValue* sv, cv;
                 IRValue** vals;
-                IRBlock** blocks;
-                IRBlock** bodies;
-                IRBlock* merge_b;
-                IRBlock* dflt_b;
+                IRBlock** blocks, bodies;
+                IRBlock* merge_b, dflt_b;
                 bool merge_reach;
                 switch (n.a.kind == NodeKind.TYPE_OF)
                 {
@@ -16536,25 +16411,15 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
 
             s_try(Node* n) -> void
             {
-                IRValue* flag;
-                IRValue* fz;
-                IRValue* fv;
-                IRValue* hx;
-                IRBlock* try_b;
-                IRBlock* chk_b;
-                IRBlock* end_b;
-                IRBlock* first_c;
-                IRBlock* cb;
+                IRValue* flag, fz, fv, hx;
+                IRBlock* try_b, chk_b, end_b, first_c, cb;
                 PtrVec* cbs = pv_new();
                 int cc = node_count(n, 0);
                 int i;
                 Node* cl;
                 IRValue* oflag = this.exc_flag;
                 IRValue* ovalue = this.exc_value;
-                IRValue* evp;
-                IRValue* e64;
-                IRValue* ev;
-                IRValue* xv;
+                IRValue* evp, e64, ev, xv;
                 IRType* et;
                 int k;
                 flag = this.mod.alloca_here(this.t_i1, g"exception_flag\0");
@@ -16592,7 +16457,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         };
                         this.mod.position(this.fn, chk_b);
                         fv = this.mod.load(flag, g"exc_flag\0");
-                        hx = this.mod.icmp(g"ne\0", fv, this.mod.c_int(this.t_i32, (i64)0), g"has_exception\0");
+                        hx = this.mod.icmp(g"ne\0", fv, this.mod.c_int(this.t_i32, 0), g"has_exception\0");
                         switch (cc > 0)
                         {
                             case (true) { first_c = (IRBlock*)cbs.items[0]; }
@@ -16723,8 +16588,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // visit_ThrowStatement
             s_throw(Node* n) -> void
             {
-                IRValue* v;
-                IRValue* w;
+                IRValue* v, w;
                 switch (this.exc_flag == (IRValue*)0)
                 {
                     case (true) { -> this.unsup(n, g"throw outside try\0"); }
@@ -16785,9 +16649,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // _collect_label_names: label blocks are appended after the entry block in source order
             collect_labels(Node* n, IRFunc* f) -> void
             {
-                int i;
-                int c;
-                int k;
+                int i, c, k;
                 switch (n == (Node*)0)
                 {
                     case (true) { ->; }
@@ -17078,27 +16940,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             s_bititer(Node* n) -> void
             {
                 IRValue* coll = this.visit(n.a);
-                IRType* ct;
-                IRType* bt;
-                IRValue* cv0;
-                IRValue* sp;
-                IRValue* idxp;
-                IRValue* cur;
-                IRValue* cv;
-                IRValue* bit;
-                IRValue* vp;
-                IRValue* nxt;
-                IRBlock* cond_b;
-                IRBlock* body_b;
-                IRBlock* latch_b;
-                IRBlock* end_b;
-                IRBlock* ob;
-                IRBlock* oc;
-                Node* src;
-                Node* bn;
-                Node* in1;
-                Node* in2;
-                Node* vn;
+                IRType* ct, bt;
+                IRValue* cv0, sp, idxp, cur, cv, bit, vp, nxt;
+                IRBlock* cond_b, body_b, latch_b, end_b, ob, oc;
+                Node* src, bn, in1, in2, vn;
                 TypeSpec* bs;
                 int total;
                 switch (this.bad)
@@ -17233,29 +17078,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     default {};
                 };
                 IRValue* coll = this.visit(n.a);
-                IRType* ct;
-                IRType* et;
-                IRBlock* cond_b;
-                IRBlock* body_b;
-                IRBlock* end_b;
-                IRBlock* ob;
-                IRBlock* oc;
-                IRValue* idxp;
-                IRValue* curp;
-                IRValue* cur;
-                IRValue* ep;
-                IRValue* ev;
-                IRValue* vp;
-                IRValue* cv;
-                IRValue* slot;
-                IRValue* nxt;
-                IRValue* fp;
-                IRValue* fa;
+                IRType* ct, et;
+                IRBlock* cond_b, body_b, end_b, ob, oc;
+                IRValue* idxp, curp, cur, ep, ev, vp, cv, slot, nxt, fp, fa;
                 SInfo* si;
                 LVar* lv;
                 i64 dv;
-                int size;
-                int k;
+                int size, k;
                 int nv = node_count(n, 0);
                 bool sized = false;
                 Node* vn;
@@ -17336,7 +17165,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     cur = this.mod.load(curp, g"cursor\0");
                                                     slot = this.mod.load(cur, g"slot\0");
                                                     ev = this.mod.cast(g"ptrtoint\0", slot, this.t_i64, g"slot.int\0");
-                                                    cv = this.mod.icmp(g"ne\0", ev, this.mod.c_int(this.t_i64, (i64)0), g"loop.cond\0");
+                                                    cv = this.mod.icmp(g"ne\0", ev, this.mod.c_int(this.t_i64, 0), g"loop.cond\0");
                                                     this.mod.cbr(cv, body_b, end_b);
                                                     this.mod.position(this.fn, body_b);
                                                     vn = node_child(n, 0, 0);
@@ -17354,7 +17183,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             this.mod.position(this.fn, cond_b);
                                                             cur = this.mod.load(curp, g"ptr\0");
                                                             ev = this.mod.load(cur, g"char\0");
-                                                            cv = this.mod.icmp(g"ne\0", ev, this.mod.c_int(this.t_i8, (i64)0), g"loop.cond\0");
+                                                            cv = this.mod.icmp(g"ne\0", ev, this.mod.c_int(this.t_i8, 0), g"loop.cond\0");
                                                             this.mod.cbr(cv, body_b, end_b);
                                                             this.mod.position(this.fn, body_b);
                                                             vn = node_child(n, 0, 0);
@@ -17508,8 +17337,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRBlock* body_b = this.mod.append_block(this.fn, g"for.body\0");
                 IRBlock* upd_b = this.mod.append_block(this.fn, g"for.update\0");
                 IRBlock* end_b = this.mod.append_block(this.fn, g"for.end\0");
-                IRBlock* ob;
-                IRBlock* oc;
+                IRBlock* ob, oc;
                 IRValue* cv;
                 switch (n.a != (Node*)0)
                 {
@@ -17775,10 +17603,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 int op = n.op;
                 Node* opd = n.a;
-                IRValue* v;
-                IRValue* nv;
-                IRValue* off;
-                IRValue* mpv;
+                IRValue* v, nv, off, mpv;
                 LVar* lv;
                 bool post = (n.flags `& NF_POSTFIX) != 0;
                 bool incdec = op == Operator.INCREMENT | op == Operator.DECREMENT;
@@ -17859,7 +17684,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     }
                                                         default {};
                                                     };
-                                                    -> this.mod.binop(g"sub\0", this.mod.c_int(v.ty, (i64)0), v, (byte*)0);
+                                                    -> this.mod.binop(g"sub\0", this.mod.c_int(v.ty, 0), v, (byte*)0);
                                                 }
                                                     default
                                                     {
@@ -17899,7 +17724,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         }
                                                                         case (LK.INT)
                                                                         {
-                                                                            off = this.mod.c_int(v.ty, (i64)1);
+                                                                            off = this.mod.c_int(v.ty, 1);
                                                                             switch (op)
                                                                             {
                                                                                 case (Operator.INCREMENT) { nv = this.mod.binop(g"add\0", v, off, (byte*)0); }
@@ -18016,8 +17841,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 IDKC_SYMENTRY* fe = st_lookup_any(this.st, name, this.cur_ns);
                 PtrVec* list;
-                Overload* o;
-                Overload* oc;
+                Overload* o, oc;
                 IRFunc* f;
                 byte* key;
                 int oi;
@@ -18116,9 +17940,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_addrof(Node* n) -> IRValue*
             {
                 Node* e = n.a;
-                IRValue* v;
-                IRValue* tmp;
-                IRValue* fv;
+                IRValue* v, tmp, fv;
                 LVar* lv;
                 switch (e.kind == NodeKind.LITERAL)
                 {
@@ -18203,8 +18025,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         {
                                                             case (true) {
                                                             Node* an = e.a;
-                                                            IRValue* arrp;
-                                                            IRValue* ix;
+                                                            IRValue* arrp, ix;
                                                             switch (e.b.kind == NodeKind.RANGE_EXPRESSION)
                                                             {
                                                                 case (true) {
@@ -18477,13 +18298,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 IRType* at = av.ty.elem;
                 IRType* et = at.elem;
-                IRValue* res;
-                IRValue* ep;
-                IRValue* ev;
+                IRValue* res, ep, ev;
                 int eb = this.pack_bits(et);
-                int i;
-                int off;
-                int ew;
+                int i, off, ew;
                 switch (eb == 0 | at.count * eb != tt.width)
                 {
                     case (true) {
@@ -18492,7 +18309,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 }
                     default
                     {
-                        res = this.mod.c_int(tt, (i64)0);
+                        res = this.mod.c_int(tt, 0);
                         i = at.count - 1;
                         while (i >= 0)
                         {
@@ -18522,11 +18339,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int count = at.count;
                 IRValue* al = this.mod.alloca_here(this.mod.t_array(at.elem, count + 1), g"scalar_to_bytes\0");
                 IRValue* wide = v;
-                IRValue* sh;
-                IRValue* bv;
-                IRValue* dp;
-                int i;
-                int shift;
+                IRValue* sh, bv, dp;
+                int i, shift;
                 switch (v.ty.width < 32) { case (true) { wide = this.mod.cast(g"zext\0", v, this.t_i32, g"scalar_widen\0"); } default {}; };
                 while (i < count)
                 {
@@ -18536,7 +18350,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     this.sc.put_str(f"scalar_shift_{i}\0");
                     switch (shift > 0)
                     {
-                        case (true) { sh = this.mod.binop(g"lshr\0", wide, this.mod.c_int(wide.ty, (i64)shift), this.sc.mem); }
+                        case (true) { sh = this.mod.binop(g"lshr\0", wide, this.mod.c_int(wide.ty, shift), this.sc.mem); }
                         default {};
                     };
                     this.sc.clear();
@@ -18553,25 +18367,19 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 this.mod.ia[0] = this.ci32(0);
                 this.mod.ia[1] = this.ci32(count);
                 dp = this.mod.gep(al, this.mod.ia, 2, true, g"scalar_null_term\0");
-                this.mod.store(this.mod.c_int(this.t_i8, (i64)0), dp);
+                this.mod.store(this.mod.c_int(this.t_i8, 0), dp);
                 -> al;
             };
 
             unpack_to_array(Node* n, IRValue* v, IRType* at) -> IRValue*
             {
                 IRType* et = at.elem;
-                IRType* it;
-                IRType* iet;
+                IRType* it, iet;
                 IRValue* packed = v;
-                IRValue* al;
-                IRValue* sh;
-                IRValue* ei;
-                IRValue* ev;
-                IRValue* ep;
+                IRValue* al, sh, ei, ev, ep;
                 int eb = this.pack_bits(et);
                 int total = at.count * eb;
-                int i;
-                int pos;
+                int i, pos;
                 u64 mk;
                 bool isf = et.kind == LK.FLOAT | et.kind == LK.DOUBLE;
                 switch (eb == 0 | total > 64)
@@ -18635,10 +18443,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
 
             x_cast(Node* n) -> IRValue*
             {
-                IRType* tt;
-                IRType* st;
-                IRValue* v;
-                IRValue* r;
+                IRType* tt, st;
+                IRValue* v, r;
                 LVar* lv;
                 TypeSpec* tsp = n.ts;
                 bool su, tu;
@@ -18668,7 +18474,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     };
                                     switch (tt.kind == LK.INT)
                                     {
-                                        case (true) { -> this.mod.c_int(tt, (i64)0); }
+                                        case (true) { -> this.mod.c_int(tt, 0); }
                                         default {};
                                     };
                                     switch (tt.kind == LK.FLOAT | tt.kind == LK.DOUBLE)
@@ -18913,9 +18719,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 byte* src = n.text;
                 byte* buf;
                 IRType* aty;
-                IRValue* cv;
-                IRValue* arr;
-                IRValue* gp;
+                IRValue* cv, arr, gp;
                 IRGlobal* gl;
                 void* hit;
                 switch (src == (byte*)0)
@@ -18958,14 +18762,14 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     switch (len == 0)
                                     {
                                         case (true) {
-                                        buf[0] = (byte)0;
+                                        buf[0] = 0;
                                         len = 1;
                                     }
                                         default {
                                             switch (buf[len - 1] != (byte)0)
                                             {
                                                 case (true) {
-                                        buf[len] = (byte)0;
+                                        buf[len] = 0;
                                         len++;
                                     }
                                                 default {};
@@ -19065,7 +18869,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     {
                         switch (ts.alignment > 0)
                         {
-                            case (true) { -> this.mod.c_int(this.t_i32, (i64)ts.alignment); }
+                            case (true) { -> this.mod.c_int(this.t_i32, ts.alignment); }
                             default
                             {
                                 switch (ts.base_type == DataType.DATA & ts.bit_width > 0)
@@ -19481,10 +19285,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IDKC_SYMENTRY* e;
                 LVar* lv;
                 int i, ln, ls1, ls2;
-                byte* key;
-                byte* m;
-                byte* sfx1;
-                byte* sfx2;
+                byte* key, m, sfx1, sfx2;
                 bool hit;
                 e = st_lookup_type(this.st, name, this.cur_ns);
                 switch (e != (IDKC_SYMENTRY*)0)
@@ -19920,8 +19721,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 Node* ud = (Node*)nm_get(this.union_defs, key);
                 Node* mem;
-                int i;
-                int c;
+                int i, c;
                 switch (ud == (Node*)0)
                 {
                     case (true) { -> (IRType*)0; }
@@ -19951,8 +19751,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* ud = (Node*)nm_get(this.union_defs, key);
                 bool tagged = ud.text2 != (byte*)0;
                 IRType* mt;
-                IRValue* dp;
-                IRValue* cp;
+                IRValue* dp, cp;
                 switch (cstr_eq(n.text, g"#\0"))
                 {
                     case (true) {
@@ -20017,8 +19816,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* ud = (Node*)nm_get(this.union_defs, key);
                 bool tagged = ud.text2 != (byte*)0;
                 IRType* mt;
-                IRValue* dp;
-                IRValue* cp;
+                IRValue* dp, cp;
                 int i;
                 switch (cstr_eq(t.text, g"#\0"))
                 {
@@ -20137,8 +19935,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 int i;
                 bool uns;
-                TypeSpec* as_;
-                TypeSpec* ts;
+                TypeSpec* as_, ts;
                 IRType* at;
                 while (i < this.al_tys.len)
                 {
@@ -20265,8 +20062,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             find_enum_key(byte* name) -> byte*
             {
                 IDKC_SYMENTRY* e;
-                byte* m;
-                byte* key;
+                byte* m, key;
                 switch (nm_has(this.enums, name))
                 {
                     case (true) { -> name; }
@@ -20451,11 +20247,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* o = n.a;
                 byte* key;
                 LVar* lv;
-                IRValue* obj;
-                IRValue* obj2;
-                IRValue* r;
-                IRValue* mp;
-                IRValue* ld;
+                IRValue* obj, obj2, r, mp, ld;
                 IRType* pe;
                 byte* ukey;
                 SInfo* si;
@@ -21015,16 +20807,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRType* kl = st.items[0].elem;
                 IRType* vl = st.items[1].elem;
                 IRValue* lk0 = this.visit(index);
-                IRValue* lk;
-                IRValue* rp;
-                IRValue* sk;
-                IRValue* cr;
-                IRValue* cmp;
-                IRValue* vp;
-                IRValue* res;
+                IRValue* lk, rp, sk, cr, cmp, vp, res;
                 IRBlock* mb;
-                IRBlock** cbs;
-                IRBlock** fbs;
+                IRBlock** cbs, fbs;
                 IRBlock* nx;
                 IRFunc* sf;
                 IRType** ps;
@@ -21256,15 +21041,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int nc = li.cap + ri.cap;
                 IRType* st = this.dict_struct(li.kl, li.vl, nc);
                 IRValue* al = this.mod.alloca_here(st, g"dict_merged\0");
-                IRValue* sk;
-                IRValue* sv;
-                IRValue* dk;
-                IRValue* dv;
-                IRValue* src;
-                int pass;
-                int i;
-                int cap;
-                int off;
+                IRValue* sk, sv, dk, dv, src;
+                int pass, i, cap, off;
                 this.mod.store(this.mod.c_null(st), al);
                 pass = 0;
                 while (pass < 2)
@@ -21373,13 +21151,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 DictInfo* di = this.dict_make(n.text, ts, n.line);
                 Node* ini = n.a;
-                IRValue* al;
-                IRValue* src;
-                IRValue* kv;
-                IRValue* vv;
+                IRValue* al, src, kv, vv;
                 IRType* st = di.st;
-                int np;
-                int i;
+                int np, i;
                 switch (ini != (Node*)0)
                 {
                     case (true) {
@@ -21465,13 +21239,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // visit_ArrayAccess
             x_index(Node* n) -> IRValue*
             {
-                IRValue* arr;
-                IRValue* idx;
-                IRValue* gp;
-                IRValue* ld;
-                IRValue* t1;
-                IRValue* t2;
-                IRValue* t3;
+                IRValue* arr, idx, gp, ld, t1, t2, t3;
                 switch (n.a.kind == NodeKind.IDENTIFIER)
                 {
                     case (true) {
@@ -21587,7 +21355,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                                         case (true) { t1 = this.mod.cast(g"sext\0", idx, this.t_i64, g"idx_i64\0"); }
                                                                                         default { t1 = idx; };
                                                                                     };
-                                                                                    t2 = this.mod.binop(g"mul\0", t1, this.mod.c_int(this.t_i64, (i64)8), g"byte_shift\0");
+                                                                                    t2 = this.mod.binop(g"mul\0", t1, this.mod.c_int(this.t_i64, 8), g"byte_shift\0");
                                                                                     switch (arr.ty.width != 64)
                                                                                     {
                                                                                         case (true) { t3 = this.mod.cast(g"zext\0", arr, this.t_i64, g"val_i64\0"); }
@@ -21710,8 +21478,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             assign_member(Node* t, IRValue* val0, Node* vexpr) -> IRValue*
             {
                 Node* o = t.a;
-                IRValue* obj;
-                IRValue* mp;
+                IRValue* obj, mp;
                 IRValue* val = val0;
                 IRType* mt;
                 LVar* lv;
@@ -21926,10 +21693,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* an = t.a;
                 Node* ix = t.b;
                 IRValue* val = val0;
-                IRValue* arr;
-                IRValue* idx;
-                IRValue* ep;
-                IRValue* mp;
+                IRValue* arr, idx, ep, mp;
                 IRType* et;
                 switch (an.kind == NodeKind.MEMBER_ACCESS)
                 {
@@ -22823,8 +22587,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRBlock* ebk;
                 int dd;
                 bool plain;
-                IRValue* a;
-                IRValue* slot;
+                IRValue* a, slot;
                 IRType* ft = f.ftype;
                 this.bad = false;
                 this.bad_what = (byte*)0;
@@ -22972,7 +22735,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     this.mod.ret_void();
                                                 }
                                                 default {
-                                                    switch (this.mod.cb.lines.len == 0)
+                                                    switch (this.mod.cur_block().lines.len == 0)
                                                     {
                                                         case (true) { this.mod.unreachable(); }
                                                         default { this.unsup(fd, g"function must end with return\0"); };
@@ -23012,7 +22775,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 b.put_str(g"function '\0");
                 if (fd.text != (byte*)0) { b.put_str(fd.text); };
                 b.put_str(g"' line \0");
-                b.put_i64((i64)this.bad_line);
+                b.put_i64(this.bad_line);
                 b.put_str(g": \0");
                 if (this.bad_what != (byte*)0) { b.put_str(this.bad_what); };
                 if (this.bad_detail != (byte*)0)
@@ -23078,9 +22841,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Generates the method bodies of an object definition
             object_bodies(Node* od, byte* ns) -> void
             {
-                byte* oname;
-                byte* mn;
-                byte* full;
+                byte* oname, mn, full;
                 Node* m;
                 IRFunc* f;
                 int i;
@@ -23155,8 +22916,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 byte* full = fd.text;
                 byte* oname = this.dotted_object(fd, ns);
-                byte* mn;
-                byte* fn;
+                byte* mn, fn;
                 IRFunc* f;
                 byte* prev = this.cur_obj;
                 fd.text = full + this.dot_index(full) + 1;
@@ -23186,8 +22946,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int s, c, e, j;
                 byte* full;
                 IRFunc* f;
-                byte* mn;
-                byte* base;
+                byte* mn, base;
                 switch (k)
                 {
                     case (NodeKind.FUNCTION_DEF)
@@ -23337,16 +23096,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             build_interfaces(Node* prog) -> void
             {
                 int i, k, j, p, m;
-                Node* od;
-                Node* at;
-                Node* idef;
-                Node* pr;
-                Node* prm;
-                byte* caller;
-                byte* callee;
-                byte* arg;
-                NameMap* set;
-                NameMap* table;
+                Node* od, at, idef, pr, prm;
+                byte* caller, callee, arg;
+                NameMap* set, table;
                 while (i < node_count(prog, 0))
                 {
                     od = this.unwrap(node_child(prog, 0, i));
@@ -23487,8 +23239,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Enforces the interface whitelists on a call of 'meth' on a 'callee' instance made from inside 'cur_obj'
             ifc_check_call(Node* n, byte* callee, byte* meth) -> bool
             {
-                NameMap* rset;
-                NameMap* cset;
+                NameMap* rset, cset;
                 bool allowed;
                 switch (this.cur_obj == (byte*)0 | callee == (byte*)0)
                 {
@@ -23549,7 +23300,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             ct_exit() -> void
             {
                 int i;
-                FVMCodegen* c;
+                IDKVMCodegen* c;
                 Lexer* sl;
                 Parser* sp;
                 while (i < this.ct_nodes.len)
@@ -23579,7 +23330,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 i = 0;
                 while (i < this.ct_cgs.len)
                 {
-                    c = (FVMCodegen*)this.ct_cgs.items[i];
+                    c = (IDKVMCodegen*)this.ct_cgs.items[i];
                     c.__exit();
                     ffree((byte*)c);
                     i++;
@@ -23613,17 +23364,17 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 i64* box = (i64*)nm_get(this.ucounts, what);
                 if (box == (i64*)0)
                 {
-                    box = (i64*)fmalloc((u64)8);
+                    box = (i64*)fmalloc(8);
                     this.keep((void*)box);
-                    *box = (i64)0;
+                    *box = 0;
                     nm_put(this.ucounts, what, (void*)box);
                 };
                 *box = *box + n;
                 ->;
             };
 
-            // Merges the stub counts of one FVMCodegen into the report
-            ct_note(FVMCodegen* c) -> void
+            // Merges the stub counts of one IDKVMCodegen into the report
+            ct_note(IDKVMCodegen* c) -> void
             {
                 int i;
                 while (i < c.ucounts.count)
@@ -23723,7 +23474,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     r[i + j] = name[j];
                     j++;
                 };
-                r[i + b] = (byte)0;
+                r[i + b] = 0;
                 pv_push(this.ct_refl_mem, (void*)r);
                 -> r;
             };
@@ -23731,7 +23482,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // One record. fn is the FUNCTION_DEF of a function entry, ts its return or variable type.
             refl_add(PtrVec* out, byte* name, byte* kind, byte* ns, TypeSpec* ts, Node* fn) -> void
             {
-                FvmRefl* r = (FvmRefl*)fvm_alloc((int)(sizeof(FvmRefl) / 8));
+                FvmRefl* r = (FvmRefl*)idkvm_alloc((int)(sizeof(FvmRefl) / 8));
                 FvmReflFn* f;
                 Node* p;
                 int i, np;
@@ -23742,11 +23493,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 this.refl_ty(@r.ty, ts);
                 if (fn != (Node*)0)
                 {
-                    f = (FvmReflFn*)fvm_alloc((int)(sizeof(FvmReflFn) / 8));
+                    f = (FvmReflFn*)idkvm_alloc((int)(sizeof(FvmReflFn) / 8));
                     pv_push(this.ct_refl_mem, (void*)f);
                     np = node_count(fn, 0);
                     f.nparams = np;
-                    f.params = (FvmReflParam*)fvm_alloc(np * (int)(sizeof(FvmReflParam) / 8) + 1);
+                    f.params = (FvmReflParam*)idkvm_alloc(np * (int)(sizeof(FvmReflParam) / 8) + 1);
                     pv_push(this.ct_refl_mem, (void*)f.params);
                     while (i < np)
                     {
@@ -23775,8 +23526,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             refl_ns(PtrVec* out, Node* nsd, byte* ns) -> void
             {
                 byte* full = nsd.text;
-                Node* x;
-                Node* l;
+                Node* x, l;
                 int i, n, k;
                 if (ns[0] != 0) { full = this.refl_join(ns, nsd.text); };
                 this.refl_add(out, nsd.text, g"namespace\0", ns, (TypeSpec*)0, (Node*)0);
@@ -23865,8 +23615,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 PtrVec* out = pv_new();
                 PtrVec* k = pv_new();
                 PtrVec* v = pv_new();
-                Node* s;
-                Node* x;
+                Node* s, x;
                 int i, n, j;
                 byte* e = ts_dup(g"\0");
                 this.refl_drop();
@@ -23982,7 +23731,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // appends its statements to out. The lexer and parser live until the code generator ends.
             ct_parse(Node* at, byte* text, PtrVec* out) -> bool
             {
-                int n = fvm_strlen(text);
+                int n = idkvm_strlen(text);
                 byte* t = ts_dup(text);
                 Lexer* sl = (Lexer*)fmalloc((u64)((sizeof(Lexer) + 7) / 8));
                 Parser* sp;
@@ -24056,10 +23805,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 int cur = 1;
                 int i = 0;
-                int ls;
-                int le;
-                int st;
-                int en;
+                int ls, le, st, en;
                 while (i < n & cur < ln)
                 {
                     switch (text[i] == 10) { case (true) { cur++; } default {}; };
@@ -24116,9 +23862,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             ct_fx_in_msg(byte* msg, FvmBuf* out) -> bool
             {
                 int i = 0;
-                int j;
-                int e;
-                int best;
+                int j, e, best;
                 while (msg[i] != 0)
                 {
                     switch (msg[i] == '[')
@@ -24155,12 +23899,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // suffix, passed to ct_fail
             ct_import_fail(Node* at, int kind, byte* path, byte* msg) -> void
             {
-                FvmBuf b;
-                FvmBuf real;
+                FvmBuf b, real;
                 b.__init();
                 real.__init();
                 b.put_str(msg);
-                switch (kind == FVM_HOST_IMPORT_STDLIB)
+                switch (kind == IDKVM_HOST_IMPORT_STDLIB)
                 {
                     case (true)
                     {
@@ -24200,23 +23943,16 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Parser* sp;
                 PtrVec* stmts;
                 Node* stmt;
-                byte* t;
-                byte* src;
-                byte* sdir;
+                byte* t, src, sdir;
                 void* fh;
-                int i;
-                int k;
-                int n;
-                int ln;
-                int col;
-                int indent;
+                int i, k, n, ln, col, indent;
                 bool ok;
                 m.__init();
                 tn.__init();
                 wr.__init();
                 tx.__init();
                 this.ct_imports++;
-                switch (kind == FVM_HOST_IMPORT_STDLIB)
+                switch (kind == IDKVM_HOST_IMPORT_STDLIB)
                 {
                     case (true) { wr.put_str(g"#import <\0"); wr.put_str(path); wr.put_str(g">;\n\0"); }
                     default { wr.put_str(g"#import \"\0"); wr.put_str(path); wr.put_str(g"\";\n\0"); };
@@ -24224,7 +23960,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
 
                 // the wrapper sits next to the program source for a local import, so relative
                 // paths resolve against it, and in the working directory otherwise
-                switch (kind == FVM_HOST_IMPORT_LOCAL & this.ct_srcfile != (byte*)0)
+                switch (kind == IDKVM_HOST_IMPORT_LOCAL & this.ct_srcfile != (byte*)0)
                 {
                     case (true)
                     {
@@ -24362,7 +24098,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     default {};
                 };
 
-                heap FVMCodegen c;
+                heap IDKVMCodegen c;
                 c.__init();
                 pv_push(this.ct_cgs, (void*)c);
                 ok = c.compile_import(stmts, vm);
@@ -24478,12 +24214,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 FvmCap* cap;
                 i64* sbox;
                 byte* nm;
-                int i;
-                int u;
-                int es;
-                int hk;
-                int slot;
-                int tag;
+                int i, u, es, hk, slot, tag;
                 bool ok;
                 this.ct_runs++;
                 if (this.ct_runs > 10000)
@@ -24499,7 +24230,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     this.ct_vm.__init();
                 };
                 vm = this.ct_vm;
-                heap FVMCodegen c;
+                heap IDKVMCodegen c;
                 c.__init();
                 pv_push(this.ct_cgs, (void*)c);
                 c.lay_copy_from(@vm.layouts);
@@ -24547,7 +24278,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 i = 0;
                 while (i < this.consts.count)
                 {
-                    c.capture((byte*)this.consts.keys[i], FVM_T_INT, *(i64*)this.consts.vals[i], (i64)0);
+                    c.capture((byte*)this.consts.keys[i], IDKVM_T_INT, *(i64*)this.consts.vals[i], 0);
                     i++;
                 };
                 i = 0;
@@ -24617,7 +24348,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     {
                         slot = (int)*sbox;
                         tag = vm.lc_tag[slot];
-                        if (tag == FVM_T_INT | tag == FVM_T_UINT | tag == FVM_T_LONG | tag == FVM_T_ULONG | tag == FVM_T_FLOAT | tag == FVM_T_DOUBLE | tag == FVM_T_BOOL | tag == FVM_T_BYTE | tag == FVM_T_CHAR | tag == FVM_T_DATA | tag == FVM_T_PTR)
+                        if (tag == IDKVM_T_INT | tag == IDKVM_T_UINT | tag == IDKVM_T_LONG | tag == IDKVM_T_ULONG | tag == IDKVM_T_FLOAT | tag == IDKVM_T_DOUBLE | tag == IDKVM_T_BOOL | tag == IDKVM_T_BYTE | tag == IDKVM_T_CHAR | tag == IDKVM_T_DATA | tag == IDKVM_T_PTR)
                         {
                             this.ct_persist_put(nm, tag, vm.lc_data[slot], vm.lc_meta[slot]);
                         };
@@ -24630,7 +24361,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 i = es;
                 while (i < vm.emit_count)
                 {
-                    if (vm.e_kind[i] == FVM_EMIT_K_IDEKA)
+                    if (vm.e_kind[i] == IDKVM_EMIT_K_IDEKA)
                     {
                         if (tb.len > 0) { tb.put(' '); };
                         tb.put_str(vm.e_text[i]);
@@ -24692,8 +24423,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Constants of the statements before a block are registered first, so it can read them.
             ct_expand(NodeVec* v, byte* root, bool top) -> void
             {
-                int i;
-                int r;
+                int i, r;
                 Node* s;
                 PtrVec* out;
                 // the namespace trees are registered ahead of the top level statements, so
@@ -24717,7 +24447,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     {
                         out = pv_new();
                         r = this.ct_run(s, out);
-                        if (r == 1) { this.note_unsup(g"comptime block not run (FVM codegen not ported)\0"); };
+                        if (r == 1) { this.note_unsup(g"comptime block not run (IDKVM codegen not ported)\0"); };
                         this.ct_splice(v, i, out);
                         pv_free(out);
                         node_free(s);
@@ -24788,8 +24518,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             ct_visit(Node* n) -> IRValue*
             {
                 PtrVec* out;
-                int r;
-                int i;
+                int r, i;
                 Node* st;
                 if (n.kind == NodeKind.EMIT_IDEKA)
                 {
@@ -24803,7 +24532,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 out = pv_new();
                 r = this.ct_run(n, out);
-                if (r == 1) { this.unsup(n, g"comptime block not run (FVM codegen not ported)\0"); };
+                if (r == 1) { this.unsup(n, g"comptime block not run (IDKVM codegen not ported)\0"); };
                 while (i < out.len)
                 {
                     st = (Node*)out.items[i];
@@ -25043,7 +24772,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             eb = this.mod.append_block(m0, g"entry\0");
                             this.mod.position(m0, eb);
                             this.mod.set_entry(eb);
-                            this.mod.ia[0] = this.mod.c_int(this.t_i32, (i64)0);
+                            this.mod.ia[0] = this.mod.c_int(this.t_i32, 0);
                             this.mod.ia[1] = this.mod.c_null(m2.ftype.items[1]);
                             this.mod.ret(this.mod.call(m2.self, this.mod.ia, 2, (byte*)0));
                             m0.is_decl = false;

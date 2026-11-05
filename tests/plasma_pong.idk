@@ -1084,8 +1084,8 @@ def inject_vorticity() -> void
 def vorticity_confinement(double* vx, double* vy) -> void # effect {*Mem.Write};
 def vorticity_confinement(double* vx, double* vy) -> void
 {
-    int    i, j, base, idx;
-    double curl, curl_l, curl_r, curl_d, curl_u,
+    int    i, j, base;
+    double curl,
            grad_x, grad_y, grad_len,
            fx, fy;
 
@@ -1704,8 +1704,8 @@ def draw_ball(int w, int h) -> void
 def int_to_str(int val, byte* buf) -> int # effect {Pure};
 def int_to_str(int val, byte* buf) -> int
 {
-    int  tmp, count, i, j, len;
-    byte ch, t;
+    int  tmp, i, j, len;
+    byte t;
 
     if (val < 0) { val = 0; };
     if (val == 0)

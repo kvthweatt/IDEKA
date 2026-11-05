@@ -77,7 +77,7 @@ contexts:
       scope: keyword.control.IDEKA
 
     # Type modifiers
-    - match: '\b(async|escape|noinit|singinit|const|volatile|signed|unsigned|heap|stack|register|macro|contract|emitideka|compiler|comptime|idekavm|effect|attenuate|binding)\b'
+    - match: '\b(async|escape|noinit|singinit|const|volatile|signed|unsigned|heap|stack|register|macro|contract|emitideka|compiler|comptime|idkvm|naked|effect|attenuate|binding)\b'
       scope: storage.modifier.IDEKA
 
     # Special methods (dunder methods)

@@ -703,7 +703,7 @@ class CodegenVisitor:
         if node.target not in builder._IDEKA_label_blocks:
             # Check if the target is a named comptime block -- goto to a
             # comptime block is only valid from inside another comptime block
-            # (handled by fvmcodegen), not from runtime code.
+            # (handled by idkvmcodegen), not from runtime code.
             from iast import ComptimeBlock as _ComptimeBlock
             _stmts = getattr(module, '_program_statements', [])
             for _s in _stmts:
@@ -1555,6 +1555,75 @@ class CodegenVisitor:
                 return expr.type
         return None
 
+    def _emit_string_literal_eq(self, builder, lit, other):
+        """Content equality of a string literal against a byte array / byte*.
+        Returns an i1, or None when the operand is not a byte string."""
+        i8 = ir.IntType(8)
+        i32 = ir.IntType(32)
+
+        def _decay(v):
+            if isinstance(v.type, ir.PointerType) and isinstance(v.type.pointee, ir.ArrayType):
+                if v.type.pointee.element != i8:
+                    return None, None
+                z = ir.Constant(i32, 0)
+                return builder.gep(v, [z, z], name="streq_decay"), v.type.pointee.count
+            if isinstance(v.type, ir.PointerType) and v.type.pointee == i8:
+                return v, None
+            if (isinstance(v.type, ir.PointerType) and isinstance(v.type.pointee, ir.PointerType)
+                    and v.type.pointee.pointee == i8):
+                return builder.load(v, name="streq_load"), None
+            return None, None
+
+        lp, lcount = _decay(lit)
+        op, ocount = _decay(other)
+        if lp is None or op is None:
+            return None
+        if lcount is None:
+            return None
+        bound = lcount if ocount is None else min(lcount, ocount)
+        func = builder.function
+        idx = builder.alloca(i32, name="streq_i")
+        builder.store(ir.Constant(i32, 0), idx)
+        cond_b = func.append_basic_block("streq.cond")
+        body_b = func.append_basic_block("streq.body")
+        next_b = func.append_basic_block("streq.next")
+        yes_b = func.append_basic_block("streq.yes")
+        no_b = func.append_basic_block("streq.no")
+        end_b = func.append_basic_block("streq.end")
+        builder.branch(cond_b)
+        builder.position_at_end(cond_b)
+        i = builder.load(idx, name="streq_iv")
+        tail_b = func.append_basic_block("streq.tail")
+        builder.cbranch(builder.icmp_unsigned('<', i, ir.Constant(i32, bound)), body_b, tail_b)
+        builder.position_at_end(body_b)
+        a = builder.load(builder.gep(lp, [i]), name="streq_a")
+        b = builder.load(builder.gep(op, [i]), name="streq_b")
+        same = builder.icmp_unsigned('==', a, b)
+        step_b = func.append_basic_block("streq.step")
+        builder.cbranch(same, step_b, no_b)
+        builder.position_at_end(step_b)
+        # both bytes equal: a NUL ends the comparison successfully
+        builder.cbranch(builder.icmp_unsigned('==', a, ir.Constant(i8, 0)), yes_b, next_b)
+        builder.position_at_end(next_b)
+        builder.store(builder.add(i, ir.Constant(i32, 1)), idx)
+        builder.branch(cond_b)
+        builder.position_at_end(tail_b)
+        # all literal bytes matched with no NUL seen: the other side must end here
+        if ocount is None or lcount < ocount:
+            tb = builder.load(builder.gep(op, [ir.Constant(i32, lcount)]), name="streq_tail")
+            builder.cbranch(builder.icmp_unsigned('==', tb, ir.Constant(i8, 0)), yes_b, no_b)
+        else:
+            builder.branch(no_b)
+        builder.position_at_end(yes_b)
+        builder.branch(end_b)
+        builder.position_at_end(no_b)
+        builder.branch(end_b)
+        builder.position_at_end(end_b)
+        res = builder.phi(ir.IntType(1), name="streq")
+        res.add_incoming(ir.Constant(ir.IntType(1), 1), yes_b)
+        res.add_incoming(ir.Constant(ir.IntType(1), 0), no_b)
+        return res
+
     def visit_BinaryOp(self, node, builder, module):
         from iast import TypeOf as _TypeOf
         ctx = CoercionContext(builder)
@@ -1650,7 +1719,47 @@ class CodegenVisitor:
                     f"BinaryOp ASSIGN: unsupported LHS type {type(node.left, node, module).__name__} ", node, module)
 
         lhs = self.visit(node.left, builder, module)
+
+        # Logical & and | short-circuit: the right operand is only evaluated when the
+        # left one does not already decide the result.
+        if node.operator in (Operator.AND, Operator.OR) and isinstance(lhs.type, ir.IntType) and lhs.type.width == 1:
+            _sc_func = builder.block.function
+            _sc_lhs_block = builder.block
+            _sc_rhs_block = _sc_func.append_basic_block('sc_rhs')
+            _sc_end_block = _sc_func.append_basic_block('sc_end')
+            if node.operator is Operator.AND:
+                builder.cbranch(lhs, _sc_rhs_block, _sc_end_block)
+            else:
+                builder.cbranch(lhs, _sc_end_block, _sc_rhs_block)
+            builder.position_at_end(_sc_rhs_block)
+            _sc_rhs = self.visit(node.right, builder, module)
+            if isinstance(_sc_rhs.type, ir.PointerType):
+                _sc_rhs = builder.icmp_unsigned('!=', _sc_rhs, ir.Constant(_sc_rhs.type, None))
+            elif isinstance(_sc_rhs.type, ir.IntType) and _sc_rhs.type.width != 1:
+                _sc_rhs = builder.icmp_unsigned('!=', _sc_rhs, ir.Constant(_sc_rhs.type, 0))
+            _sc_rhs_end = builder.block
+            builder.branch(_sc_end_block)
+            builder.position_at_end(_sc_end_block)
+            _sc_phi = builder.phi(ir.IntType(1), name='sc_result')
+            _sc_phi.add_incoming(ir.Constant(ir.IntType(1), 0 if node.operator is Operator.AND else 1), _sc_lhs_block)
+            _sc_phi.add_incoming(_sc_rhs, _sc_rhs_end)
+            return TypeSystem.attach_type_metadata(_sc_phi, DataType.UINT)
+
         rhs = self.visit(node.right, builder, module)
+
+        # byte array / byte* compared with a string literal: compare contents,
+        # not addresses.
+        if node.operator in (Operator.EQUAL, Operator.NOT_EQUAL):
+            from iast import StringLiteral as _SLit
+            _l_lit = isinstance(node.left, _SLit)
+            _r_lit = isinstance(node.right, _SLit)
+            if _l_lit != _r_lit:
+                _lit_v, _oth_v = (lhs, rhs) if _l_lit else (rhs, lhs)
+                _eq = self._emit_string_literal_eq(builder, _lit_v, _oth_v)
+                if _eq is not None:
+                    if node.operator is Operator.NOT_EQUAL:
+                        _eq = builder.not_(_eq, name="str_ne")
+                    return _eq
 
         # Dict + Dict: type-check and produce merged dict
         from iast import Identifier as _Ident
@@ -1704,6 +1813,10 @@ class CodegenVisitor:
                                 isinstance(pt, ir.PointerType) and
                                 rt.pointee.element == pt.pointee):
                             continue
+                        if (isinstance(rt, ir.PointerType) and
+                                isinstance(rt.pointee, ir.IdentifiedStructType) and
+                                rt.pointee == pt):
+                            continue
                         types_match = False
                         break
                     if types_match:
@@ -1721,6 +1834,10 @@ class CodegenVisitor:
                             pass  # pointer-to-same-struct, use as-is
                         elif (isinstance(rt, ir.PointerType) and
                                 not isinstance(rt.pointee, (ir.ArrayType, ir.LiteralStructType, ir.IdentifiedStructType)) and
+                                rt.pointee == pt):
+                            av = builder.load(av, name=f"op_deref_{i}")
+                        elif (isinstance(rt, ir.PointerType) and
+                                isinstance(rt.pointee, ir.IdentifiedStructType) and
                                 rt.pointee == pt):
                             av = builder.load(av, name=f"op_deref_{i}")
                         else:
@@ -7582,6 +7699,10 @@ class CodegenVisitor:
         if getattr(node, 'is_inline', False):
             func.attributes.add('alwaysinline')
 
+        if getattr(node, 'is_naked', False):
+            func.attributes.add('naked')
+            func.attributes.add('noinline')
+
         for i, param in enumerate(func.args):
             if node.parameters[i].name is not None:
                 param.name = node.parameters[i].name
@@ -8758,14 +8879,14 @@ class CodegenVisitor:
             cg._macro_table.update(module._parser_macros)
         cg._struct_layouts.update(self._comptime_struct_layouts)
 
-        from ivmcodegen import Op as _Op, _instr as _fvm_instr, ComptimeBytecode
+        from ivmcodegen import Op as _Op, _instr as _idkvm_instr, ComptimeBytecode
         try:
             cg._visit_macro_call(node)
         except Exception as e:
             raise IDEKACodegenError(
                 f"comptime codegen for self-referential macro '{node.name}' failed: {e}",
                 node, module)
-        cg._instructions.append(_fvm_instr(_Op.HALT))
+        cg._instructions.append(_idkvm_instr(_Op.HALT))
         bc = ComptimeBytecode(cg._instructions, cg._local_count)
 
         # Set up and run the VM.
@@ -10684,7 +10805,7 @@ class CodegenVisitor:
 
         Steps:
           1. Capture enclosing scope constants from module (read-only).
-          2. Compile the ComptimeBlock AST to VM bytecode via fvmcodegen.
+          2. Compile the ComptimeBlock AST to VM bytecode via idkvmcodegen.
           3. Run the VM.
           4. For each ('IDEKA', text) entry in vm.emit_results:
              a. Re-preprocess and re-lex the substituted text.
@@ -10711,7 +10832,7 @@ class CodegenVisitor:
                 except Exception:
                     pass
             # Inject preprocessor #def constants (e.g. CURRENT_OS, IDEKA_STANDARD) so that
-            # fvmcodegen can resolve them as locals during comptime identifier lookup.
+            # idkvmcodegen can resolve them as locals during comptime identifier lookup.
             if hasattr(module, '_IDEKA_compiler_macros'):
                 for name, value in module._IDEKA_compiler_macros.items():
                     if name not in captured_scope:

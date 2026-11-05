@@ -910,6 +910,17 @@ An interface is a compile-time rule set describing which methods two objects may
 
 An interface has a name and a list of **roles**. Each role is bound to a trait, and a role stands for "any object that implements that trait". Inside the body, **protocol blocks** list the methods allowed between two roles.
 
+Why are they called interfaces? Because computer science is flooded with absolutely terrible naming conventions and people who can't name something properly even if a gun was to their head (hot take, I know). All dictionaries define an interface to be some thing that sits between two other things.
+
+<img width="673" height="436" alt="image" src="https://github.com/user-attachments/assets/7681b99f-9b25-4b1a-bc2e-099bcd6e4301" />
+
+As we can clearly see:  
+- A surface forming a common boundary of two bodies, spaces, or phases.
+
+As computer science currently defines the word interface, it may as well just be called a method list, or method manifest, or ANYTHING ELSE.
+
+This is why Ideka has a low learning curve, the semantic primitives are grounded in physical reality; the syntactic sugar is descriptive portmanteau. An interface is a binary relationship. In computer science, it is given a unary relationship and isn't even accurately defined.
+
 ```
 interface Name(RoleA: TraitA, RoleB: TraitB)
 {
@@ -940,7 +951,7 @@ When an interface is attached, the compiler:
 3. Checks that the number of attachment arguments matches the number of roles, and that the interface is defined.
 4. Builds the method lists for each protocol block, keyed by the concrete pair of objects.
 
-Failing any of these is a compile error. An interface may be attached to either or both participants; one attachment registers the rules for the pair. Interfaces are not applied to templated objects.
+Failing any of these is a compile error. An interface may be attached to either or both participants; one attachment registers the rules for the pair.
 
 ### Protocol relationship operators
 
@@ -1205,6 +1216,22 @@ A pointer is a variable that holds the address of another value. IDEKA uses thre
 | `T*` | In a type: pointer to `T` |
 | `@x` | Address-of: yields a pointer to `x` |
 | `*p` | Dereference: reads or writes the value `p` points to |
+
+When writing Ideka, you should be careful not to confuse it with C because:
+```
+byte* a, b, c, d;
+```
+Is **identical** to:
+```
+byte* a;
+byte* b;
+byte* c;
+byte* d;
+```
+
+This is because Ideka treats every declared item as the type used at the beginning of the definition. Pointer-ness is not attached to the name, it is attached to the type, and these names are `byte*` type. Not only does this save time writing, but is less code for the parser to have to chew through.
+
+C will give you `a` as a `byte*` while the rest are plain `byte` because you must write `byte *a, *b, *c, *d;` in C. **Ideka is not C.** This will trip you up if you are used to writing C code.
 
 ### Taking an address
 
@@ -2298,6 +2325,15 @@ switch (e)
 ```
 
 If a case contains only one statement, the braces can be omitted, similar to a single-statement `if`.
+
+## Switch bodies are never optimized away  
+DCE never removes code inside a `switch` body. This is not a conservative optimization setting you can turn off. It follows from how IDEKA values work.
+
+In IDEKA, a literal is a stack object with an address. `switch (5)` does not branch on the compile-time constant 5; it branches on whatever currently occupies the stack slot holding 5. The address of that slot can be taken with `@`, passed to a function, handed to another thread, and written through. Once anything else can reach that address, the value at the slot is no longer known to the compiler, regardless of what it was initialized to.
+
+Constant-folding a `switch` operand would therefore be unsound under IDEKA's pointer model, not merely aggressive. A `switch` body is a DCE root for the same reason volatile memory is: something outside the compiler's model may have written to the operand. The optimizer cannot prove a `case` is unreachable, so it does not pretend to.
+
+This is the same principle as !using, seen from the other end. !using is DCE the programmer invokes deliberately, knowing it may break code. A switch body is the opposite: never DCE'd, because the programmer has no way to prove the operand is stable. DCE only removes what the language can prove is dead, and an addressable literal is never provably dead.
 
 ---
 

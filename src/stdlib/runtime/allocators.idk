@@ -50,7 +50,7 @@ extern
         xorq %r9, %r9
         syscall
         movq %rax, $0
-    } : "=r"(result) : "r"(bytes) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "r11", "memory";
+    } : "=r"(result) : "r"(bytes) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "r11", "rcx", "memory";
     return result;
 } # effect {*Alloc.Virtual & *Unsafe.ASM};
 
@@ -62,7 +62,7 @@ extern
         movq $0, %rdi
         movq $1, %rsi
         syscall
-    } : : "r"(ptr), "r"(bytes) : "rax", "rdi", "rsi", "r11", "memory";
+    } : : "r"(ptr), "r"(bytes) : "rax", "rdi", "rsi", "r11", "rcx", "memory";
 } # effect {*Alloc.Virtual & *Unsafe.ASM};
 #endif;
 

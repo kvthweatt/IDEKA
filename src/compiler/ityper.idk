@@ -649,7 +649,7 @@ namespace IDEKA
                 this.mb.len = 0;
                 switch (this.mb.mem != (byte*)0)
                 {
-                    case (true) { this.mb.mem[0] = (byte)0; }
+                    case (true) { this.mb.mem[0] = 0; }
                     default {};
                 };
                 ->;
@@ -779,8 +779,7 @@ namespace IDEKA
             resolve_alias(TypeSpec* t) -> TypeSpec*
             {
                 TypeSpec* cur = t;
-                TypeSpec* tgt;
-                TypeSpec* c;
+                TypeSpec* tgt, c;
                 IDKC_SYMENTRY* e;
                 int guard;
                 while (guard < 16)
@@ -1144,8 +1143,7 @@ namespace IDEKA
                     {
                         TypeSpec* a = this.resolve_alias(t);
                         TypeSpec* c;
-                        NodeVec* d;
-                        NodeVec* sh;
+                        NodeVec* d, sh;
                         int i;
                         switch (ts_is_array(a))
                         {
@@ -1268,8 +1266,7 @@ namespace IDEKA
             {
                 TypeSpec* ra = this.resolve_alias(a);
                 TypeSpec* rb = this.resolve_alias(b);
-                TypeSpec* ba;
-                TypeSpec* bb;
+                TypeSpec* ba, bb;
                 int da = ra.pointer_depth;
                 int db = rb.pointer_depth;
                 switch (ts_is_array(ra))
@@ -1322,8 +1319,7 @@ namespace IDEKA
             {
                 TypeSpec* ra = this.resolve_alias(a);
                 TypeSpec* rb = this.resolve_alias(b);
-                IDKC_SYMENTRY* ea;
-                IDKC_SYMENTRY* eb;
+                IDKC_SYMENTRY* ea, eb;
                 switch (ra.custom_typename == (byte*)0 | rb.custom_typename == (byte*)0)
                 {
                     case (true) {
@@ -1413,8 +1409,7 @@ namespace IDEKA
             {
                 int kp = this.kind_of(pt);
                 int ka = this.kind_of(at);
-                TypeSpec* rp;
-                TypeSpec* ra;
+                TypeSpec* rp, ra;
                 switch (this.ty_same(pt, at))
                 {
                     case (true) { -> true; }
@@ -1488,8 +1483,7 @@ namespace IDEKA
             {
                 IDKC_SYMENTRY* e = this.type_entry(ot);
                 TypeSpec* a;
-                Node* dn;
-                Node* m;
+                Node* dn, m;
                 int i, cnt;
                 switch (e == (IDKC_SYMENTRY*)0 | name == (byte*)0)
                 {
@@ -1708,8 +1702,7 @@ namespace IDEKA
             // declared on a later line, is not a candidate. Null when no candidate remains
             vis_overloads(PtrVec* r) -> PtrVec*
             {
-                int i;
-                int hidden;
+                int i, hidden;
                 Overload* o;
                 PtrVec* v;
                 switch (r == (PtrVec*)0 | this.ov_line <= 0)
@@ -1760,9 +1753,7 @@ namespace IDEKA
             ov_resolve(byte* name) -> PtrVec*
             {
                 PtrVec* r;
-                byte* m;
-                byte* walk;
-                byte* p;
+                byte* m, walk, p;
                 bool more;
                 int i;
                 byte* cur = this.st.current_ns;
@@ -1988,8 +1979,7 @@ namespace IDEKA
             exact_param(TypeSpec* pt, Node* an) -> bool
             {
                 TypeSpec* at = this.arg_type(an);
-                TypeSpec* rp;
-                TypeSpec* ra;
+                TypeSpec* rp, ra;
                 switch (pt == (TypeSpec*)0 | at == (TypeSpec*)0)
                 {
                     case (true) { -> true; }
@@ -2272,8 +2262,7 @@ namespace IDEKA
                 TypeSpec* el;
                 int k = this.kind_of(t);
                 int w;
-                byte* base;
-                byte* r;
+                byte* base, r;
                 switch (a == (TypeSpec*)0)
                 {
                     case (true) { -> (byte*)0; }
@@ -2603,9 +2592,7 @@ namespace IDEKA
             t_ident(Node* n, bool r) -> TypeSpec*
             {
                 IDKC_SYMENTRY* e;
-                TypeSpec* vt;
-                TypeSpec* pr;
-                TypeSpec* tt;
+                TypeSpec* vt, pr, tt;
                 switch (n.text == (byte*)0)
                 {
                     case (true) { -> (TypeSpec*)0; }
@@ -2812,8 +2799,7 @@ namespace IDEKA
             t_binary(Node* n) -> TypeSpec*
             {
                 int op = n.op;
-                TypeSpec* lt;
-                TypeSpec* rt;
+                TypeSpec* lt, rt;
                 Overload* ov;
                 int lk, rk, w, lw, rw;
                 bool lp, rp, uns;
@@ -3108,7 +3094,7 @@ namespace IDEKA
                             base[i] = name[i];
                             i++;
                         };
-                        base[n] = (byte)0;
+                        base[n] = 0;
                         list = this.ov_resolve(base);
                         ffree(base);
                         switch (list == (PtrVec*)0)
@@ -3175,8 +3161,7 @@ namespace IDEKA
             {
                 Overload* o = this.first_overload(list);
                 Node* an;
-                TypeSpec* pt;
-                TypeSpec* at;
+                TypeSpec* pt, at;
                 IDKC_SYMENTRY* e;
                 int i, tgt, src;
                 int argc = node_count(n, 0);
@@ -3488,10 +3473,7 @@ namespace IDEKA
                 IDKC_SYMENTRY* e;
                 PtrVec* list;
                 Overload* o;
-                byte* key;
-                byte* objkey;
-                byte* tn;
-                byte* mk2;
+                byte* key, objkey, tn, mk2;
                 TypeSpec* r;
                 this.type_list(n, 0);
                 switch (n.text == (byte*)0)
@@ -3762,9 +3744,7 @@ namespace IDEKA
 
             t_dict(Node* n) -> TypeSpec*
             {
-                TypeSpec* t;
-                TypeSpec* kt;
-                TypeSpec* vt;
+                TypeSpec* t, kt, vt;
                 int cnt;
                 switch (n.kind)
                 {
@@ -3815,8 +3795,7 @@ namespace IDEKA
 
             t_array_lit(Node* n) -> TypeSpec*
             {
-                TypeSpec* el;
-                TypeSpec* c;
+                TypeSpec* el, c;
                 int cnt = node_count(n, 0);
                 this.type_list(n, 0);
                 switch ((n.flags `& NF_IS_STRING) != 0)
@@ -3865,8 +3844,7 @@ namespace IDEKA
             compute(Node* n, bool r) -> TypeSpec*
             {
                 int k = n.kind;
-                TypeSpec* t;
-                TypeSpec* u;
+                TypeSpec* t, u;
                 switch (k == NodeKind.LITERAL)
                 {
                     case (true) { -> this.t_literal(n); }
@@ -4318,10 +4296,7 @@ namespace IDEKA
             // _macro_body_is_self_referential
             mac_selfref(Node* b, byte* name) -> bool
             {
-                int k;
-                int m;
-                int i;
-                int cnt;
+                int k, m, i, cnt;
                 switch (b == (Node*)0) { case (true) { -> false; } default
                     {
                         k = b.kind;
@@ -4366,12 +4341,8 @@ namespace IDEKA
             // _macro_substitute on an already cloned tree
             mac_subst(Node* b, NameMap* sm) -> Node*
             {
-                int k;
-                int m;
-                int i;
-                int cnt;
-                Node* arg;
-                Node* r;
+                int k, m, i, cnt;
+                Node* arg, r;
                 switch (b == (Node*)0) { case (true) { -> (Node*)0; } default
                     {
                         k = b.kind;
@@ -4440,11 +4411,9 @@ namespace IDEKA
             // visit_macroCall: the expansion is typed at the call site and kept in slot a
             macro_expand(Node* n) -> void
             {
-                Node* d;
-                Node* body;
+                Node* d, body;
                 NameMap* sm;
-                int i;
-                int cnt;
+                int i, cnt;
                 n.a = (Node*)0;
                 d = (Node*)nm_get(this.macro_defs, n.text);
                 switch (d == (Node*)0) { case (true) { ->; } default
@@ -4522,8 +4491,7 @@ namespace IDEKA
                 int kd = this.kind_of(dst);
                 int ks = this.kind_of(src);
                 int wd, ws;
-                TypeSpec* ed;
-                TypeSpec* es;
+                TypeSpec* ed, es;
                 int ld, ls;
                 switch (kd == TyKind.UNKNOWN | ks == TyKind.UNKNOWN)
                 {
@@ -5423,8 +5391,7 @@ namespace IDEKA
                 TypeSpec* src = this.type_of(n.a);
                 IDKC_SYMENTRY* e = this.type_entry(src);
                 Node* dn = (Node*)0;
-                Node* v;
-                Node* m;
+                Node* v, m;
                 TypeSpec* vt;
                 int i;
                 int cnt = node_count(n, 0);
@@ -5469,13 +5436,9 @@ namespace IDEKA
 
             walk_for_in(Node* n) -> void
             {
-                TypeSpec* it;
-                TypeSpec* et;
-                TypeSpec* vt;
+                TypeSpec* it, et, vt;
                 IDKC_SYMENTRY* e;
-                Node* dn;
-                Node* v;
-                Node* m;
+                Node* dn, v, m;
                 int i;
                 int cnt = node_count(n, 0);
                 st_enter_scope(this.st);
@@ -5857,7 +5820,7 @@ namespace IDEKA
                             }
                                 default {};
                             };
-                            println(g"\0");
+                            print();
                             i++;
                         };
                     };

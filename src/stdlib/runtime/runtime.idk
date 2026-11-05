@@ -212,12 +212,13 @@ extern
 #ifdef __LINUX__
 def !!exit(int code) -> void
 {
+    standard::io::console::flush();
     volatile asm
     {
         movl $0, %edi
         movq $$231, %rax
         syscall
-    } : : "r"(code) : "edi", "rax", "memory";
+    } : : "r"(code) : "edi", "rax", "rcx", "r11", "memory";
     noreturn;
 };
 
@@ -228,7 +229,7 @@ def !!abort() -> void
         movq $$231, %rax
         movq $$134, %rdi
         syscall
-    } : : : "rax", "rdi", "memory";
+    } : : : "rax", "rdi", "rcx", "r11", "memory";
     noreturn;
 };
 
@@ -243,6 +244,7 @@ def !!atexit(void* fn) -> int
 #ifdef __MACOS__
 def !!exit(int code) -> void
 {
+    standard::io::console::flush();
 #ifdef __ARCH_ARM64__
     volatile asm
     {
@@ -256,7 +258,7 @@ def !!exit(int code) -> void
         movl $0, %edi
         movq $$0x2000001, %rax
         syscall
-    } : : "r"(code) : "edi", "rax", "memory";
+    } : : "r"(code) : "edi", "rax", "rcx", "r11", "memory";
     noreturn;
 #endif;
 };
@@ -276,7 +278,7 @@ def !!abort() -> void
         movq $$0x2000001, %rax
         movq $$134, %rdi
         syscall
-    } : : : "rax", "rdi", "memory";
+    } : : : "rax", "rdi", "rcx", "r11", "memory";
     noreturn;
 #endif;
 };
@@ -314,23 +316,21 @@ def !!_start() -> void;
 
 def !!_start() -> void
 {
-    i64* slot = @FRT_ENTRY_SP;
 #ifdef __ARCH_X86_64__
-    // The offset FRTStartup applies to the captured value assumes the single 8-byte
-    // alignment push the compiler emits for this function. Do not add stack locals here.
+    // Naked: no prologue, so rsp here is exactly what the kernel handed us.
+    // argc is at (%rsp), the argv pointers follow it.
     volatile asm
     {
-        movq %rsp, ($0)
-    } : : "r"(slot) : "memory";
-    volatile asm
-    {
+        movq %rsp, FRT_ENTRY_SP(%rip)
         andq $$-16, %rsp
+        callq FRTStartup
+        movl %eax, %edi
+        callq exit
+        ud2
     } : : : "memory", "cc";
 #endif;
-    exit(FRTStartup());
-    abort();
     noreturn;
-};
+} # naked;
 #endif; // Linux
 
 ///
@@ -338,6 +338,43 @@ def !!_start() -> void
 #import "exceptions.idk";
 #endif;
 ///
+
+#ifdef __WINDOWS__
+#ifdef __ARCH_X86_64__
+// Win64 stack probe, called by the x86-64 backend for frames of 4096 bytes or more.
+// In: rax = frame size. The caller subtracts rax from rsp afterwards, so rsp is unchanged here.
+// Touches each page between the thread stack limit (TEB StackLimit) and the new rsp so the guard page
+// keeps committing the stack one page at a time. Preserves rax, r10 and r11.
+def !!__chkstk() -> void
+{
+    volatile asm
+    {
+        subq $$16, %rsp
+        movq %r10, (%rsp)
+        movq %r11, 8(%rsp)
+        xorq %r11, %r11
+        leaq 24(%rsp), %r10
+        subq %rax, %r10
+        cmovbq %r11, %r10
+        movq %gs:16, %r11
+        cmpq %r11, %r10
+        jae .Lchkstk_done
+        andw $$-4096, %r10w
+    .Lchkstk_probe:
+        leaq -4096(%r11), %r11
+        movb $$0, (%r11)
+        cmpq %r11, %r10
+        jne .Lchkstk_probe
+    .Lchkstk_done:
+        movq (%rsp), %r10
+        movq 8(%rsp), %r11
+        addq $$16, %rsp
+        retq
+    } : : : "memory", "cc";
+    noreturn;
+} # naked;
+#endif;
+#endif;
 
 #ifdef IDEKA_RUNTIME
 #ifdef __WINDOWS__
@@ -504,6 +541,7 @@ def !!FRTStartup() -> int
     };
     // Returning from the entry point only ends this thread. Terminate the whole
     // process so live worker threads cannot keep it running.
+    standard::io::console::flush();
     RtlExitUserProcess((u32)return_code);
     -> return_code;
 };
@@ -529,10 +567,10 @@ def !!FRTStartup() -> int
 
 #ifdef __ARCH_X86_64__
     // The kernel leaves argc at the entry rsp, followed by the argv pointers.
-    // FRT_ENTRY_SP was captured after _start's 8-byte alignment push.
-    pargc = (i64*)(FRT_ENTRY_SP + 8);
+    // FRT_ENTRY_SP was captured by the naked _start, before any frame exists.
+    pargc = (i64*)FRT_ENTRY_SP;
     argc  = (int)*pargc;
-    argv  = (byte**)(FRT_ENTRY_SP + 16);
+    argv  = (byte**)(FRT_ENTRY_SP + 8);
 #endif;
 
     if (argc > 1)
@@ -556,6 +594,8 @@ def !!FRTStartup() -> int
             standard::io::console::print("SEGFAULT\n\0");
         };
     };
+    // the entry stub ends the process through libc exit, which does not know our output buffer
+    standard::io::console::flush();
     return return_code;
 };
 #endif; // __LINUX__
@@ -601,6 +641,8 @@ def !!FRTStartup() -> int
             standard::io::console::print("SEGFAULT\n\0");
         };
     };
+    // the entry stub ends the process through libc exit, which does not know our output buffer
+    standard::io::console::flush();
     return return_code;
 };
 #endif; // __MACOS__

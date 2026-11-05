@@ -88,8 +88,7 @@ namespace IDEKA
         def es_copy(OMap* s) -> OMap*
         {
             OMap* r = es_new();
-            EEntry* e;
-            EEntry* n;
+            EEntry* e, n;
             int i = 0;
             while (i < s.ks.len)
             {
@@ -178,7 +177,7 @@ namespace IDEKA
                 r[i] = s[i];
                 i++;
             };
-            r[n] = (byte)0;
+            r[n] = 0;
             return r;
         };
 
@@ -411,18 +410,10 @@ namespace IDEKA
         def er_eval(EReg* r, Node* n) -> OMap*
         {
             OMap* es = es_new();
-            OMap* inner;
-            OMap* left;
-            OMap* right;
-            OMap* res;
-            OMap* all;
-            byte* name;
-            byte* ns;
-            byte* op;
+            OMap* inner, left, right, res, all;
+            byte* name, ns, op;
             EEntry* e;
-            int i;
-            int code;
-            int len;
+            int i, code, len;
             bool wild;
             if (n == (Node*)0) { return es; };
             if (r.failed) { return es; };
@@ -537,8 +528,7 @@ namespace IDEKA
         def er_resolve(EReg* r, byte* name) -> OMap*
         {
             OMap* cached = (OMap*)om_get(r.cache, name);
-            OMap* es;
-            OMap* impl_es;
+            OMap* es, impl_es;
             Node* defn;
             PtrVec* imp;
             int i;
@@ -593,11 +583,8 @@ namespace IDEKA
         struct EVio
         {
             int kind;
-            byte* s1;
-            byte* s2;
-            byte* s3;
-            int line;
-            int col;
+            byte* s1, s2, s3;
+            int line, col;
         };
 
         def ev_new(int kind, byte* s1, byte* s2, byte* s3, int line, int col) -> EVio*
@@ -867,8 +854,7 @@ namespace IDEKA
         def ef_walk_item(PtrVec* out, Node* s0) -> void
         {
             Node* s = ef_unwrap(s0);
-            int c;
-            int i;
+            int c, i;
             if (s == (Node*)0) { return; };
             if (s.kind == NodeKind.FUNCTION_DEF | s.kind == NodeKind.INTERFACE_DEF | s.kind == NodeKind.EFFECT_DEF)
             {
@@ -901,9 +887,7 @@ namespace IDEKA
         // All FUNCTION_CALL nodes below n, pre order
         def ef_collect_calls(Node* n, PtrVec* out) -> void
         {
-            int s;
-            int c;
-            int i;
+            int s, c, i;
             if (n == (Node*)0) { return; };
             if (n.kind == NodeKind.FUNCTION_CALL) { pv_push(out, (void*)n); };
             ef_collect_calls(n.a, out);
@@ -928,9 +912,7 @@ namespace IDEKA
 
         def ef_has_asm(Node* n) -> bool
         {
-            int s;
-            int c;
-            int i;
+            int s, c, i;
             if (n == (Node*)0) { return false; };
             if (n.kind == NodeKind.INLINE_ASM) { return true; };
             if (ef_has_asm(n.a)) { return true; };
@@ -961,8 +943,7 @@ namespace IDEKA
             OMap* res = ss_new();
             OMap* es = (OMap*)om_get(r.fe, fname);
             OMap* ex;
-            EEntry* e;
-            EEntry* x;
+            EEntry* e, x;
             Node* ud;
             int i = 0;
             int j;
@@ -1072,9 +1053,7 @@ namespace IDEKA
             EEntry* e;
             PtrVec* kids;
             int ci = 0;
-            int i;
-            int j;
-            int len;
+            int i, j, len;
             if (cands == (PtrVec*)0) { return res; };
             while (ci < cands.len)
             {
@@ -1226,21 +1205,11 @@ namespace IDEKA
         def ep_check_caller(EPass* p, Node* f) -> void
         {
             EReg* r = p.reg;
-            OMap* excluded;
-            OMap* reported;
-            OMap* visible;
-            OMap* callee_att;
-            OMap* ct;
-            OMap* matching;
-            OMap* ms;
-            OMap* req;
-            OMap* dir;
-            PtrVec* calls;
-            PtrVec* own;
+            OMap* excluded, reported, visible, callee_att, ct, matching, ms, req, dir;
+            PtrVec* calls, own;
             Node* call;
             byte* eff;
-            int ci;
-            int i;
+            int ci, i;
             if (bc_is_proto(f)) { return; };
             excluded = ep_excluded(p, f.text);
             if (ss_len(excluded) == 0)
@@ -1341,25 +1310,13 @@ namespace IDEKA
         {
             EReg* r = p.reg;
             OMap* es = (OMap*)om_get(r.fe, f.text);
-            OMap* trans;
-            OMap* forb;
-            OMap* impure;
-            OMap* ms;
-            OMap* ct;
-            OMap* dir;
+            OMap* trans, forb, impure, ms, ct, dir;
             EEntry* e;
-            PtrVec* calls;
-            PtrVec* kids;
+            PtrVec* calls, kids;
             Node* call;
             byte* eff;
-            int i;
-            int j;
-            int k;
-            int line;
-            int col;
-            bool pure;
-            bool trans_fresh;
-            bool hit;
+            int i, j, k, line, col;
+            bool pure, trans_fresh, hit;
             if (bc_is_proto(f)) { return; };
             if (es == (OMap*)0) { return; };
             pure = false;
@@ -1494,8 +1451,7 @@ namespace IDEKA
 
         def ep_collect_constraints(EPass* p, Node* x, byte* src) -> void
         {
-            byte* ln;
-            byte* rn;
+            byte* ln, rn;
             int neg;
             if (x == (Node*)0) { return; };
             if (x.kind != NodeKind.EFFECT_EXPR) { return; };
@@ -1574,18 +1530,10 @@ namespace IDEKA
         def ep_check_conflicts(EPass* p, Node* f) -> void
         {
             EReg* r = p.reg;
-            OMap* trans;
-            OMap* fes;
-            OMap* done;
-            byte* src;
-            byte* l;
-            byte* rt;
-            byte* missing;
-            byte* key;
+            OMap* trans, fes, done;
+            byte* src, l, rt, missing, key;
             int i;
-            bool lp;
-            bool rp;
-            bool conflict;
+            bool lp, rp, conflict;
             if (bc_is_proto(f)) { return; };
             trans = (OMap*)om_get(p.transitive, f.text);
             if (trans == (OMap*)0) { return; };
@@ -1796,26 +1744,11 @@ namespace IDEKA
             defer pv_free(items);
             defer om_free(proto_e);
             defer om_free(proto_a);
-            OMap* es;
-            OMap* cset;
-            OMap* all_funcs;
-            OMap* t;
-            OMap* att;
-            OMap* ce;
-            OMap* ad;
-            Node* it;
-            Node* ann;
-            Node* prot;
-            Node* meth;
+            OMap* es, cset, all_funcs, t, att, ce, ad;
+            Node* it, ann, prot, meth;
             EEntry* e;
-            byte* nm;
-            byte* bare;
-            int i;
-            int j;
-            int k;
-            int m;
-            int c;
-            int old;
+            byte* nm, bare;
+            int i, j, k, m, c, old;
             bool changed;
             p.reg = r;
             p.vios = pv_new();

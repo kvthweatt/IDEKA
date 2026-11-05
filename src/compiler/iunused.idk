@@ -187,7 +187,7 @@ namespace IDEKA
                         while (a < b & c[a] == (byte)32) { a++; };
                         while (b > a & c[b - 1] == (byte)32) { b--; };
                         sv = c[b];
-                        c[b] = (byte)0;
+                        c[b] = 0;
                         fu_use(st, @c[a]);
                         c[b] = sv;
                     };
@@ -321,8 +321,7 @@ namespace IDEKA
         unused_warnings(Node* prog, byte* src, int n, int* lmap, int lmapn, byte** lfiles, bool color) -> int
         {
             FuState st;
-            FuEnt* a;
-            FuEnt* b;
+            FuEnt* a, b;
             PtrVec* rep = pv_new();
             PtrVec* keys = pv_new();
             Buf mb, wb, kb;

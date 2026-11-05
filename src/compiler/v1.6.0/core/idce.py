@@ -310,7 +310,7 @@ def _func_is_entry_point(func: Any, entry: str) -> bool:
     name = getattr(func, 'name', '')
     if not isinstance(name, str):
         return False
-    return name == entry or name == '_start'
+    return name == entry or name == '_start' or name == '__chkstk'
 
 
 # ---------------------------------------------------------------------------

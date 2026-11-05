@@ -467,7 +467,7 @@ namespace IDEKA
                     }
                         default {};
                     };
-                    println(g"\0");
+                    print();
                     switch (n.a != (Node*)0)
                     {
                         case (true) { dump_node(n.a, depth + 1, 0, 0); }
@@ -520,8 +520,7 @@ namespace IDEKA
         struct COp
         {
             int kind;
-            OpSym* left;
-            OpSym* right;
+            OpSym* left, right;
             byte* func;
         };
 
@@ -598,9 +597,7 @@ namespace IDEKA
             Token* toks;
             int count, pos;
             int* feat_hits;
-            int stub_total, stub_features;
-            int err_kind, err_expected, err_got, err_line, err_col;
-            int err_prev_line, err_got_len;
+            int stub_total, stub_features, err_kind, err_expected, err_got, err_line, err_col, err_prev_line, err_got_len;
             int* lmap;              // merged line to file local line map, for diagnostics
             byte** lfiles;          // merged line to file path, for diagnostics
             int lmapn;
@@ -1760,8 +1757,7 @@ namespace IDEKA
             is_type_func_def() -> bool
             {
                 int m = this.mark();
-                int depth, depth_t;
-                int t;
+                int depth, depth_t, t;
                 bool r = false;
                 bool ok = true;
 
@@ -2148,8 +2144,7 @@ namespace IDEKA
             interface_protos(Node* holder) -> void
             {
                 int pl, pc;
-                Node* f;
-                Node* prm;
+                Node* f, prm;
                 bool more;
                 switch (!this.consume(TokenType.LEFT_BRACE))
                 {
@@ -2277,8 +2272,7 @@ namespace IDEKA
                     case (true) { -> n; }
                     default
                     {
-                        Node* p;
-                        Node* pr;
+                        Node* p, pr;
                         byte* first;
                         bool more;
                         this.advance();
@@ -2629,8 +2623,7 @@ namespace IDEKA
             tp_copy_rels(TemplateEntry* e, Node* cs, PtrVec* to) -> void
             {
                 PtrVec* fnames = pv_new();
-                PtrVec* lhs;
-                PtrVec* rhs;
+                PtrVec* lhs, rhs;
                 Node* rel;
                 int i, k, n;
                 while (i < node_count(cs, 0))
@@ -2691,9 +2684,7 @@ namespace IDEKA
                 bool codify = false;
                 byte* name;
                 Node* csd;
-                PtrVec* args;
-                PtrVec* lhs;
-                PtrVec* rhs;
+                PtrVec* args, lhs, rhs;
                 byte* op;
                 int i;
                 switch (cg & this.expect(TokenType.CODIFY))
@@ -3600,8 +3591,7 @@ namespace IDEKA
             tp_constraint_entry(byte* fname, TemplateEntry* te, bool want_rels) -> TemplateEntry*
             {
                 int i, ln, lk, k;
-                bool found;
-                bool suffix;
+                bool found, suffix;
                 TemplateEntry* ce;
                 byte* key;
                 switch (want_rels)
@@ -3721,7 +3711,7 @@ namespace IDEKA
                         {
                             case (true) {
                             this.sb.len = 0;
-                            this.sb.mem[0] = (byte)0;
+                            this.sb.mem[0] = 0;
                             this.sb.put_str(f"Template '{owner}' cannot be instantiated with object type '{cn}'; templates do not accept objects\0");
                             this.error(this.own_n(this.sb.mem, this.sb.len));
                         }
@@ -3979,8 +3969,7 @@ namespace IDEKA
             // a cast has its target type, @x has the type of x with one more pointer level
             infer_operand_type(Node* e) -> TypeSpec*
             {
-                TypeSpec* inner;
-                TypeSpec* r;
+                TypeSpec* inner, r;
                 switch (e.kind == NodeKind.CAST_EXPRESSION)
                 {
                     case (true) { -> e.ts; }
@@ -4012,8 +4001,7 @@ namespace IDEKA
             {
                 byte* key = operator_text(n.op);
                 TemplateEntry* te = this.template_lookup(key);
-                TypeSpec* lts;
-                TypeSpec* rts;
+                TypeSpec* lts, rts;
                 switch (te == (TemplateEntry*)0)
                 {
                     case (true) { ->; }
@@ -4051,13 +4039,9 @@ namespace IDEKA
             op_infer_param(TemplateEntry* te, NameMap* inferred, TypeSpec* decl, TypeSpec* c) -> void
             {
                 PtrVec* raw;
-                TypeSpec* r;
-                TypeSpec* res;
+                TypeSpec* r, res;
                 byte* dn = decl.custom_typename;
-                byte* cn;
-                byte* base;
-                byte* rem;
-                byte* pname;
+                byte* cn, base, rem, pname;
                 int lt, bl, k, dd, cd;
                 bool pre;
                 switch (dn == (byte*)0)
@@ -4221,10 +4205,8 @@ namespace IDEKA
             resolve_template_operator(byte* key, TemplateEntry* te, TypeSpec* lts, TypeSpec* rts) -> void
             {
                 Node* f = te.node;
-                PtrVec* names;
-                PtrVec* specs;
-                NameMap* inferred;
-                NameMap* map;
+                PtrVec* names, specs;
+                NameMap* inferred, map;
                 Node* concrete;
                 TypeSpec* c;
                 byte* mangled;
@@ -4294,7 +4276,7 @@ namespace IDEKA
                                     default
                                     {
                                         this.sb.len = 0;
-                                        this.sb.mem[0] = (byte)0;
+                                        this.sb.mem[0] = 0;
                                         this.sb.put_str(f"{f.text}__tmpl__\0");
                                         i = 0;
                                         while (i < specs.len)
@@ -4559,8 +4541,7 @@ namespace IDEKA
             infer_struct_param(TemplateEntry* te, PtrVec* raw, Node* arg, NameMap* out) -> void
             {
                 TypeSpec* at;
-                byte* ctn;
-                byte* key;
+                byte* ctn, key;
                 TemplateEntry* ce;
                 PtrVec* cargs;
                 int i, j, kl, cl, st0, pos;
@@ -4713,8 +4694,7 @@ namespace IDEKA
             {
                 int p = 0;
                 Node* param;
-                TypeSpec* at;
-                TypeSpec* nt;
+                TypeSpec* at, nt;
                 int j;
                 while (p < node_count(concrete, 0))
                 {
@@ -4783,13 +4763,9 @@ namespace IDEKA
             {
                 int i, first, nargs, j;
                 bool nested;
-                Node* dp;
-                Node* arg;
-                byte* pt;
-                byte* kp;
-                byte* vp;
-                TypeSpec* t;
-                TypeSpec* at;
+                Node* dp, arg;
+                byte* pt, kp, vp;
+                TypeSpec* t, at;
                 PtrVec* raw;
                 Node* decl = te.node;
                 this.pend_dict.len = 0;
@@ -5081,8 +5057,7 @@ namespace IDEKA
                 int line = this.cur_line();
                 int col = this.cur_col() + 1;
                 Node* holder = this.mk(NodeKind.NODE_LIST, line, col);
-                Node* n;
-                Node* dp;
+                Node* n, dp;
                 NameMap* inferred = nm_new();
                 PtrVec* names = pv_new();
                 PtrVec* specs = pv_new();
@@ -5309,9 +5284,7 @@ namespace IDEKA
                 Node* id = (Node*)0;
                 bool tied = false;
                 TypeSpec* rt;
-                byte* rn;
-                byte* cand;
-                byte* un;
+                byte* rn, cand, un;
                 int pd, i;
                 switch (this.st == (IDKC_SYMTABLE*)0)
                 {
@@ -5521,8 +5494,7 @@ namespace IDEKA
             {
                 TemplateEntry* te = this.template_lookup(ma.text2);
                 NameMap* inferred;
-                PtrVec* names;
-                PtrVec* specs;
+                PtrVec* names, specs;
                 Node* n = (Node*)0;
                 TypeSpec* t;
                 int i;
@@ -5799,8 +5771,7 @@ namespace IDEKA
             // A bracket group emits its own relation into d and yields the names of its last side.
             cs_element(Node* d, PtrVec* out) -> void
             {
-                PtrVec* ns;
-                PtrVec* rhs;
+                PtrVec* ns, rhs;
                 byte* op;
                 int line, col, i;
                 PtrVec* res;
@@ -6056,14 +6027,8 @@ namespace IDEKA
             {
                 PtrVec* srcs = pv_new();
                 int m, i, j, k, base, nrel, rn;
-                byte* sname;
-                byte* mapped;
-                byte* mx;
-                Node* src;
-                Node* rel;
-                Node* nrelnode;
-                Node* id;
-                Node* prev;
+                byte* sname, mapped, mx;
+                Node* src, rel, nrelnode, id, prev;
                 PtrVec* finals = pv_new();
                 bool more = true;
                 while (more & !this.failed)
@@ -6714,8 +6679,7 @@ namespace IDEKA
                         bool tied = false;
                         bool is_array = false;
                         int depth = 0;
-                        byte* tn;
-                        byte* eff;
+                        byte* tn, eff;
                         int k;
                         TypeSpec* rts;
                         Node* fl;
@@ -6934,8 +6898,7 @@ namespace IDEKA
                 int tt = this.cur();
                 byte* v = this.cur_value();
                 int n = this.cur_value_len();
-                int i;
-                int b;
+                int i, b;
                 switch (tt == TokenType.STRING_LITERAL | tt == TokenType.G_STRING)
                 {
                     case (true) {
@@ -7034,7 +6997,7 @@ namespace IDEKA
                             default
                             {
                                 this.sb.len = 0;
-                                this.sb.mem[0] = (byte)0;
+                                this.sb.mem[0] = 0;
                                 int depth = 1;
                                 int c;
                                 bool glue = false;
@@ -7185,8 +7148,7 @@ namespace IDEKA
             // itself. Returns an owned string, or null with the error recorded.
             codify_text_of(bool strict) -> byte*
             {
-                Node* fl;
-                Node* p;
+                Node* fl, p;
                 byte* val;
                 int k, cnt;
                 switch (this.expect(TokenType.F_STRING))
@@ -7200,7 +7162,7 @@ namespace IDEKA
                     default
                     {
                         this.sb.len = 0;
-                        this.sb.mem[0] = (byte)0;
+                        this.sb.mem[0] = 0;
                         cnt = node_count(fl, 0);
                         while (k < cnt & !this.failed)
                         {
@@ -7478,7 +7440,7 @@ namespace IDEKA
                     r[i] = s[i];
                     i++;
                 };
-                r[n] = (byte)0;
+                r[n] = 0;
                 -> this.own(r);
             };
 
@@ -7486,8 +7448,8 @@ namespace IDEKA
                                     // f"{n}": plain decimal digits
             int_str(int v) -> byte*
             {
-                byte* r = (byte*)fmalloc((u64)24);
-                byte* tmp = (byte*)fmalloc((u64)24);
+                byte* r = (byte*)fmalloc(24);
+                byte* tmp = (byte*)fmalloc(24);
                 int n = 0;
                 int o = 0;
                 int u = v;
@@ -7504,7 +7466,7 @@ namespace IDEKA
                     r[o] = tmp[n];
                     o++;
                 };
-                r[o] = (byte)0;
+                r[o] = 0;
                 ffree(tmp);
                 -> r;
             };
@@ -7512,8 +7474,8 @@ namespace IDEKA
             // f"{n:,.0f}": decimal digits with a comma between thousands
             int_commas(int v) -> byte*
             {
-                byte* r = (byte*)fmalloc((u64)40);
-                byte* tmp = (byte*)fmalloc((u64)24);
+                byte* r = (byte*)fmalloc(40);
+                byte* tmp = (byte*)fmalloc(24);
                 int n = 0;
                 int k = 0;
                 int o = 0;
@@ -7533,7 +7495,7 @@ namespace IDEKA
                     o++;
                     switch (k > 0 & k % 3 == 0) { case (true) { r[o] = ','; o++; } default {}; };
                 };
-                r[o] = (byte)0;
+                r[o] = 0;
                 ffree(tmp);
                 -> r;
             };
@@ -7554,7 +7516,7 @@ namespace IDEKA
                     r[la + j] = b[j];
                     j++;
                 };
-                r[la + lb] = (byte)0;
+                r[la + lb] = 0;
                 -> this.own(r);
             };
 
@@ -7639,8 +7601,7 @@ namespace IDEKA
                 i64 v = 0;
                 i64 base = 10;
                 int i = 0;
-                int d;
-                int c;
+                int d, c;
                 bool any = false;
                 switch (s[0] == '0' & (s[1] == 'x' | s[1] == 'X'))
                 {
@@ -7737,7 +7698,7 @@ namespace IDEKA
 
             bg_mul_small(u64* a, int* n, u64 m) -> void
             {
-                u64 carry = (u64)0;
+                u64 carry = 0;
                 u64 t;
                 int i = 0;
                 int k = *n;
@@ -7769,7 +7730,7 @@ namespace IDEKA
                     switch (i >= k)
                     {
                         case (true) {
-                        a[i] = (u64)0;
+                        a[i] = 0;
                         k++;
                     }
                         default {};
@@ -7798,7 +7759,7 @@ namespace IDEKA
                         i = old;
                         while (i <= old + ls)
                         {
-                            a[i] = (u64)0;
+                            a[i] = 0;
                             i++;
                         };
                         i = old - 1;
@@ -7812,7 +7773,7 @@ namespace IDEKA
                         i = 0;
                         while (i < ls)
                         {
-                            a[i] = (u64)0;
+                            a[i] = 0;
                             i++;
                         };
                         *n = old + ls + 1;
@@ -7823,7 +7784,7 @@ namespace IDEKA
 
             bg_div_small(u64* a, int* n, u64 d) -> u64
             {
-                u64 rem = (u64)0;
+                u64 rem = 0;
                 u64 cur;
                 int i = *n - 1;
                 while (i >= 0)
@@ -7862,7 +7823,7 @@ namespace IDEKA
                 int li = pos / 32;
                 switch (pos < 0 | li >= n)
                 {
-                    case (true) { -> (u64)0; }
+                    case (true) { -> 0; }
                     default
                     {
                         -> (a[li] >> (u64)(pos % 32)) `& (u64)1;
@@ -7917,16 +7878,12 @@ namespace IDEKA
                 bool exneg = false;
                 int fdig = 0;
                 int ex = 0;
-                int e10;
-                int k;
+                int e10, k;
                 int sh = 0;
-                int bl;
-                int r;
-                int eb;
-                int b;
+                int bl, r, eb, b;
                 bool sticky = false;
                 bool rbit;
-                u64 mant = (u64)0;
+                u64 mant = 0;
                 double v;
                 while (s[i] != 0)
                 {
@@ -7937,7 +7894,7 @@ namespace IDEKA
                         switch (n < 100)
                         {
                             case (true) {
-                            this.bg_mul_small(a, @n, (u64)10);
+                            this.bg_mul_small(a, @n, 10);
                             this.bg_add_small(a, @n, (u64)(c - '0'));
                             switch (frac)
                             {
@@ -8031,12 +7988,12 @@ namespace IDEKA
                             k = e10;
                             while (k >= 9)
                             {
-                                this.bg_mul_small(a, @n, (u64)1000000000);
+                                this.bg_mul_small(a, @n, 1000000000);
                                 k = k - 9;
                             };
                             while (k > 0)
                             {
-                                this.bg_mul_small(a, @n, (u64)10);
+                                this.bg_mul_small(a, @n, 10);
                                 k--;
                             };
                         }
@@ -8052,7 +8009,7 @@ namespace IDEKA
                             this.bg_shl(a, @n, sh);
                             while (k >= 9)
                             {
-                                switch (this.bg_div_small(a, @n, (u64)1000000000) != (u64)0)
+                                switch (this.bg_div_small(a, @n, 1000000000) != (u64)0)
                                 {
                                     case (true) { sticky = true; }
                                     default {};
@@ -8140,7 +8097,7 @@ namespace IDEKA
                 int i;
                 int n = pp_cstrlen(s);
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 while (i < n)
                 {
                     switch (s[i] == ':' & i + 1 < n)
@@ -8284,8 +8241,7 @@ namespace IDEKA
                 TemplateEntry* te = this.template_lookup(key);
                 NameMap* map;
                 Node* concrete;
-                byte* mangled;
-                byte* what;
+                byte* mangled, what;
                 int i;
                 switch (te == (TemplateEntry*)0)
                 {
@@ -8326,7 +8282,7 @@ namespace IDEKA
                                     {
                                         this.reject_object_args(key, names, specs);
                                         this.sb.len = 0;
-                                        this.sb.mem[0] = (byte)0;
+                                        this.sb.mem[0] = 0;
                                         this.sb.put_str(f"{key}__\0");
                                         while (i < names.len)
                                         {
@@ -8497,7 +8453,7 @@ namespace IDEKA
             type_mangle_str(TypeSpec* t) -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 switch (t.custom_typename != (byte*)0)
                 {
                     case (true) { -> t.custom_typename; }
@@ -9037,7 +8993,7 @@ namespace IDEKA
                                                         case (true) {
                                                         this.advance();
                                                         this.sb.len = 0;
-                                                        this.sb.mem[0] = (byte)0;
+                                                        this.sb.mem[0] = 0;
                                                         this.sb.put_str(f"{t.custom_typename}<\0");
                                                         int i;
                                                         while (i < names.len)
@@ -9151,6 +9107,24 @@ namespace IDEKA
                                                                             default {};
                                                                         };
                                                                     };
+                                                                };
+                                                                switch (t.alignment >= 0 & t.alignment < t.bit_width)
+                                                                {
+                                                                    case (true) {
+                                                                        this.sb.len = 0;
+                                                                        this.sb.put_str(g"Alignment (\0");
+                                                                        this.sb.put_int(t.alignment);
+                                                                        this.sb.put_str(g") cannot be less than bit width (\0");
+                                                                        this.sb.put_int(t.bit_width);
+                                                                        this.sb.put_str(g") in data{\0");
+                                                                        this.sb.put_int(t.bit_width);
+                                                                        this.sb.put_str(g":\0");
+                                                                        this.sb.put_int(t.alignment);
+                                                                        this.sb.put_str(g"}\0");
+                                                                        this.error(this.own_n(this.sb.mem, this.sb.len));
+                                                                        -> t;
+                                                                    }
+                                                                    default {};
                                                                 };
                                                                 switch (!this.consume(TokenType.RIGHT_BRACE))
                                                                 {
@@ -9425,8 +9399,7 @@ namespace IDEKA
                     case (true) { -> expr; }
                     default
                     {
-                        Node* n;
-                        Node* value;
+                        Node* n, value;
                         switch (this.expect(TokenType.ASSIGN))
                         {
                             case (true) {
@@ -9889,8 +9862,7 @@ namespace IDEKA
                     default
                     {
                         int op = this.bin_match(lv);
-                        Node* right;
-                        Node* n;
+                        Node* right, n;
                         int line, col;
                         while (op >= 0)
                         {
@@ -9948,8 +9920,7 @@ namespace IDEKA
                     case (true) { -> expr; }
                     default
                     {
-                        Node* n;
-                        Node* r;
+                        Node* n, r;
                         int line, col, c;
                         while (true)
                         {
@@ -10259,8 +10230,7 @@ namespace IDEKA
                 int c = this.cur();
                 int line = this.cur_line();
                 int col = this.cur_col();
-                Node* operand;
-                Node* n;
+                Node* operand, n;
                 int op = -1;
                 bool via_cast = false;
 
@@ -10521,20 +10491,13 @@ namespace IDEKA
                 Node* n;
                 COp* pc;
                 int line, col;
-                Node* idx;
-                Node* end;
-                Node* holder;
-                Node* fill;
+                Node* idx, end, holder, fill;
                 bool rvalform = false;
-                byte* callee;
-                byte* member;
+                byte* callee, member;
                 int pop;
                 TypeSpec* target;
-                Node* src;
-                Node* cond;
-                Node* els;
-                byte* tkey;
-                byte* qkey;
+                Node* src, cond, els;
+                byte* tkey, qkey;
                 Node* fsn;
                 while (true)
                 {
@@ -10682,7 +10645,7 @@ namespace IDEKA
                                                         n.d = fill;
                                                         switch (rvalform)
                                                         {
-                                                            case (true) { n.ival = (i64)1; }
+                                                            case (true) { n.ival = 1; }
                                                             default {};
                                                         };
                                                         idx.a = (Node*)0;
@@ -11480,8 +11443,7 @@ namespace IDEKA
                     case (true) { -> n; }
                     default
                     {
-                        Node* nm;
-                        Node* v;
+                        Node* nm, v;
                         switch (!this.expect(TokenType.RIGHT_BRACE))
                         {
                             case (true) {
@@ -11581,8 +11543,7 @@ namespace IDEKA
                     case (true) { -> n; }
                     default
                     {
-                        Node* k;
-                        Node* v;
+                        Node* k, v;
                         while (!this.expect(TokenType.RIGHT_BRACE))
                         {
                             switch (this.expect(TokenType.EOF))
@@ -12365,9 +12326,7 @@ namespace IDEKA
                     default
                     {
                         int line, col;
-                        Node* ix;
-                        Node* rv;
-                        Node* acc;
+                        Node* ix, rv, acc;
                         while (!this.expect(TokenType.RIGHT_BRACE))
                         {
                             switch (!this.expect(TokenType.LEFT_BRACKET))
@@ -12447,10 +12406,7 @@ namespace IDEKA
                     default
                     {
                         int line, col;
-                        Node* mem;
-                        Node* lv;
-                        Node* rv;
-                        Node* es;
+                        Node* mem, lv, rv, es;
                         while (!this.expect(TokenType.RIGHT_BRACE))
                         {
                             switch (!this.expect(TokenType.DOT))
@@ -12924,7 +12880,7 @@ namespace IDEKA
                     default
                     {
                         this.sb.len = 0;
-                        this.sb.mem[0] = (byte)0;
+                        this.sb.mem[0] = 0;
                         switch (t.custom_typename != (byte*)0)
                         {
                             case (true) { this.sb.put_str(t.custom_typename); }
@@ -13031,8 +12987,7 @@ namespace IDEKA
                             };
                         };
                         int i = 1;
-                        TypeSpec* ref;
-                        TypeSpec* ots;
+                        TypeSpec* ref, ots;
                         switch (ops.len > 1)
                         {
                             case (true) {
@@ -13100,8 +13055,7 @@ namespace IDEKA
                     default
                     {
                         NodeVec* out = nv_new();
-                        Node* init;
-                        Node* d;
+                        Node* init, d;
                         byte* name;
 
                         // ----- type alias: T as Name -----
@@ -13204,8 +13158,7 @@ namespace IDEKA
                                     {
                                         this.define_var(name, ts);
 
-                                        Node* call;
-                                        Node* holder;
+                                        Node* call, holder;
                                         switch (this.expect(TokenType.LEFT_PAREN))
                                         {
                                             case (true) {
@@ -13263,10 +13216,8 @@ namespace IDEKA
                                                 PtrVec* inits = pv_new();
                                                 pv_push(names, (void*)name);
 
-                                                Node* rhs;
-                                                Node* src;
-                                                int al;
-                                                int ac;
+                                                Node* rhs, src;
+                                                int al, ac;
 
                                                 switch (this.expect(TokenType.ADDRESS_ASSIGN))
                                                 {
@@ -14727,8 +14678,7 @@ namespace IDEKA
                     case (true) { -> (Node*)0; }
                     default
                     {
-                        bool destructure;
-                        bool bititer;
+                        bool destructure, bititer;
                         Node* n;
                         switch (this.is_for_in(@destructure, @bititer))
                         {
@@ -15641,7 +15591,7 @@ namespace IDEKA
             asm_operands() -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 int count, depth, start;
                 while (!this.expect2(TokenType.COLON, TokenType.SEMICOLON))
                 {
@@ -15719,7 +15669,7 @@ namespace IDEKA
             asm_clobbers() -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 int count;
                 while (!this.expect(TokenType.SEMICOLON))
                 {
@@ -15984,10 +15934,8 @@ namespace IDEKA
             {
                 int line = this.cur_line();
                 int col = this.cur_col();
-                Node* n;
-                Node* e;
-                byte* name;
-                byte* sub;
+                Node* n, e;
+                byte* name, sub;
 
                 switch (this.expect(TokenType.LEFT_PAREN))
                 {
@@ -16350,10 +16298,19 @@ namespace IDEKA
                         f.c = this.effect_annotation(NodeKind.ATTENUATE_ANNOTATION);
                     }
                                         default {
-                                            switch (this.expect(TokenType.LESS_THAN))
+                                            switch (this.expect(TokenType.IDENTIFIER) & this.val_is(g"naked\0", 5))
                                             {
-                                                case (true) { this.async_use(f); }
-                                                default { this.error(g"Expected 'deprecate', 'effect', 'attenuate' or '<Tag>' after '#'\0"); };
+                                                case (true) {
+                                                    this.advance();
+                                                    f.flags = f.flags `| NF_NAKED;
+                                                }
+                                                default {
+                                                    switch (this.expect(TokenType.LESS_THAN))
+                                                    {
+                                                        case (true) { this.async_use(f); }
+                                                        default { this.error(g"Expected 'deprecate', 'effect', 'attenuate', 'naked' or '<Tag>' after '#'\0"); };
+                                                    };
+                                                };
                                             };
                     };
                                     };
@@ -16747,8 +16704,7 @@ namespace IDEKA
                                             a++;
                                         };
                                         this.consume(TokenType.LEFT_BRACE);
-                                        Node* r;
-                                        Node* o;
+                                        Node* r, o;
                                         byte* op;
                                         while (!this.failed & !this.expect(TokenType.RIGHT_BRACE))
                                         {
@@ -17128,9 +17084,7 @@ namespace IDEKA
                     case (true) { -> n; }
                     default
                     {
-                        Node* addr;
-                        Node* e;
-                        Node* m;
+                        Node* addr, e, m;
                         n.text = this.ident();
                         switch (this.failed)
                         {
@@ -17326,7 +17280,7 @@ namespace IDEKA
                 byte* val;
                 int k, cnt;
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 cnt = node_count(fl, 0);
                 while (k < cnt)
                 {
@@ -17994,8 +17948,7 @@ namespace IDEKA
                                                                             default {};
                                                                         };
 
-                                                                        Node* ret;
-                                                                        Node* b;
+                                                                        Node* ret, b;
                                                                         switch (this.expect2(TokenType.TAG, TokenType.SEMICOLON))
                                                                         {
                                                                             case (true) {
@@ -18549,8 +18502,7 @@ namespace IDEKA
             // Adds a template parameter name to a struct node (l4) unless already declared
             sd_param_add(Node* h, byte* s) -> void
             {
-                int i;
-                int c;
+                int i, c;
                 Node* x;
                 switch (this.failed | s == (byte*)0)
                 {
@@ -18621,8 +18573,7 @@ namespace IDEKA
                             default {};
                         };
                         int cnt = 0;
-                        Node* mem;
-                        Node* e;
+                        Node* mem, e;
                         int k;
                         bool more = true;
                         while (more)
@@ -19271,10 +19222,8 @@ namespace IDEKA
                             case (true) { -> node_free(x); }
                             default
                             {
-                                Node* ex;
-                                Node* dl;
-                                int i, s;
-                                int total;
+                                Node* ex, dl;
+                                int i, s, total;
                                 switch (lst.l0 != (NodeVec*)0)
                                 {
                                     case (true) { total = lst.l0.len; }
@@ -19585,8 +19534,7 @@ namespace IDEKA
                                     default { this.ns_path = this.cat2(this.cat2(saved, g"__\0"), n.text); };
                                 };
 
-                                Node* l;
-                                Node* b;
+                                Node* l, b;
                                 switch (this.expect(TokenType.COLON))
                                 {
                                     case (true) {
@@ -20728,8 +20676,7 @@ namespace IDEKA
                     default
                     {
                         int i, j, total;
-                        Node* t;
-                        Node* p;
+                        Node* t, p;
                         while (i < o.l5.len)
                         {
                             t = this.find_trait(o.l5.items[i].text);
@@ -21147,8 +21094,7 @@ namespace IDEKA
             // Members of the parent chain of obj, parents first, each paired with its origin object
             inh_members(byte* obj, PtrVec* path, PtrVec* outm, PtrVec* outo, byte* child) -> void
             {
-                Node* ob;
-                Node* m;
+                Node* ob, m;
                 int i, c;
                 switch (this.failed)
                 {
@@ -21219,8 +21165,7 @@ namespace IDEKA
 
             inh_methods(byte* obj, PtrVec* path, PtrVec* outm, byte* child) -> void
             {
-                Node* ob;
-                Node* m;
+                Node* ob, m;
                 int i, c;
                 switch (this.inh_in_path(path, obj))
                 {
@@ -21358,7 +21303,7 @@ namespace IDEKA
                     pv_push(parts, (void*)t);
                 };
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 switch (!for_message)
                 {
                     case (true) {
@@ -21456,11 +21401,8 @@ namespace IDEKA
                 PtrVec* fkeys = pv_new();
                 PtrVec* kept = pv_new();
                 PtrVec* cand;
-                Node* m;
-                Node* x;
-                byte* k;
-                byte* prev;
-                byte* msg;
+                Node* m, x;
+                byte* k, prev, msg;
                 int i, j, c, nb, idx;
                 bool dup;
                 nb = node_count(o, 2);
@@ -21748,8 +21690,7 @@ namespace IDEKA
             // True when `Type name = expr` is rewritten as the constructor call Type.__init(expr)
             ctor_sugar(byte* raw, Node* rhs) -> bool
             {
-                Node* ob;
-                Node* ini;
+                Node* ob, ini;
                 COp* c;
                 int i;
                 switch (raw == (byte*)0)
@@ -21838,9 +21779,7 @@ namespace IDEKA
                             case (true) { -> this.done(t); }
                             default
                             {
-                                Node* base;
-                                Node* p;
-                                Node* x;
+                                Node* base, p, x;
                                 byte* bname;
                                 int i, total;
                                 bool more;
@@ -22353,7 +22292,7 @@ namespace IDEKA
             opsym_text(OpSym* s) -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 int i;
                 while (i < s.n)
                 {
@@ -22381,8 +22320,7 @@ namespace IDEKA
             mangle_into(OpSym* s) -> void
             {
                 int i, j, c;
-                byte* sym;
-                byte* nm;
+                byte* sym, nm;
                 while (i < s.n)
                 {
                     switch (i > 0)
@@ -22431,7 +22369,7 @@ namespace IDEKA
             op_func_name(OpSym* l, OpSym* r) -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 this.sb.put_str(g"operator__\0");
                 this.mangle_into(l);
                 switch (r != (OpSym*)0)
@@ -22684,11 +22622,7 @@ namespace IDEKA
             variadic_chain(COp* c, Node* first, int line, int col) -> Node*
             {
                 Node* call = this.op_call(c.func, line, col);
-                Node* cnt;
-                Node* argc;
-                Node* lead;
-                Node* trail;
-                Node* right;
+                Node* cnt, argc, lead, trail, right;
                 int count = 0;
                 int nargs = 0;
                 bool is_trailing = false;
@@ -22697,10 +22631,10 @@ namespace IDEKA
                     case (true) { -> call; }
                     default {};
                 };
-                cnt = this.lit(DataType.SINT, (i64)0, line, col);
-                argc = this.lit(DataType.SINT, (i64)0, line, col);
+                cnt = this.lit(DataType.SINT, 0, line, col);
+                argc = this.lit(DataType.SINT, 0, line, col);
                 lead = this.lit(DataType.BOOL, (i64)(first == (Node*)0), line, col);
-                trail = this.lit(DataType.BOOL, (i64)0, line, col);
+                trail = this.lit(DataType.BOOL, 0, line, col);
                 switch (this.failed)
                 {
                     case (true) { node_free(call); -> (Node*)0; }
@@ -22740,7 +22674,7 @@ namespace IDEKA
                 };
                 this.set_count_literal(cnt, count);
                 this.set_count_literal(argc, nargs);
-                trail.ival = (i64)is_trailing;
+                trail.ival = is_trailing;
                 -> call;
             };
 
@@ -22776,11 +22710,8 @@ namespace IDEKA
                             case (true) { -> expr; }
                             default
                             {
-                                COp* c;
-                                COp* rc;
-                                Node* call;
-                                Node* mid;
-                                Node* right;
+                                COp* c, rc;
+                                Node* call, mid, right;
                                 int line, col;
                                 while (true)
                                 {
@@ -22902,8 +22833,7 @@ namespace IDEKA
                         int line = this.cur_line();
                         int col = this.cur_col();
                         COp* c = this.cop_best(2);
-                        Node* call;
-                        Node* operand;
+                        Node* call, operand;
                         COp* rc;
                         switch (c != (COp*)0)
                         {
@@ -23403,9 +23333,7 @@ namespace IDEKA
                                                                         };
 
                                                                         OpSym* prev_vop = this.vop_sym;
-                                                                        Node* ret;
-                                                                        Node* b;
-                                                                        Node* post;
+                                                                        Node* ret, b, post;
                                                                         int bind;
                                                                         switch (this.expect(TokenType.SEMICOLON))
                                                                         {
@@ -23830,7 +23758,7 @@ namespace IDEKA
             num_text(int v) -> byte*
             {
                 this.sb.len = 0;
-                this.sb.mem[0] = (byte)0;
+                this.sb.mem[0] = 0;
                 this.sb.put_int(v);
                 -> this.own_n(this.sb.mem, this.sb.len);
             };
@@ -24041,8 +23969,7 @@ namespace IDEKA
             // ':' contract_ref (',' contract_ref)*  statements go to out.l0
             contract_refs(Node* f, Node* out, bool is_post) -> void
             {
-                Node* ref;
-                Node* nm;
+                Node* ref, nm;
                 bool more = true;
                 while (more & !this.failed)
                 {
@@ -24163,10 +24090,7 @@ namespace IDEKA
                         NodeVec* old = blk.l0;
                         NodeVec* out = nv_new();
                         int i, k;
-                        Node* s;
-                        Node* decl;
-                        Node* ret;
-                        Node* id;
+                        Node* s, decl, ret, id;
                         while (old != (NodeVec*)0 & i < old.len)
                         {
                             s = old.items[i];
@@ -24415,7 +24339,7 @@ namespace IDEKA
                                 t.op = -1;
                                 node_push(holder, 0, t);
                                 this.sb.len = 0;
-                                this.sb.mem[0] = (byte)0;
+                                this.sb.mem[0] = 0;
                                 ->;
                             };
                         };
@@ -24444,7 +24368,7 @@ namespace IDEKA
                         Node* e;
                         this.advance();
                         this.sb.len = 0;
-                        this.sb.mem[0] = (byte)0;
+                        this.sb.mem[0] = 0;
                         while (i < end)
                         {
                             switch (v[i] == '{' & i + 1 < end & v[i + 1] == '{')
@@ -24478,7 +24402,7 @@ namespace IDEKA
                                         e = this.sub_expr(v + i + 1, j - i - 1);
                                         // Parsing the expression may use the shared scratch buffer (template names)
                                         this.sb.len = 0;
-                                        this.sb.mem[0] = (byte)0;
+                                        this.sb.mem[0] = 0;
                                         switch (this.failed)
                                         {
                                             case (true) { -> this.done(n); }
@@ -24523,7 +24447,7 @@ namespace IDEKA
                         this.advance();
                         int i = 2;
                         this.sb.len = 0;
-                        this.sb.mem[0] = (byte)0;
+                        this.sb.mem[0] = 0;
                         bool closed = false;
                         while (i < len & !closed)
                         {
@@ -24602,7 +24526,7 @@ namespace IDEKA
                             {
                                 int k, used;
                                 this.sb.len = 0;
-                                this.sb.mem[0] = (byte)0;
+                                this.sb.mem[0] = 0;
                                 while (k < tlen)
                                 {
                                     switch (tpl[k] == '{' & k + 1 < tlen & tpl[k + 1] == '}')
@@ -24803,7 +24727,7 @@ namespace IDEKA
                                                     };
                                                     switch (b.ival == 0)
                                                     {
-                                                        case (true) { b.ival = (i64)cur_op; }
+                                                        case (true) { b.ival = cur_op; }
                                                         default {
                                                             switch (b.ival != (i64)cur_op)
                                                             {
@@ -24911,11 +24835,8 @@ namespace IDEKA
                 };
                 int total = npre + npost;
                 int ci, k, i, j, last, found;
-                Node* ct;
-                Node* bd;
-                Node* x;
-                byte* cname;
-                byte* rn;
+                Node* ct, bd, x;
+                byte* cname, rn;
                 bool is_pre, is_post, matched, neg;
                 int op;
                 while (ci < total & !this.failed)
@@ -25766,10 +25687,10 @@ namespace IDEKA
 
             async_number_text(int n) -> byte*
             {
-                byte* r = (byte*)fmalloc((u64)12);
+                byte* r = (byte*)fmalloc(12);
                 int i = 10;
                 int v = n;
-                r[11] = (byte)0;
+                r[11] = 0;
                 while (i >= 0)
                 {
                     r[i] = (byte)(48 + v % 10);

@@ -54,6 +54,7 @@
 #def NF_TEMPLATE 524288;
 #def NF_INSTANCE 1048576;    // instantiated template function appended after the program
 #def NF_ASYNC 2097152;       // async function (definition or prototype)
+#def NF_NAKED 8388608;        // } # naked; no prologue or epilogue, body is inline asm only
 #def NF_BIT_ITER 4194304;     // for (`x in value): bit iteration
 
 #def TS_SIGNED 1;
@@ -353,13 +354,10 @@ namespace IDEKA
             int fp_nparams;
             Node* array_size;
             NodeVec* array_dims;    // array dimension expressions
-            TypeSpec* array_elem;
-            TypeSpec* dict_key;
-            TypeSpec* dict_value;
+            TypeSpec* array_elem, dict_key, dict_value;
             TypeSpec* fp_ret;       // function pointer type: return type
             TypeSpec** fp_params;   // function pointer type: parameter types
-            byte* custom_typename;
-            byte* calling_conv;
+            byte* custom_typename, calling_conv;
         };
 
         struct Node
@@ -367,22 +365,10 @@ namespace IDEKA
             int kind, line, col, op, flags;
             i64 ival;
             double fval;
-            byte* text;
-            byte* text2;
-            byte* text3;
-            Node* a;
-            Node* b;
-            Node* c;
-            Node* d;
-            Node* e;
-            NodeVec* l0;
-            NodeVec* l1;
-            NodeVec* l2;
-            NodeVec* l3;
-            NodeVec* l4;
-            NodeVec* l5;
-            TypeSpec* ts;
-            TypeSpec* ts2;
+            byte* text, text2, text3;
+            Node* a, b, c, d, e;
+            NodeVec* l0, l1, l2, l3, l4, l5;
+            TypeSpec* ts, ts2;
             TypeSpec* ety;          // expression type set by ExprTyper, borrowed, never freed
         };
 
