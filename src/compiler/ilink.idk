@@ -1,0 +1,398 @@
+// Author: Karac V. Thweatt
+//
+// ilink.idk - shared helpers of the IDEKA linker library (byte buffers, file input and output, byte readers)
+//
+// The linker is a library like iasm, it has no main. ilink_elf.idk links ELF64 executables,
+// ilink_pe.idk links PE32+ executables.
+
+#ifndef IDEKA_STANDARD
+#import <standard.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_FFI_FIO
+#import <runtime\ffifio.idk>;
+#endif;
+
+#ifndef IDEKA_ILINK
+#def IDEKA_ILINK 1;
+
+namespace IDEKA
+{
+    namespace ilink
+    {
+        struct LkBuf
+        {
+            byte* m;
+            int len, cap;
+            bool ok = false;
+        };
+
+        lk_strlen(byte* s) -> int
+        {
+            int n = 0;
+            while (s[n] != 0) { n++; };
+            -> n;
+        };
+
+        lk_streq(byte* a, byte* b) -> bool
+        {
+            int i = 0;
+            while (a[i] != 0 & b[i] != 0)
+            {
+                if (a[i] != b[i]) { -> false; };
+                i++;
+            };
+            -> a[i] == b[i];
+        };
+
+        lk_dup(byte* s) -> byte*
+        {
+            int n = lk_strlen(s);
+            byte* p = (byte*)fmalloc(n + 1);
+            int i = 0;
+            if (p == 0) { -> p; };
+            while (i < n) { p[i] = s[i]; i++; };
+            p[n] = 0;
+            -> p;
+        };
+
+        lk_cat2(byte* a, byte* b) -> byte*
+        {
+            int la = lk_strlen(a);
+            int lb = lk_strlen(b);
+            byte* p = (byte*)fmalloc(la + lb + 1);
+            int i = 0;
+            while (i < la) { p[i] = a[i]; i++; };
+            i = 0;
+            while (i < lb) { p[la + i] = b[i]; i++; };
+            p[la + lb] = 0;
+            -> p;
+        };
+
+        lk_zero(byte* p, int n) -> void
+        {
+            int i = 0;
+            while (i < n) { p[i] = 0; i++; };
+            ->;
+        };
+
+        lk_grow(byte* old, int nbytes) -> byte*
+        {
+            u64 np;
+            if (old == 0) { np = fmalloc(nbytes); }
+            else { np = frealloc((u64)old, nbytes); };
+            -> (byte*)np;
+        };
+
+        // ===== byte readers, little endian =====
+
+        lk_r8(byte* p, int o) -> int
+        {
+            -> p[o] `& 255;
+        };
+
+        lk_r16(byte* p, int o) -> int
+        {
+            -> (p[o] `& 255) `| ((p[o + 1] `& 255) << 8);
+        };
+
+        lk_r32(byte* p, int o) -> i64
+        {
+            i64 v = p[o + 3] `& 255;
+            v = (v << 8) `| (p[o + 2] `& 255);
+            v = (v << 8) `| (p[o + 1] `& 255);
+            v = (v << 8) `| (p[o] `& 255);
+            -> v;
+        };
+
+        lk_r64(byte* p, int o) -> i64
+        {
+            i64 hi = lk_r32(p, o + 4);
+            i64 lo = lk_r32(p, o);
+            -> (hi << 32) `| lo;
+        };
+
+        // Sign extended 32 bit read
+        lk_r32s(byte* p, int o) -> i64
+        {
+            i64 v = lk_r32(p, o);
+            if (v >= 2147483648) { v = v - 4294967296; };
+            -> v;
+        };
+
+        // ===== byte writers into a plain buffer =====
+
+        lk_w8(byte* p, int o, i64 v) -> void
+        {
+            p[o] = (v `& 255);
+            ->;
+        };
+
+        lk_w16(byte* p, int o, i64 v) -> void
+        {
+            lk_w8(p, o, v);
+            lk_w8(p, o + 1, v >> 8);
+            ->;
+        };
+
+        lk_w32(byte* p, int o, i64 v) -> void
+        {
+            lk_w16(p, o, v);
+            lk_w16(p, o + 2, v >> 16);
+            ->;
+        };
+
+        lk_w64(byte* p, int o, i64 v) -> void
+        {
+            lk_w32(p, o, v);
+            lk_w32(p, o + 4, v >> 32);
+            ->;
+        };
+
+        // ===== growing output buffer =====
+
+        lb_init(LkBuf* b) -> void
+        {
+            b.m = (byte*)0;
+            b.len = 0;
+            b.cap = 0;
+            b.ok = true;
+            ->;
+        };
+
+        lb_reserve(LkBuf* b, int extra) -> void
+        {
+            int nc;
+            if (b.len + extra <= b.cap) { ->; };
+            nc = b.cap * 2;
+            if (nc < 4096) { nc = 4096; };
+            while (nc < b.len + extra) { nc = nc * 2; };
+            b.m = lk_grow(b.m, nc);
+            if (b.m == 0) { b.ok = false; ->; };
+            b.cap = nc;
+            ->;
+        };
+
+        lb_put8(LkBuf* b, int v) -> void
+        {
+            lb_reserve(b, 1);
+            if (!b.ok) { ->; };
+            b.m[b.len] = v;
+            b.len++;
+            ->;
+        };
+
+        lb_put16(LkBuf* b, i64 v) -> void
+        {
+            lb_put8(b, (v `& 255));
+            lb_put8(b, ((v >> 8) `& 255));
+            ->;
+        };
+
+        lb_put32(LkBuf* b, i64 v) -> void
+        {
+            lb_put16(b, v);
+            lb_put16(b, v >> 16);
+            ->;
+        };
+
+        lb_put64(LkBuf* b, i64 v) -> void
+        {
+            lb_put32(b, v);
+            lb_put32(b, v >> 32);
+            ->;
+        };
+
+        lb_put_n(LkBuf* b, byte* p, int n) -> void
+        {
+            int i = 0;
+            lb_reserve(b, n);
+            if (!b.ok) { ->; };
+            while (i < n) { b.m[b.len + i] = p[i]; i++; };
+            b.len = b.len + n;
+            ->;
+        };
+
+        lb_put_str(LkBuf* b, byte* s) -> int
+        {
+            int off = b.len;
+            lb_put_n(b, s, lk_strlen(s));
+            lb_put8(b, 0);
+            -> off;
+        };
+
+        lb_pad_to(LkBuf* b, int pos) -> void
+        {
+            while (b.len < pos) { lb_put8(b, 0); };
+            ->;
+        };
+
+        lb_align(LkBuf* b, int al) -> void
+        {
+            while (b.len % al != 0) { lb_put8(b, 0); };
+            ->;
+        };
+
+        // ===== files =====
+
+        // Reads a whole file. Returns null when it cannot be read. size receives the byte count.
+        lk_read_file(byte* path, int* size) -> byte*
+        {
+            void* f = fopen(path, g"rb\0");
+            byte* m;
+            int n, got;
+            if (f == (void*)0) { -> (byte*)0; };
+            fseek(f, 0, 2);
+            n = ftell(f);
+            rewind(f);
+            m = (byte*)fmalloc(n + 16);
+            if (m == 0) { fclose(f); -> (byte*)0; };
+            got = fread(m, 1, n, f);
+            fclose(f);
+            if (got != n) { -> (byte*)0; };
+            lk_zero(m + n, 16);
+            *size = n;
+            -> m;
+        };
+
+        lk_write_file(byte* path, byte* m, int n) -> bool
+        {
+            void* f = fopen(path, g"wb\0");
+            int wrote;
+            if (f == (void*)0) { -> false; };
+            wrote = fwrite(m, 1, n, f);
+            fclose(f);
+            -> wrote == n;
+        };
+
+        lk_file_exists(byte* path) -> bool
+        {
+            void* f = fopen(path, g"rb\0");
+            if (f == (void*)0) { -> false; };
+            fclose(f);
+            -> true;
+        };
+
+        #ifndef __WINDOWS__
+        extern
+        {
+            def !! chmod(byte*, int) -> int;
+        };
+
+        // Marks a written executable as runnable (mode 0755)
+        lk_make_exec(byte* path) -> void
+        {
+            chmod(path, 493);
+            ->;
+        };
+        #else
+        lk_make_exec(byte* path) -> void
+        {
+            ->;
+        };
+        #endif;
+
+        // ===== name hash =====
+
+        lk_hash(byte* s) -> int
+        {
+            int h = 5381;
+            int i = 0;
+            while (s[i] != 0)
+            {
+                h = h * 33 + (s[i] `& 255);
+                i++;
+            };
+            if (h < 0) { h = 0 - h; };
+            if (h < 0) { h = 0; };
+            -> h;
+        };
+
+        // Open addressing table from names to an integer value. Slots hold value + 1, 0 is empty.
+        struct LkMap
+        {
+            byte** keys;
+            int* vals;
+            int cap, count;
+        };
+
+        lm_init(LkMap* m, int cap) -> void
+        {
+            int c = 64;
+            while (c < cap * 2) { c = c * 2; };
+            m.cap = c;
+            m.count = 0;
+            m.keys = (byte**)fmalloc(8 * c);
+            m.vals = (int*)fmalloc(4 * c);
+            lk_zero((byte*)m.keys, 8 * c);
+            lk_zero((byte*)m.vals, 4 * c);
+            ->;
+        };
+
+        // Value stored for a name, or -1
+        lm_get(LkMap* m, byte* key) -> int
+        {
+            int i = lk_hash(key) % m.cap;
+            while (m.vals[i] != 0)
+            {
+                if (lk_streq(m.keys[i], key)) { -> m.vals[i] - 1; };
+                i = (i + 1) % m.cap;
+            };
+            -> -1;
+        };
+
+        // Doubles the table and re-inserts the entries
+        lm_grow(LkMap* m) -> void
+        {
+            int oc = m.cap;
+            byte** ok = m.keys;
+            int* ov = m.vals;
+            int i = 0;
+            int j;
+            m.cap = oc * 2;
+            m.keys = (byte**)fmalloc(8 * m.cap);
+            m.vals = (int*)fmalloc(4 * m.cap);
+            lk_zero((byte*)m.keys, 8 * m.cap);
+            lk_zero((byte*)m.vals, 4 * m.cap);
+            while (i < oc)
+            {
+                if (ov[i] != 0)
+                {
+                    j = lk_hash(ok[i]) % m.cap;
+                    while (m.vals[j] != 0) { j = (j + 1) % m.cap; };
+                    m.keys[j] = ok[i];
+                    m.vals[j] = ov[i];
+                };
+                i++;
+            };
+            ffree((byte*)ok);
+            ffree((byte*)ov);
+            ->;
+        };
+
+        // Sets a name, returns false when it was already present (value left unchanged)
+        lm_put(LkMap* m, byte* key, int val) -> bool
+        {
+            int i;
+            if ((m.count + 1) * 2 > m.cap) { lm_grow(m); };
+            i = lk_hash(key) % m.cap;
+            while (m.vals[i] != 0)
+            {
+                if (lk_streq(m.keys[i], key)) { -> false; };
+                i = (i + 1) % m.cap;
+            };
+            m.keys[i] = key;
+            m.vals[i] = val + 1;
+            m.count++;
+            -> true;
+        };
+
+        lk_align_up(i64 v, i64 al) -> i64
+        {
+            if (al <= 1) { -> v; };
+            -> ((v + al - 1) / al) * al;
+        };
+    };
+};
+
+#endif;

@@ -1,0 +1,415 @@
+// Author: Karac V. Thweatt
+//
+// iasm_elf.idk - ELF64 relocatable object writer for the IDEKA assembler (x86-64)
+//
+// Library, no main. Works on the result of iasm_finish (iasm_core.idk).
+//
+// Usage:
+//
+//     iasm_finish(a);
+//     iasm_write_elf(a, "out.o");        // returns false on error
+//
+// Section order follows llvm-mc: null, .strtab (section names live there too), the user
+// sections each followed by its .rela section, .symtab. Symbols are written locals first (the file symbol, the
+// section symbols that relocations use, then the local labels), then globals.
+
+#ifndef IDEKA_IASM_CORE
+#import "src/compiler/iasm_core.idk";
+#endif;
+
+#ifndef IDEKA_IASM_BUF
+#import "src/compiler/iasm_buf.idk";
+#endif;
+
+#ifndef IDEKA_IASM_ELF
+#def IDEKA_IASM_ELF 1;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        // The ELF symbol table entry order and names
+        struct ElfPlan
+        {
+            int* order;           // symbol index in the table to ISym index, -1 section symbol, -2 file, -3 null
+            int* secof;           // for section symbols: the section index
+            int nsyms, nlocal, symtab_idx, strtab_idx, shstrtab_idx, nsections;
+        };
+
+        // Does symbol s belong to the symbol table?
+        el_in_symtab(Asm* a, int si) -> bool
+        {
+            ISym* s = @a.syms[si];
+            if (s.name[0] == 0) { -> false; };
+            if (s.kind == IA_SK_COMMON) { -> true; };
+            if (s.defined)
+            {
+                if (s.temp) { -> s.used; };
+                -> true;
+            };
+            // undefined
+            if (s.used | (s.declared & s.bind != IA_SB_LOCAL)) { -> true; };
+            -> false;
+        };
+
+        // Local table entry: a defined symbol with local binding, or a temp symbol kept because it was used
+        el_is_local(Asm* a, int si) -> bool
+        {
+            ISym* s = @a.syms[si];
+            if (!s.defined) { -> false; };
+            if (s.kind == IA_SK_COMMON) { -> false; };
+            -> s.bind == IA_SB_LOCAL;
+        };
+
+        el_symtype(ISym* s) -> int
+        {
+            if (!s.defined) { -> s.type; };
+            -> s.type;
+        };
+
+        iasm_elf_image(Asm* a, ElfBuf* o) -> bool
+        {
+            ElfPlan* np = (ElfPlan*)0;
+            ElfPlan* pl = (ElfPlan*)fmalloc(sizeof(ElfPlan));
+            ElfBuf strtab, shstr, symtab, secdata;
+            int i = 0;
+            int j = 0;
+            int idx;
+            int n = 0;
+            int sh_name;
+            Sect* s;
+            ISym* sy;
+            int[64] shoff;
+            int[64] shsize;
+            int[64] shname;
+            int[64] relname;
+            int[64] reloff;
+            int[64] relsize;
+            int strtab_name, symtab_name, shstrtab_name, symtab_off, symtab_size, strtab_off, shstr_off, shoff_table, nsh;
+            int sp = 0;
+            int info;
+            i64 ref;
+            int secsym_of, shndx, stype, sbind, sinfo, fileoff;
+            byte** cnames;
+            int* noff, symnm;
+            int cn = 0;
+            int nm_file = -1;
+            int nm_strtab = 0;
+            int nm_symtab = 0;
+            int[64] nm_sec;
+            int[64] nm_rel;
+            i64 v;
+            if (!a.finished) { a.err = g"assembly is not finished\0"; -> false; };
+            pl.order = (int*)fmalloc(4 * (a.nsyms + a.nsec + 8));
+            pl.secof = (int*)fmalloc(4 * (a.nsyms + a.nsec + 8));
+            eb_init(@strtab);
+            eb_init(@shstr);
+            eb_init(@symtab);
+            eb_init(o);
+            eb_put8(@strtab, 0);
+            eb_put8(@shstr, 0);
+            // section indices
+            idx = 2;
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                s.elf_index = idx;
+                idx++;
+                if (s.nrel > 0)
+                {
+                    s.rela_index = idx;
+                    idx++;
+                }
+                else { s.rela_index = 0; };
+                i++;
+            };
+            pl.symtab_idx = idx;
+            pl.strtab_idx = 1;
+            pl.shstrtab_idx = 1;
+            nsh = idx + 1;
+            // symbol table order
+            n = 0;
+            pl.order[n] = -3;
+            n++;
+            if (a.file != 0)
+            {
+                pl.order[n] = -2;
+                n++;
+            };
+            // section symbols are created when their section is first switched to,
+            // so they sit among the local symbols in creation order
+            sp = 0;
+            i = 0;
+            while (i < a.nsyms)
+            {
+                while (sp < a.nsec & a.secs[sp].symseq <= i)
+                {
+                    if (a.secs[sp].secsym == 1)
+                    {
+                        pl.order[n] = -1;
+                        pl.secof[n] = sp;
+                        n++;
+                    };
+                    sp++;
+                };
+                a.syms[i].outidx = -1;
+                if (el_in_symtab(a, i) & el_is_local(a, i))
+                {
+                    pl.order[n] = i;
+                    a.syms[i].outidx = n;
+                    n++;
+                };
+                i++;
+            };
+            while (sp < a.nsec)
+            {
+                if (a.secs[sp].secsym == 1)
+                {
+                    pl.order[n] = -1;
+                    pl.secof[n] = sp;
+                    n++;
+                };
+                sp++;
+            };
+            pl.nlocal = n;
+            i = 0;
+            while (i < a.nsyms)
+            {
+                if (el_in_symtab(a, i) & !el_is_local(a, i))
+                {
+                    pl.order[n] = i;
+                    a.syms[i].outidx = n;
+                    n++;
+                };
+                i++;
+            };
+            pl.nsyms = n;
+            // section symbol indices for relocations
+            i = 0;
+            while (i < n)
+            {
+                if (pl.order[i] == -1) { a.secs[pl.secof[i]].secsym = 100 + i; };
+                i++;
+            };
+            // every name goes through the string table builder, which sorts from the ends
+            // and lets a name share the tail of another, as llvm does
+            cnames = (byte**)fmalloc(8 * (n + 3 * a.nsec + 8));
+            noff = (int*)fmalloc(4 * (n + 3 * a.nsec + 8));
+            symnm = (int*)fmalloc(4 * (n + 8));
+            if (a.file != 0)
+            {
+                nm_file = cn;
+                cnames[cn] = a.file;
+                cn++;
+            };
+            i = 0;
+            while (i < n)
+            {
+                symnm[i] = -1;
+                if (pl.order[i] >= 0)
+                {
+                    symnm[i] = cn;
+                    cnames[cn] = a.syms[pl.order[i]].name;
+                    cn++;
+                };
+                i++;
+            };
+            nm_strtab = cn;
+            cnames[cn] = g".strtab\0";
+            cn++;
+            i = 0;
+            while (i < a.nsec)
+            {
+                nm_sec[i] = cn;
+                cnames[cn] = a.secs[i].name;
+                cn++;
+                nm_rel[i] = -1;
+                if (a.secs[i].nrel > 0)
+                {
+                    nm_rel[i] = cn;
+                    cnames[cn] = ia_cat2(g".rela\0", a.secs[i].name);
+                    cn++;
+                };
+                i++;
+            };
+            nm_symtab = cn;
+            cnames[cn] = g".symtab\0";
+            cn++;
+            eb_build_strtab(@strtab, cnames, noff, cn);
+            // the symbol table bytes
+            i = 0;
+            while (i < n)
+            {
+                if (pl.order[i] == -3)
+                {
+                    eb_put32(@symtab, 0); eb_put8(@symtab, 0); eb_put8(@symtab, 0); eb_put16(@symtab, 0);
+                    eb_put64(@symtab, 0); eb_put64(@symtab, 0);
+                };
+                if (pl.order[i] == -2)
+                {
+                    fileoff = noff[nm_file];
+                    eb_put32(@symtab, fileoff);
+                    eb_put8(@symtab, 4);
+                    eb_put8(@symtab, 0);
+                    eb_put16(@symtab, 0xFFF1);
+                    eb_put64(@symtab, 0);
+                    eb_put64(@symtab, 0);
+                };
+                if (pl.order[i] == -1)
+                {
+                    eb_put32(@symtab, 0);
+                    eb_put8(@symtab, 3);
+                    eb_put8(@symtab, 0);
+                    eb_put16(@symtab, a.secs[pl.secof[i]].elf_index);
+                    eb_put64(@symtab, 0);
+                    eb_put64(@symtab, 0);
+                };
+                if (pl.order[i] >= 0)
+                {
+                    sy = @a.syms[pl.order[i]];
+                    fileoff = noff[symnm[i]];
+                    eb_put32(@symtab, fileoff);
+                    sbind = sy.bind;
+                    if (!sy.defined & sbind == IA_SB_LOCAL) { sbind = IA_SB_GLOBAL; };
+                    sinfo = sbind * 16 + sy.type;
+                    eb_put8(@symtab, sinfo);
+                    eb_put8(@symtab, sy.vis);
+                    shndx = 0;
+                    v = 0;
+                    if (sy.kind == IA_SK_COMMON) { shndx = 0xFFF2; v = sy.align; }
+                    else
+                    {
+                        if (sy.kind == IA_SK_ABS) { shndx = 0xFFF1; v = sy.val; }
+                        else
+                        {
+                            if (sy.defined)
+                            {
+                                shndx = a.secs[sy.sec].elf_index;
+                                v = as_sym_pos(a, pl.order[i]);
+                            };
+                        };
+                    };
+                    eb_put16(@symtab, shndx);
+                    eb_put64(@symtab, v);
+                    eb_put64(@symtab, sy.size);
+                };
+                i++;
+            };
+            strtab_name = noff[nm_strtab];
+            i = 0;
+            while (i < a.nsec)
+            {
+                shname[i] = noff[nm_sec[i]];
+                if (nm_rel[i] >= 0) { relname[i] = noff[nm_rel[i]]; };
+                i++;
+            };
+            symtab_name = noff[nm_symtab];
+            // file image like llvm-mc: header, the section contents, .symtab, the relocation
+            // sections, then .strtab and the section header table
+            i = 0;
+            while (i < 64) { eb_put8(o, 0); i++; };
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                eb_align(o, s.align);
+                shoff[i] = o.len;
+                if (s.stype != IA_SHT_NOBITS) { eb_put_n(o, s.out, s.size); };
+                i++;
+            };
+            eb_align(o, 8);
+            symtab_off = o.len;
+            eb_put_n(o, symtab.m, symtab.len);
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                if (s.nrel > 0)
+                {
+                    eb_align(o, 8);
+                    reloff[i] = o.len;
+                    j = 0;
+                    while (j < s.nrel)
+                    {
+                        eb_put64(o, s.rel[j].off);
+                        ref = s.rel[j].sym;
+                        if (ref < 0) { ref = a.secs[0 - 1 - ref].secsym - 100; }
+                        else { ref = a.syms[ref].outidx; };
+                        eb_put64(o, (ref << 32) `| s.rel[j].type);
+                        eb_put64(o, s.rel[j].add);
+                        j++;
+                    };
+                    relsize[i] = s.nrel * 24;
+                };
+                i++;
+            };
+            strtab_off = o.len;
+            eb_put_n(o, strtab.m, strtab.len);
+            eb_align(o, 8);
+            shoff_table = o.len;
+            // section headers: null
+            i = 0;
+            while (i < 64) { eb_put8(o, 0); i++; };
+            // .strtab
+            eb_put32(o, strtab_name); eb_put32(o, 3); eb_put64(o, 0); eb_put64(o, 0);
+            eb_put64(o, strtab_off); eb_put64(o, strtab.len); eb_put32(o, 0); eb_put32(o, 0);
+            eb_put64(o, 1); eb_put64(o, 0);
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                stype = s.stype;
+                eb_put32(o, shname[i]); eb_put32(o, stype); eb_put64(o, s.flags); eb_put64(o, 0);
+                eb_put64(o, shoff[i]); eb_put64(o, s.size); eb_put32(o, 0); eb_put32(o, 0);
+                eb_put64(o, s.align); eb_put64(o, s.entsize);
+                if (s.nrel > 0)
+                {
+                    eb_put32(o, relname[i]); eb_put32(o, 4); eb_put64(o, 0x40); eb_put64(o, 0);
+                    eb_put64(o, reloff[i]); eb_put64(o, relsize[i]); eb_put32(o, pl.symtab_idx);
+                    eb_put32(o, s.elf_index);
+                    eb_put64(o, 8); eb_put64(o, 24);
+                };
+                i++;
+            };
+            // .symtab
+            eb_put32(o, symtab_name); eb_put32(o, 2); eb_put64(o, 0); eb_put64(o, 0);
+            eb_put64(o, symtab_off); eb_put64(o, symtab.len); eb_put32(o, pl.strtab_idx);
+            eb_put32(o, pl.nlocal);
+            eb_put64(o, 8); eb_put64(o, 24);
+            // the ELF header
+            eb_patch(o, 0, 0x464C457F, 4);
+            o.m[4] = 2;
+            o.m[5] = 1;
+            o.m[6] = 1;
+            eb_patch(o, 16, 1, 2);
+            eb_patch(o, 18, 62, 2);
+            eb_patch(o, 20, 1, 4);
+            eb_patch(o, 40, shoff_table, 8);
+            eb_patch(o, 52, 64, 2);
+            eb_patch(o, 58, 64, 2);
+            eb_patch(o, 60, nsh, 2);
+            eb_patch(o, 62, pl.shstrtab_idx, 2);
+            ffree((byte*)cnames);
+            ffree((byte*)noff);
+            ffree((byte*)symnm);
+            -> o.ok;
+        };
+
+        iasm_write_elf(Asm* a, byte* path) -> bool
+        {
+            ElfBuf o;
+            void* f;
+            int wrote;
+            if (!iasm_elf_image(a, @o)) { -> false; };
+            f = fopen(path, g"wb\0");
+            if (f == (void*)0) { a.err = g"cannot open the output file\0"; -> false; };
+            wrote = fwrite(o.m, 1, o.len, f);
+            fclose(f);
+            if (wrote != o.len) { a.err = g"short write\0"; -> false; };
+            -> true;
+        };
+    };
+};
+
+#endif;

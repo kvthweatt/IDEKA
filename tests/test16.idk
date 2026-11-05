@@ -1,0 +1,44 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+data{10::0} as lebit;
+data{10::1} as bebit;
+
+foo(bebit x) -> void ->;
+
+comptime
+{
+    
+};
+
+main () -> int
+{
+	byte[16] buf1, buf2;
+
+    lebit y = 1;
+
+    //foo(y);
+
+    println("Enter your name: ");
+    int br1 = input(buf1, 16);
+
+    print();
+
+    println("Male or female? (0/1): ");
+    int br2 = input(buf2, 16);
+
+    println(buf1);
+    println(buf2);
+
+    if (buf2 == "0")
+    {
+        println(f"Hello Mr. {buf1}");
+    }
+    else
+    {
+        println(f"Hello Mrs. {buf1}");
+    };
+
+	return 0;
+};

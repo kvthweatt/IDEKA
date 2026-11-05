@@ -1,0 +1,4117 @@
+// Author: Karac V. Thweatt
+//
+// ix64.idk - x86_64 assembly backend (System V, AT&T syntax)
+//
+// Backend counterpart of the LLVM IR text builder (i_llvmir.idk). It has no dependency on
+// LLVM IR. It builds the shared code model (imodel.idk) and its builder methods select
+// x86_64 instructions and write assembly directly.
+//
+// Model: every SSA value lives in an 8 byte frame slot (aggregates in a slot of their own
+// size). Integers are kept zero extended to 64 bits, floats as raw bits. Each instruction
+// loads its operands into scratch registers, computes and stores the result. A register
+// allocator can replace this later without changing the builder interface.
+//
+// Registers: 0 rax 1 rcx 2 rdx 3 rsi 4 rdi 5 r8 6 r9 7 r10 8 r11 9 rbx 10 r12 11 r13 12 r14 13 r15
+//
+// Aggregates (structs and arrays) are passed by value as stack copies and returned through a
+// hidden pointer in rdi, like the System V ABI does for memory class values.
+//
+// Ownership: every IRType, IRValue, string and block made through an X64Module
+// belongs to that module and is released by X64Module.__exit.
+//
+#ifndef IDEKA_STANDARD
+#import <standard.idk>;
+#endif;
+
+#ifndef IDEKA_AST
+#import "iast.idk";
+#endif;
+
+#ifndef IDEKA_TYPES
+#import "itypesys.idk";
+#endif;
+
+#ifndef IDEKA_MODEL
+#import "imodel.idk";
+#endif;
+
+#ifndef IDEKA_X64
+#def IDEKA_X64 1;
+
+using IDEKA::ast;
+using IDEKA::preprocessor;
+using IDEKA::types;
+using IDEKA::ir;
+
+namespace IDEKA
+{
+    namespace x64
+    {
+        // ------------------------------------------------------------------
+        // Module
+        // ------------------------------------------------------------------
+
+        object X64Module
+        {
+            byte* mod_name, triple, layout;
+            PtrVec* types;      // IRType* made here
+            PtrVec* values;     // IRValue* made here
+            PtrVec* strs;       // byte* made here
+            PtrVec* blobs;      // raw allocations (item arrays, blocks)
+            PtrVec* named;      // identified struct types in creation order
+            PtrVec* globals;    // IRGlobal*
+            PtrVec* funcs;      // IRFunc*
+            NameMap* gnames;    // global and function names in use
+            NameMap* fmap;      // function name to IRFunc*
+            NameMap* gmap;      // global name to IRGlobal*
+            Buf tb;             // text scratch
+            IRFunc* cf;         // function being built
+            IRBlock* cb;        // insertion block
+            IRBlock* entry_b;   // entry block of cf
+            IRValue** ia;       // small operand scratch
+            IRType* nul;        // elem of types that have none, so elem.kind is always readable
+            bool a_handled;
+            int abi;            // 0 System V, 1 Win64
+            bool must_tail;     // set by the code generator before a tail call
+            int lab, nunsup, zmax;
+            byte** rtab;
+            byte* cx_sym;
+            i64 cx_off;
+            Buf ab, mb, cdata;
+
+            __init(byte* name) -> this
+            {
+                this.mod_name = ts_dup(name);
+                this.triple = (byte*)0;
+                this.layout = (byte*)0;
+                this.nul = (IRType*)0;
+                this.types = pv_new();
+                this.values = pv_new();
+                this.strs = pv_new();
+                this.blobs = pv_new();
+                this.named = pv_new();
+                this.globals = pv_new();
+                this.funcs = pv_new();
+                this.gnames = nm_new();
+                this.fmap = nm_new();
+                this.gmap = nm_new();
+                this.tb.__init();
+                this.ab.__init();
+                this.mb.__init();
+                this.cdata.__init();
+                this.a_handled = false;
+                this.lab = 0;
+                this.nunsup = 0;
+                this.zmax = 0;
+                this.cf = (IRFunc*)0;
+                this.cb = (IRBlock*)0;
+                this.entry_b = (IRBlock*)0;
+                this.ia = (IRValue**)fmalloc((u64)8 * (u64)((sizeof(IRValue*) + 7) / 8));
+                this.nul = this.new_type(LK.VOID);
+                this.nul.elem = this.nul;
+                this.must_tail = false;
+                this.a_init();
+                -> this;
+            };
+
+            __expr() -> X64Module* -> this;
+
+            __exit() -> void
+            {
+                int i, j;
+                IRFunc* f;
+                IRBlock* bl;
+                while (i < this.types.len)
+                {
+                    ffree((byte*)this.types.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.values.len)
+                {
+                    ffree((byte*)this.values.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.strs.len)
+                {
+                    ffree((byte*)this.strs.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.blobs.len)
+                {
+                    ffree((byte*)this.blobs.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.funcs.len)
+                {
+                    f = (IRFunc*)this.funcs.items[i];
+                    j = 0;
+                    while (j < f.blocks.len)
+                    {
+                        bl = (IRBlock*)f.blocks.items[j];
+                        pv_free(bl.lines);
+                        ffree((byte*)bl);
+                        j++;
+                    };
+                    pv_free(f.blocks);
+                    pv_free(f.attrs);
+                    nm_free(f.names);
+                    ffree((byte*)f.args);
+                    ffree((byte*)f);
+                    i++;
+                };
+                i = 0;
+                while (i < this.globals.len)
+                {
+                    ffree((byte*)this.globals.items[i]);
+                    i++;
+                };
+                pv_free(this.types);
+                pv_free(this.values);
+                pv_free(this.strs);
+                pv_free(this.blobs);
+                pv_free(this.named);
+                pv_free(this.globals);
+                pv_free(this.funcs);
+                nm_free(this.gnames);
+                nm_free(this.fmap);
+                nm_free(this.gmap);
+                ffree(this.mod_name);
+                switch (this.triple != (byte*)0)
+                {
+                    case (true) { ffree(this.triple); }
+                    default {};
+                };
+                switch (this.layout != (byte*)0)
+                {
+                    case (true) { ffree(this.layout); }
+                    default {};
+                };
+                this.tb.__exit();
+                this.ab.__exit();
+                this.mb.__exit();
+                this.cdata.__exit();
+                -> ffree((byte*)this.ia);
+            };
+
+            set_target(byte* triple, byte* layout) -> void
+            {
+                this.triple = ts_dup(triple);
+                this.layout = ts_dup(layout);
+                ->;
+            };
+
+            // Owned copy of s
+            own(byte* s) -> byte*
+            {
+                byte* r = ts_dup(s);
+                pv_push(this.strs, (void*)r);
+                -> r;
+            };
+
+            alloc_items(int n) -> IRType**
+            {
+                IRType** p = (IRType**)fmalloc((u64)(n + 1) * (u64)((sizeof(IRType*) + 7) / 8));
+                pv_push(this.blobs, (void*)p);
+                -> p;
+            };
+
+            new_type(int kind) -> IRType*
+            {
+                IRType* t = (IRType*)fmalloc((u64)((sizeof(IRType) + 7) / 8));
+                t.kind = kind;
+                t.width = 0;
+                t.count = 0;
+                t.elem = this.nul;
+                t.items = (IRType**)0;
+                t.nitems = 0;
+                t.name = (byte*)0;
+                t.vararg = false;
+                t.defined = true;
+                pv_push(this.types, (void*)t);
+                -> t;
+            };
+
+            t_void() -> IRType* -> this.new_type(LK.VOID);
+            t_float() -> IRType* -> this.new_type(LK.FLOAT);
+            t_double() -> IRType* -> this.new_type(LK.DOUBLE);
+
+            t_int(int width) -> IRType*
+            {
+                IRType* t = this.new_type(LK.INT);
+                t.width = width;
+                -> t;
+            };
+
+            t_ptr(IRType* elem) -> IRType*
+            {
+                IRType* t = this.new_type(LK.PTR);
+                t.elem = elem;
+                -> t;
+            };
+
+            t_array(IRType* elem, int count) -> IRType*
+            {
+                IRType* t = this.new_type(LK.ARRAY);
+                t.elem = elem;
+                t.count = count;
+                -> t;
+            };
+
+            // Literal struct over the first n entries of items (copied)
+            t_struct(IRType** items, int n) -> IRType*
+            {
+                int i;
+                IRType* t = this.new_type(LK.STRUCT);
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = items[i];
+                    i++;
+                };
+                t.nitems = n;
+                -> t;
+            };
+
+            t_func(IRType* ret, IRType** params, int n, bool vararg) -> IRType*
+            {
+                int i;
+                IRType* t = this.new_type(LK.FUNC);
+                t.elem = ret;
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = params[i];
+                    i++;
+                };
+                t.nitems = n;
+                t.vararg = vararg;
+                -> t;
+            };
+
+            // Identified struct, body set later with set_body. Returns the existing one
+            // when the name is already in use.
+            t_named(byte* name) -> IRType*
+            {
+                int i;
+                IRType* t;
+                while (i < this.named.len)
+                {
+                    t = (IRType*)this.named.items[i];
+                    switch (cstr_eq(t.name, name))
+                    {
+                        case (true) { -> t; }
+                        default
+                        {
+                            i++;
+                        };
+                    };
+                };
+                t = this.new_type(LK.ISTRUCT);
+                t.name = this.own(name);
+                t.defined = false;
+                pv_push(this.named, (void*)t);
+                -> t;
+            };
+
+            set_body(IRType* t, IRType** items, int n) -> void
+            {
+                int i;
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = items[i];
+                    i++;
+                };
+                t.nitems = n;
+                t.defined = true;
+                ->;
+            };
+
+            type_str(IRType* t) -> byte*
+            {
+                this.tb.clear();
+                lt_text(@this.tb, t);
+                -> this.own(this.tb.mem);
+            };
+
+            // ----------------------------------------------------------
+            // Values
+            // ----------------------------------------------------------
+
+            new_value(IRType* ty, byte* text) -> IRValue*
+            {
+                IRValue* v = (IRValue*)fmalloc((u64)((sizeof(IRValue) + 7) / 8));
+                v.ty = ty;
+                v.text = this.own(text);
+                v.spec = (TypeSpec*)0;
+                v.espec = (TypeSpec*)0;
+                v.flags = 0;
+                v.slot = 0;
+                v.is_const = false;
+                pv_push(this.values, (void*)v);
+                -> v;
+            };
+
+            c_int(IRType* ty, i64 val) -> IRValue*
+            {
+                IRValue* v;
+                this.tb.clear();
+                switch (ty.width)
+                {
+                    case (1)
+                    {
+                        switch (val != (i64)0)
+                        {
+                            case (true) { this.tb.put_str(g"true\0"); }
+                            default { this.tb.put_str(g"false\0"); };
+                        };
+                    }
+                    default { put_i64(@this.tb, val); };
+                };
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Unsigned 64 bit constant: a Python int above INT64_MAX prints as is
+            c_u64(IRType* ty, u64 val) -> IRValue*
+            {
+                IRValue* v;
+                this.tb.clear();
+                put_u64(@this.tb, val);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            c_null(IRType* ty) -> IRValue*
+            {
+                IRValue* v;
+                switch (ty.kind)
+                {
+                    case (LK.PTR) { v = this.new_value(ty, g"null\0"); }
+                    case (LK.INT)
+                    {
+                        v = this.c_int(ty, 0);
+                        // llvmlite formats Constant(i1, 0) as 0, only a Python bool prints false
+                        switch (ty.width == 1)
+                        {
+                            case (true) { v.text = g"0\0"; }
+                            default {};
+                        };
+                        -> v;
+                    }
+                    default
+                    {
+                        switch (ty.kind == LK.FLOAT | ty.kind == LK.DOUBLE)
+                        {
+                            case (true) {
+                            v = this.c_fp(ty, 0.0);
+                            -> v;
+                        }
+                            default { v = this.new_value(ty, g"zeroinitializer\0"); };
+                        };
+                    };
+                };
+                v.is_const = true;
+                -> v;
+            };
+
+            c_undef(IRType* ty) -> IRValue*
+            {
+                IRValue* v = this.new_value(ty, g"undef\0");
+                v.is_const = true;
+                -> v;
+            };
+
+            // Floating point constant. llvmlite prints the double bit pattern for both
+            // float and double.
+            c_fp(IRType* ty, double d) -> IRValue*
+            {
+                IRValue* v;
+                float f;
+                double dd = d;
+                u64 bits;
+                u64* bp;
+                switch (ty.kind == LK.FLOAT)
+                {
+                    case (true) {
+                    f = (float)d;
+                    dd = (double)f;
+                }
+                    default {};
+                };
+                bp = (u64*)@dd;
+                bits = *bp;
+                this.tb.clear();
+                put_hex64(@this.tb, bits);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Constant array literal [ty v, ty v, ...] as llvmlite prints it
+            c_array(IRType* ty, IRValue** elems, int n) -> IRValue*
+            {
+                IRValue* v;
+                int i;
+                this.tb.clear();
+                this.tb.put(91);
+                while (i < n)
+                {
+                    switch (i > 0) { case (true) { this.tb.put_str(g", \0"); } default {}; };
+                    lt_text(@this.tb, elems[i].ty);
+                    this.tb.put(32);
+                    this.tb.put_str(elems[i].text);
+                    i++;
+                };
+                this.tb.put(93);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // c"..." constant over n bytes
+            c_bytes(IRType* ty, byte* bytes_in, int n) -> IRValue*
+            {
+                IRValue* v;
+                int i, c;
+                this.tb.clear();
+                this.tb.put_str(g"c\"\0");
+                while (i < n)
+                {
+                    c = (int)bytes_in[i];
+                    switch (c < 32 | c > 126 | c == 34 | c == 92)
+                    {
+                        case (true) {
+                        this.tb.put(92);
+                        this.tb.put(hexdig(c / 16));
+                        this.tb.put(hexdig(c % 16));
+                    }
+                        default { this.tb.put(c); };
+                    };
+                    i++;
+                };
+                this.tb.put(34);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Operand text "type value"
+            unique_global(byte* name) -> byte*
+            {
+                int n = 1;
+                byte* cand;
+                switch (!nm_has(this.gnames, name))
+                {
+                    case (true) { -> this.own(name); }
+                    default
+                    {
+                        while (true)
+                        {
+                            this.tb.clear();
+                            this.tb.put_str(name);
+                            this.tb.put(46);
+                            this.tb.put_int(n);
+                            cand = this.tb.mem;
+                            switch (!nm_has(this.gnames, cand))
+                            {
+                                case (true) { -> this.own(cand); }
+                                default
+                                {
+                                    n++;
+                                };
+                            };
+                        };
+                        -> this.own(name);
+                    };
+                };
+            };
+
+            // Global variable of type ty. init is the initializer operand text or null.
+            add_global(IRType* ty, byte* name, byte* init) -> IRGlobal*
+            {
+                IRGlobal* g = (IRGlobal*)fmalloc((u64)((sizeof(IRGlobal) + 7) / 8));
+                g.name = this.unique_global(name);
+                nm_put(this.gnames, g.name, (void*)g);
+                nm_put(this.gmap, g.name, (void*)g);
+                g.ty = ty;
+                g.init = (byte*)0;
+                switch (init != (byte*)0)
+                {
+                    case (true) { g.init = this.own(init); }
+                    default {};
+                };
+                g.linkage = (byte*)0;
+                g.constant = false;
+                this.tb.clear();
+                this.tb.put(64);
+                put_quoted(@this.tb, g.name);
+                g.self = this.new_value(this.t_ptr(ty), this.tb.mem);
+                g.self.flags = VF_GLOBAL;
+                pv_push(this.globals, (void*)g);
+                -> g;
+            };
+
+            find_global(byte* name) -> IRGlobal* -> (IRGlobal*)nm_get(this.gmap, name);
+
+            // Function with the given type. A function becomes a declaration until a
+            // block is appended to it.
+            add_function(IRType* ftype, byte* name) -> IRFunc*
+            {
+                int i;
+                IRFunc* f = (IRFunc*)fmalloc((u64)((sizeof(IRFunc) + 7) / 8));
+                f.name = this.unique_global(name);
+                nm_put(this.gnames, f.name, (void*)f);
+                nm_put(this.fmap, f.name, (void*)f);
+                f.ftype = ftype;
+                f.nargs = ftype.nitems;
+                f.args = (IRValue**)fmalloc((u64)(f.nargs + 1) * (u64)((sizeof(IRValue*) + 7) / 8));
+                f.blocks = pv_new();
+                f.attrs = pv_new();
+                f.names = nm_new();
+                f.counter = 0;
+                f.cconv = (byte*)0;
+                f.linkage = (byte*)0;
+                f.is_decl = true;
+                f.frame = 0;
+                f.sret_slot = 0;
+                f.cs_mask = 0;
+                f.cs = (int*)0;
+                while (i < f.nargs)
+                {
+                    f.counter = f.counter + 1;
+                    this.tb.clear();
+                    this.tb.put(37);
+                    this.tb.put_str(f"\".{f.counter}\0");
+                    this.tb.put(34);
+                    f.args[i] = this.new_value(ftype.items[i], this.tb.mem);
+                    i++;
+                };
+                this.tb.clear();
+                this.tb.put(64);
+                put_quoted(@this.tb, f.name);
+                f.counter = f.counter + 1;
+                f.self = this.new_value(this.t_ptr(ftype), this.tb.mem);
+                pv_push(this.funcs, (void*)f);
+                -> f;
+            };
+
+            find_function(byte* name) -> IRFunc* -> (IRFunc*)nm_get(this.fmap, name);
+
+            // Names parameter i (llvmlite Argument.name = ...)
+            name_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                this.tb.clear();
+                this.tb.put(37);
+                put_quoted(@this.tb, name);
+                f.args[i].text = this.own(this.tb.mem);
+                -> nm_put(f.names, name, (void*)f);
+            };
+
+            // Gives parameter i a new name, kept unique inside f
+            rename_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                byte* nm = this.fresh_name(f, name);
+                f.args[i].text = this.result_text(nm);
+                ->;
+            };
+
+            // A name unique inside f: base when free, else base.N
+            fresh_name(IRFunc* f, byte* base) -> byte*
+            {
+                int n = 1;
+                byte* cand;
+                switch (base == (byte*)0)
+                {
+                    case (true) {
+                    f.counter = f.counter + 1;
+                    this.tb.clear();
+                    this.tb.put(46);
+                    this.tb.put_int(f.counter);
+                    -> this.own(this.tb.mem);
+                }
+                    default
+                    {
+                        switch (base[0] == 0)
+                        {
+                            case (true) {
+                            f.counter = f.counter + 1;
+                            this.tb.clear();
+                            this.tb.put(46);
+                            this.tb.put_int(f.counter);
+                            -> this.own(this.tb.mem);
+                        }
+                            default
+                            {
+                                switch (!nm_has(f.names, base))
+                                {
+                                    case (true) {
+                                    nm_put(f.names, base, (void*)f);
+                                    -> this.own(base);
+                                }
+                                    default
+                                    {
+                                        while (true)
+                                        {
+                                            this.tb.clear();
+                                            this.tb.put_str(base);
+                                            this.tb.put(46);
+                                            this.tb.put_int(n);
+                                            cand = this.tb.mem;
+                                            switch (!nm_has(f.names, cand))
+                                            {
+                                                case (true) {
+                                                nm_put(f.names, cand, (void*)f);
+                                                -> this.own(cand);
+                                            }
+                                                default
+                                                {
+                                                    n++;
+                                                };
+                                            };
+                                        };
+                                        -> this.own(base);
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+
+            append_block(IRFunc* f, byte* name) -> IRBlock*
+            {
+                IRBlock* bl = (IRBlock*)fmalloc((u64)((sizeof(IRBlock) + 7) / 8));
+                bl.name = this.fresh_name(f, name);
+                bl.lines = pv_new();
+                bl.terminated = false;
+                bl.term_at = 0;
+                bl.id = 0;
+                bl.id = this.lab;
+                this.lab++;
+                switch (f.blocks.len == 0) { case (true) { this.a_func_begin(f); } default {}; };
+                pv_push(f.blocks, (void*)bl);
+                f.is_decl = false;
+                -> bl;
+            };
+
+            // ----------------------------------------------------------
+            // Instruction builder
+            // ----------------------------------------------------------
+
+            position(IRFunc* f, IRBlock* b) -> void
+            {
+                this.cf = f;
+                this.cb = b;
+                ->;
+            };
+
+            set_entry(IRBlock* b) -> void
+            {
+                this.entry_b = b;
+                ->;
+            };
+
+            is_terminated() -> bool
+            {
+                switch (this.cb == (IRBlock*)0)
+                {
+                    case (true) { -> true; }
+                    default
+                    {
+                        -> this.cb.terminated;
+                    };
+                };
+            };
+
+            const_val(IRValue* v) -> i64
+            {
+                int i;
+                bool neg = false;
+                i64 r;
+                switch (v.text[0] == 45)
+                {
+                    case (true) { neg = true; i = 1; }
+                    default {};
+                };
+                while (v.text[i] >= 48 & v.text[i] <= 57)
+                {
+                    r = r * (i64)10 + (i64)((int)v.text[i] - 48);
+                    i++;
+                };
+                switch (neg)
+                {
+                    case (true) { -> (i64)0 - r; }
+                    default
+                    {
+                        -> r;
+                    };
+                };
+            };
+
+            // Operand text "%name" for a fresh result
+            result_text(byte* name) -> byte*
+            {
+                this.tb.clear();
+                this.tb.put(37);
+                put_quoted(@this.tb, name);
+                -> this.own(this.tb.mem);
+            };
+
+            // Ends the instruction held in ib. A typed result gets a name (hint, or the
+            // next .N); a void one still takes the next .N.
+            binop(byte* op, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                -> this.a_binop(op, a, b, hint);
+            };
+
+            cmp(byte* kind, byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                -> this.a_cmp(kind, pred, a, b, hint);
+            };
+
+            icmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue* -> this.cmp(g"icmp\0", pred, a, b, hint);
+
+            fcmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue* -> this.cmp(g"fcmp\0", pred, a, b, hint);
+
+            cast(byte* op, IRValue* v, IRType* to, byte* hint) -> IRValue*
+            {
+                switch (lt_eq(v.ty, to))
+                {
+                    case (true) { -> v; }
+                    default { -> this.a_cast(op, v, to, hint); };
+                };
+            };
+
+            alloca(IRType* ty, byte* name) -> IRValue*
+            {
+                -> this.a_alloca(ty, name);
+            };
+
+            alloca_here(IRType* ty, byte* name) -> IRValue*
+            {
+                -> this.a_alloca(ty, name);
+            };
+
+            alloca_count(IRType* ty, IRValue* count, byte* name) -> IRValue*
+            {
+                -> this.a_alloca_count(ty, count, name);
+            };
+
+            load(IRValue* p, byte* hint) -> IRValue*
+            {
+                -> this.a_load(p, hint);
+            };
+
+            store_ex(IRValue* v, IRValue* p, bool vol) -> void
+            {
+                this.a_store(v, p, vol);
+                ->;
+            };
+
+            store(IRValue* v, IRValue* p) -> void -> this.store_ex(v, p, false);
+
+            // Type reached by indexing t with idx (struct needs a constant)
+            index_type(IRType* t, IRValue* idx) -> IRType*
+            {
+                switch (t.kind == LK.ARRAY)
+                {
+                    case (true) { -> t.elem; }
+                    default
+                    {
+                        switch (t.kind == LK.PTR)
+                        {
+                            case (true) { -> t.elem; }
+                            default
+                            {
+                                -> t.items[(int)this.const_val(idx)];
+                            };
+                        };
+                    };
+                };
+            };
+
+            struct_items(IRType* t) -> IRType** -> t.items;
+
+            gep(IRValue* p, IRValue** idx, int n, bool inbounds, byte* hint) -> IRValue*
+            {
+                -> this.a_gep(p, idx, n, inbounds, hint);
+            };
+
+            struct_body_item(IRType* t, int i) -> IRType* -> t.items[i];
+
+            // gep p, 0, i  (struct field address)
+            gep_field(IRValue* p, int i, bool inbounds, byte* hint) -> IRValue*
+            {
+                this.ia[0] = this.c_int(this.t_int(32), 0);
+                this.ia[1] = this.c_int(this.t_int(32), (i64)i);
+                -> this.gep(p, this.ia, 2, inbounds, hint);
+            };
+
+            // gep p, i  (pointer arithmetic)
+            gep_ptr(IRValue* p, IRValue* i, bool inbounds, byte* hint) -> IRValue*
+            {
+                this.ia[0] = i;
+                -> this.gep(p, this.ia, 1, inbounds, hint);
+            };
+
+            call_ex(IRValue* callee, IRValue** args, int n, byte* hint, byte* cconv, bool tail) -> IRValue*
+            {
+                -> this.a_call(callee, args, n, hint, tail);
+            };
+
+            call(IRValue* callee, IRValue** args, int n, byte* hint) -> IRValue* -> this.call_ex(callee, args, n, hint, (byte*)0, false);
+
+            phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
+            {
+                -> this.a_phi(ty, vals, blocks, n, hint);
+            };
+
+            va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
+            {
+                -> this.a_va_arg(list, ty, hint);
+            };
+
+            select(IRValue* c, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                -> this.a_select(c, a, b, hint);
+            };
+
+            extractvalue(IRValue* agg, int i, byte* hint) -> IRValue*
+            {
+                -> this.a_extractvalue(agg, i, hint);
+            };
+
+            insertvalue(IRValue* agg, IRValue* v, int i, byte* hint) -> IRValue*
+            {
+                -> this.a_insertvalue(agg, v, i, hint);
+            };
+
+            br(IRBlock* target) -> void
+            {
+                this.a_br(target);
+                ->;
+            };
+
+            cbr(IRValue* c, IRBlock* t, IRBlock* f) -> void
+            {
+                this.a_cbr(c, t, f);
+                ->;
+            };
+
+            ret(IRValue* v) -> void
+            {
+                this.a_ret(v);
+                ->;
+            };
+
+            ret_void() -> void
+            {
+                this.a_ret_void();
+                ->;
+            };
+
+            unreachable() -> void
+            {
+                this.a_unreachable();
+                ->;
+            };
+
+            switch_to(IRValue* v, IRBlock* dflt, IRValue** vals, IRBlock** blocks, int n) -> void
+            {
+                this.a_switch(v, dflt, vals, blocks, n);
+                ->;
+            };
+
+            a_init() -> void
+            {
+                int r, k;
+                byte* base;
+                this.rtab = (byte**)fmalloc((u64)(14 * 4 * 8));
+                while (r < 14)
+                {
+                    k = 0;
+                    while (k < 4)
+                    {
+                        this.tb.clear();
+                        this.tb.put(37);
+                        switch (r)
+                        {
+                            case (0) { this.a_rn(k, g"ax\0", g"al\0"); }
+                            case (1) { this.a_rn(k, g"cx\0", g"cl\0"); }
+                            case (2) { this.a_rn(k, g"dx\0", g"dl\0"); }
+                            case (3) { this.a_rn(k, g"si\0", g"sil\0"); }
+                            case (4) { this.a_rn(k, g"di\0", g"dil\0"); }
+                            case (9) { this.a_rn(k, g"bx\0", g"bl\0"); }
+                            default
+                            {
+                                this.tb.put(114);
+                                switch (r)
+                                {
+                                    case (5) { this.tb.put_int(8); }
+                                    case (6) { this.tb.put_int(9); }
+                                    case (7) { this.tb.put_int(10); }
+                                    case (8) { this.tb.put_int(11); }
+                                    default { this.tb.put_int(r + 2); };
+                                };
+                                switch (k)
+                                {
+                                    case (1) { this.tb.put(100); }
+                                    case (2) { this.tb.put(119); }
+                                    case (3) { this.tb.put(98); }
+                                    default {};
+                                };
+                            };
+                        };
+                        this.rtab[r * 4 + k] = this.own(this.tb.mem);
+                        k++;
+                    };
+                    r++;
+                };
+                ->;
+            };
+
+            // Appends the name of a legacy register for size index k (0 q, 1 d, 2 w, 3 b)
+            a_rn(int k, byte* w, byte* b) -> void
+            {
+                switch (k)
+                {
+                    case (0) { this.tb.put(114); this.tb.put_str(w); }
+                    case (1) { this.tb.put(101); this.tb.put_str(w); }
+                    case (2) { this.tb.put_str(w); }
+                    default { this.tb.put_str(b); };
+                };
+                ->;
+            };
+
+            a_reg(int r, int sz) -> byte*
+            {
+                int k;
+                switch (sz)
+                {
+                    case (4) { k = 1; }
+                    case (2) { k = 2; }
+                    case (1) { k = 3; }
+                    default {};
+                };
+                -> this.rtab[r * 4 + k];
+            };
+
+            // Register for a value of type t
+            a_regt(int r, IRType* t) -> byte*
+            {
+                int sz = this.a_size(t);
+                if (sz > 8) { sz = 8; };
+                -> this.a_reg(r, sz);
+            };
+
+            a_ln(byte* s) -> void
+            {
+                pv_push(this.cb.lines, (void*)this.own(s));
+                ->;
+            };
+
+            a_ab() -> void
+            {
+                this.a_ln(this.ab.mem);
+                ->;
+            };
+
+            a_unsup(byte* what) -> void
+            {
+                this.nunsup++;
+                this.a_ln(f"ud2 # unsupported: {what}\0");
+                ->;
+            };
+
+            a_seq(byte* a, byte* b) -> bool
+            {
+                int i;
+                while (a[i] != 0 & b[i] != 0)
+                {
+                    if (a[i] != b[i]) { -> false; };
+                    i++;
+                };
+                -> a[i] == b[i];
+            };
+
+            // True when s starts with p
+            a_pre(byte* s, byte* p) -> bool
+            {
+                int i;
+                while (p[i] != 0)
+                {
+                    if (s[i] != p[i]) { -> false; };
+                    i++;
+                };
+                -> true;
+            };
+
+            // ----------------------------------------------------------
+            // Type layout
+            // ----------------------------------------------------------
+
+            a_size(IRType* t) -> int
+            {
+                int k = t.kind;
+                int i, off, a, al;
+                if (k == LK.INT)
+                {
+                    if (t.width <= 8) { -> 1; };
+                    if (t.width <= 16) { -> 2; };
+                    if (t.width <= 32) { -> 4; };
+                    if (t.width <= 64) { -> 8; };
+                    -> 16;
+                };
+                if (k == LK.PTR | k == LK.DOUBLE | k == LK.FUNC) { -> 8; };
+                if (k == LK.FLOAT) { -> 4; };
+                if (k == LK.ARRAY) { -> t.count * this.a_size(t.elem); };
+                if (k == LK.STRUCT | k == LK.ISTRUCT)
+                {
+                    al = 1;
+                    while (i < t.nitems)
+                    {
+                        a = this.a_align(t.items[i]);
+                        if (a > al) { al = a; };
+                        off = (off + a - 1) / a * a;
+                        off = off + this.a_size(t.items[i]);
+                        i++;
+                    };
+                    -> (off + al - 1) / al * al;
+                };
+                -> 0;
+            };
+
+            a_align(IRType* t) -> int
+            {
+                int k = t.kind;
+                int i, a, al;
+                if (k == LK.ARRAY) { -> this.a_align(t.elem); };
+                if (k == LK.STRUCT | k == LK.ISTRUCT)
+                {
+                    al = 1;
+                    while (i < t.nitems)
+                    {
+                        a = this.a_align(t.items[i]);
+                        if (a > al) { al = a; };
+                        i++;
+                    };
+                    -> al;
+                };
+                a = this.a_size(t);
+                if (a < 1) { a = 1; };
+                if (a > 16) { a = 16; };
+                -> a;
+            };
+
+            // Byte offset of member i of a struct
+            a_foff(IRType* t, int n) -> int
+            {
+                int i, a, off;
+                while (i < n)
+                {
+                    a = this.a_align(t.items[i]);
+                    off = (off + a - 1) / a * a;
+                    off = off + this.a_size(t.items[i]);
+                    i++;
+                };
+                a = this.a_align(t.items[n]);
+                -> (off + a - 1) / a * a;
+            };
+
+            // ----------------------------------------------------------
+            // Frame slots and values
+            // ----------------------------------------------------------
+
+            a_slot_f(IRFunc* f, int size, int al) -> int
+            {
+                int fr;
+                if (al < 8) { al = 8; };
+                fr = f.frame + size;
+                fr = (fr + al - 1) / al * al;
+                f.frame = fr;
+                -> 0 - fr;
+            };
+
+            a_slot(int size, int al) -> int -> this.a_slot_f(this.cf, size, al);
+
+            // New value of type t with its own slot
+            a_newv(IRType* t) -> IRValue*
+            {
+                IRValue* v;
+                int sz = this.a_size(t);
+                int al = this.a_align(t);
+                if (sz < 8) { sz = 8; };
+                this.tb.clear();
+                this.tb.put_str(g"%v\0");
+                this.tb.put_int(this.lab);
+                this.lab++;
+                v = this.new_value(t, this.tb.mem);
+                v.slot = this.a_slot(sz, al);
+                -> v;
+            };
+
+            // Stores register r (64 bit) into the slot of v
+            a_stv(IRValue* v, int r) -> void
+            {
+                byte* rn = this.a_reg(r, 8);
+                this.a_ln(f"movq {rn}, {v.slot}(%rbp)\0");
+                ->;
+            };
+
+            // Zero extends register r in place to width w
+            a_norm(int r, int w) -> void
+            {
+                int sh;
+                byte* r32 = this.a_reg(r, 4);
+                byte* r8 = this.a_reg(r, 1);
+                byte* r16 = this.a_reg(r, 2);
+                if (w >= 64) { ->; };
+                if (w == 32) { this.a_ln(f"movl {r32}, {r32}\0"); ->; };
+                if (w == 16) { this.a_ln(f"movzwl {r16}, {r32}\0"); ->; };
+                if (w == 8) { this.a_ln(f"movzbl {r8}, {r32}\0"); ->; };
+                if (w == 1) { this.a_ln(f"andl $1, {r32}\0"); ->; };
+                sh = 64 - w;
+                this.a_ln(f"shlq ${sh}, {this.a_reg(r, 8)}\0");
+                this.a_ln(f"shrq ${sh}, {this.a_reg(r, 8)}\0");
+                ->;
+            };
+
+            // Sign extends the low w bits of register r to 64 bits
+            a_sx(int r, int w) -> void
+            {
+                int sh;
+                byte* r64 = this.a_reg(r, 8);
+                byte* r32 = this.a_reg(r, 4);
+                byte* r8 = this.a_reg(r, 1);
+                byte* r16 = this.a_reg(r, 2);
+                if (w >= 64) { ->; };
+                if (w == 32) { this.a_ln(f"movslq {r32}, {r64}\0"); ->; };
+                if (w == 16) { this.a_ln(f"movswq {r16}, {r64}\0"); ->; };
+                if (w == 8) { this.a_ln(f"movsbq {r8}, {r64}\0"); ->; };
+                if (w == 1)
+                {
+                    this.a_ln(f"andl $1, {r32}\0");
+                    this.a_ln(f"negq {r64}\0");
+                    ->;
+                };
+                sh = 64 - w;
+                this.a_ln(f"shlq ${sh}, {r64}\0");
+                this.a_ln(f"sarq ${sh}, {r64}\0");
+                ->;
+            };
+
+            // ----------------------------------------------------------
+            // Constants and symbols
+            // ----------------------------------------------------------
+
+            // Symbol name of an operand text @"name"
+            a_sym(byte* t) -> byte*
+            {
+                int i = 1;
+                int c;
+                bool plain = true;
+                this.mb.clear();
+                if (t[1] == '"') { i = 2; };
+                while (t[i] != 0)
+                {
+                    c = (int)t[i];
+                    if (c == 34 & t[1] == '"') { break; };
+                    this.mb.put(c);
+                    if (!((c >= 48 & c <= 57) | (c >= 65 & c <= 90) | (c >= 97 & c <= 122) | c == 95 | c == 46 | c == 36)) { plain = false; };
+                    i++;
+                };
+                if (plain) { -> this.own(this.mb.mem); };
+                this.tb.clear();
+                this.tb.put(34);
+                this.tb.put_str(this.mb.mem);
+                this.tb.put(34);
+                -> this.own(this.tb.mem);
+            };
+
+            a_isnum(byte* t) -> bool
+            {
+                int c = (int)t[0];
+                -> (c >= 48 & c <= 57) | (c == 45 & t[1] >= 48 & t[1] <= 57);
+            };
+
+            // Integer text to its 64 bit pattern. Handles the hex float patterns too.
+            a_num(byte* t) -> u64
+            {
+                int i;
+                bool neg = false;
+                u64 r;
+                int c;
+                if (t[0] == '0' & (t[1] == 'x' | t[1] == 'X'))
+                {
+                    i = 2;
+                    while (t[i] != 0)
+                    {
+                        c = (int)t[i];
+                        if (c >= 48 & c <= 57) { r = (r << (u64)4) `| (u64)(c - 48); }
+                        else
+                        {
+                            if (c >= 97 & c <= 102) { r = (r << (u64)4) `| (u64)(c - 87); }
+                            else
+                            {
+                                if (c >= 65 & c <= 70) { r = (r << (u64)4) `| (u64)(c - 55); }
+                                else { break; };
+                            };
+                        };
+                        i++;
+                    };
+                    -> r;
+                };
+                if (t[0] == '-') { neg = true; i = 1; };
+                while (t[i] >= 48 & t[i] <= 57)
+                {
+                    r = r * (u64)10 + (u64)((int)t[i] - 48);
+                    i++;
+                };
+                if (neg) { -> (u64)0 - r; };
+                -> r;
+            };
+
+            // Bits of an integer constant operand (true and false included)
+            a_cval(IRValue* v) -> u64
+            {
+                byte* t = v.text;
+                while (t[0] == ' ') { t = t + 1; };
+                if (this.a_pre(t, g"true\0")) { -> (u64)1; };
+                if (this.a_pre(t, g"false\0") | this.a_pre(t, g"null\0")) { -> (u64)0; };
+                -> this.a_num(t);
+            };
+
+            // Bits of a float constant as 32 bit float (the text holds the double pattern)
+            a_f32bits(u64 dbits) -> u64
+            {
+                double d;
+                float f;
+                u64* dp = (u64*)@d;
+                u32* fp = (u32*)@f;
+                *dp = dbits;
+                f = (float)d;
+                -> (u64)*fp;
+            };
+
+            // mov of a 64 bit pattern into register r
+            a_imm(u64 bits, int r) -> void
+            {
+                byte* r64 = this.a_reg(r, 8);
+                byte* r32 = this.a_reg(r, 4);
+                i64 sv = (i64)bits;
+                this.ab.clear();
+                if (bits == (u64)0)
+                {
+                    this.a_ln(f"xorl {r32}, {r32}\0");
+                    ->;
+                };
+                if (bits <= (u64)4294967295)
+                {
+                    this.ab.put_str(g"movl $\0");
+                    put_u64(@this.ab, bits);
+                    this.ab.put_str(g", \0");
+                    this.ab.put_str(r32);
+                    this.a_ab();
+                    ->;
+                };
+                if (sv >= (i64)-2147483648 & sv < (i64)0)
+                {
+                    this.ab.put_str(g"movq $\0");
+                    put_i64(@this.ab, sv);
+                    this.ab.put_str(g", \0");
+                    this.ab.put_str(r64);
+                    this.a_ab();
+                    ->;
+                };
+                this.ab.put_str(g"movabsq $\0");
+                put_u64(@this.ab, bits);
+                this.ab.put_str(g", \0");
+                this.ab.put_str(r64);
+                this.a_ab();
+                ->;
+            };
+
+            // Mask of the low w bits
+            a_mask(u64 v, int w) -> u64
+            {
+                if (w >= 64) { -> v; };
+                -> v `& (((u64)1 << (u64)w) - (u64)1);
+            };
+
+            // Skips one type in constant text, leaving p on the first character after it
+            a_skiptype(byte* s, int* p) -> void
+            {
+                int d;
+                int c;
+                while (s[*p] != 0)
+                {
+                    c = (int)s[*p];
+                    if (c == 91 | c == 123 | c == 40) { d++; };
+                    if (c == 93 | c == 125 | c == 41)
+                    {
+                        if (d == 0) { break; };
+                        d--;
+                    };
+                    if (d == 0 & (c == 32 | c == 44)) { break; };
+                    *p = *p + 1;
+                };
+                ->;
+            };
+
+            // Parses a constant address expression. sym is the symbol (null for a plain number),
+            // off the byte offset.
+            a_cx(byte* s, int* p) -> bool
+            {
+                int c, k, n;
+                int q;
+                i64 idx;
+                IRGlobal* g;
+                IRType* t;
+                byte* nm;
+                bool first = true;
+                while (s[*p] == ' ') { *p = *p + 1; };
+                c = (int)s[*p];
+                if (c == 64)
+                {
+                    q = *p;
+                    this.mb.clear();
+                    nm = (byte*)0;
+                    if (s[q + 1] == '"')
+                    {
+                        q = q + 2;
+                        while (s[q] != 34 & s[q] != 0) { this.mb.put((int)s[q]); q++; };
+                        q++;
+                    }
+                    else
+                    {
+                        q++;
+                        while (s[q] != 0 & s[q] != ',' & s[q] != ')' & s[q] != ' ') { this.mb.put((int)s[q]); q++; };
+                    };
+                    this.tb.clear();
+                    this.tb.put(64);
+                    this.tb.put(34);
+                    this.tb.put_str(this.mb.mem);
+                    this.tb.put(34);
+                    this.cx_sym = this.a_sym(this.tb.mem);
+                    this.cx_off = 0;
+                    *p = q;
+                    -> true;
+                };
+                if (this.a_pre(s + *p, g"null\0")) { this.cx_sym = (byte*)0; this.cx_off = 0; *p = *p + 4; -> true; };
+                if (this.a_isnum(s + *p))
+                {
+                    this.cx_sym = (byte*)0;
+                    this.cx_off = (i64)this.a_num(s + *p);
+                    if (s[*p] == '-') { *p = *p + 1; };
+                    while (s[*p] >= 48 & s[*p] <= 57) { *p = *p + 1; };
+                    -> true;
+                };
+                if (this.a_pre(s + *p, g"bitcast\0") | this.a_pre(s + *p, g"inttoptr\0") | this.a_pre(s + *p, g"ptrtoint\0"))
+                {
+                    while (s[*p] != '(' & s[*p] != 0) { *p = *p + 1; };
+                    *p = *p + 1;
+                    this.a_skiptype(s, p);
+                    while (s[*p] == ' ') { *p = *p + 1; };
+                    if (!this.a_cx(s, p)) { -> false; };
+                    while (s[*p] != ')' & s[*p] != 0) { *p = *p + 1; };
+                    *p = *p + 1;
+                    -> true;
+                };
+                if (this.a_pre(s + *p, g"getelementptr\0"))
+                {
+                    *p = *p + 13;
+                    while (s[*p] == ' ') { *p = *p + 1; };
+                    if (this.a_pre(s + *p, g"inbounds\0")) { *p = *p + 8; };
+                    while (s[*p] == ' ') { *p = *p + 1; };
+                    *p = *p + 1;
+                    this.a_skiptype(s, p);
+                    while (s[*p] == ',' | s[*p] == ' ') { *p = *p + 1; };
+                    this.a_skiptype(s, p);
+                    while (s[*p] == ' ') { *p = *p + 1; };
+                    if (!this.a_cx(s, p)) { -> false; };
+                    g = (IRGlobal*)0;
+                    if (this.cx_sym != (byte*)0)
+                    {
+                        this.tb.clear();
+                        this.tb.put_str(this.cx_sym);
+                        g = this.find_global(this.tb.mem);
+                        if (g == (IRGlobal*)0 & this.cx_sym[0] == '"')
+                        {
+                            this.tb.clear();
+                            k = 1;
+                            while (this.cx_sym[k] != 34 & this.cx_sym[k] != 0) { this.tb.put((int)this.cx_sym[k]); k++; };
+                            g = this.find_global(this.tb.mem);
+                        };
+                    };
+                    t = this.nul;
+                    if (g != (IRGlobal*)0) { t = g.ty; };
+                    first = true;
+                    while (s[*p] == ',')
+                    {
+                        *p = *p + 1;
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        this.a_skiptype(s, p);
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        idx = (i64)this.a_num(s + *p);
+                        if (s[*p] == '-') { *p = *p + 1; };
+                        while (s[*p] >= 48 & s[*p] <= 57) { *p = *p + 1; };
+                        if (first)
+                        {
+                            this.cx_off = this.cx_off + idx * (i64)this.a_size(t);
+                            first = false;
+                        }
+                        else
+                        {
+                            if (t.kind == LK.ARRAY)
+                            {
+                                this.cx_off = this.cx_off + idx * (i64)this.a_size(t.elem);
+                                t = t.elem;
+                            }
+                            else
+                            {
+                                if (t.kind == LK.STRUCT | t.kind == LK.ISTRUCT)
+                                {
+                                    this.cx_off = this.cx_off + (i64)this.a_foff(t, (int)idx);
+                                    t = t.items[(int)idx];
+                                };
+                            };
+                        };
+                    };
+                    while (s[*p] != ')' & s[*p] != 0) { *p = *p + 1; };
+                    *p = *p + 1;
+                    -> true;
+                };
+                -> false;
+            };
+
+            // Loads value v into register r (64 bit)
+            a_ld(IRValue* v, int r) -> void
+            {
+                byte* rn = this.a_reg(r, 8);
+                byte* t = v.text;
+                int c;
+                int p;
+                u64 bits;
+                byte* sym;
+                i64 off;
+                while (t[0] == ' ') { t = t + 1; };
+                c = (int)t[0];
+                if (v.slot != 0)
+                {
+                    if ((v.flags `& VF_ALLOCA) != 0) { this.a_ln(f"leaq {v.slot}(%rbp), {rn}\0"); }
+                    else { this.a_ln(f"movq {v.slot}(%rbp), {rn}\0"); };
+                    ->;
+                };
+                if (c == 64)
+                {
+                    sym = this.a_sym(t);
+                    this.a_ln(f"leaq {sym}(%rip), {rn}\0");
+                    ->;
+                };
+                if (this.a_isnum(t))
+                {
+                    bits = this.a_num(t);
+                    if (v.ty.kind == LK.FLOAT & t[0] == '0' & t[1] == 'x') { bits = this.a_f32bits(bits); }
+                    else { if (v.ty.kind == LK.INT) { bits = this.a_mask(bits, v.ty.width); }; };
+                    this.a_imm(bits, r);
+                    ->;
+                };
+                if (this.a_pre(t, g"true\0")) { this.a_imm((u64)1, r); ->; };
+                if (this.a_pre(t, g"false\0") | this.a_pre(t, g"null\0") | this.a_pre(t, g"zeroinitializer\0") | this.a_pre(t, g"undef\0"))
+                {
+                    this.a_imm((u64)0, r);
+                    ->;
+                };
+                if (this.a_pre(t, g"getelementptr\0") | this.a_pre(t, g"bitcast\0") | this.a_pre(t, g"inttoptr\0") | this.a_pre(t, g"ptrtoint\0"))
+                {
+                    p = 0;
+                    if (this.a_cx(t, @p))
+                    {
+                        sym = this.cx_sym;
+                        off = this.cx_off;
+                        if (sym == (byte*)0) { this.a_imm((u64)off, r); ->; };
+                        this.a_ln(f"leaq {sym}(%rip), {rn}\0");
+                        if (off != (i64)0)
+                        {
+                            this.ab.clear();
+                            this.ab.put_str(g"addq $\0");
+                            put_i64(@this.ab, off);
+                            this.ab.put_str(g", \0");
+                            this.ab.put_str(rn);
+                            this.a_ab();
+                        };
+                        ->;
+                    };
+                };
+                this.a_unsup(t);
+                ->;
+            };
+
+            // Loads a float or double value into xmm register x (through rax)
+            a_ldx(IRValue* v, int x) -> void
+            {
+                this.a_ld(v, 0);
+                if (v.ty.kind == LK.FLOAT) { this.a_ln(f"movd %eax, %xmm{x}\0"); }
+                else { this.a_ln(f"movq %rax, %xmm{x}\0"); };
+                ->;
+            };
+
+            // Stores xmm0 into a new value of the float type t
+            a_stx(IRType* t, int x) -> IRValue*
+            {
+                IRValue* v = this.a_newv(t);
+                if (t.kind == LK.FLOAT) { this.a_ln(f"movd %xmm{x}, %eax\0"); }
+                else { this.a_ln(f"movq %xmm{x}, %rax\0"); };
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            // Directive that starts the read-only data section (ELF .rodata, COFF .rdata)
+            a_rodata() -> byte*
+            {
+                if (this.a_win()) { -> g"\t.section .rdata,\"dr\"\n\0"; };
+                -> g"\t.section .rodata\n\0";
+            };
+
+            // Label of a read-only copy of an aggregate constant
+            a_const_agg(IRValue* v) -> byte*
+            {
+                int n = this.lab;
+                int p;
+                this.lab++;
+                this.cdata.put_str(this.a_rodata());
+                this.cdata.put_str(g"\t.p2align 4\n\0");
+                this.cdata.put_str(f".LC{n}:\n\0");
+                this.a_dat(v.ty, v.text, @p, @this.cdata);
+                this.tb.clear();
+                this.tb.put_str(g".LC\0");
+                this.tb.put_int(n);
+                -> this.own(this.tb.mem);
+            };
+
+            // ----------------------------------------------------------
+            // Memory operands and copies
+            // ----------------------------------------------------------
+
+            // Memory operand text for the pointer p plus extra bytes. tmp is the register used
+            // when the pointer must be loaded. The text is valid until the next call.
+            a_mem(IRValue* p, int tmp, int extra) -> byte*
+            {
+                byte* sym;
+                byte* rn;
+                int q;
+                i64 off;
+                this.mb.clear();
+                if (p.slot != 0 & (p.flags `& VF_ALLOCA) != 0)
+                {
+                    this.mb.put_int(p.slot + extra);
+                    this.mb.put_str(g"(%rbp)\0");
+                    -> this.mb.mem;
+                };
+                if (p.slot == 0 & p.text[0] == '@')
+                {
+                    sym = this.a_sym(p.text);
+                    this.mb.clear();
+                    this.mb.put_str(sym);
+                    if (extra != 0) { this.mb.put(43); this.mb.put_int(extra); };
+                    this.mb.put_str(g"(%rip)\0");
+                    -> this.mb.mem;
+                };
+                this.a_ld(p, tmp);
+                rn = this.a_reg(tmp, 8);
+                this.mb.clear();
+                if (extra != 0) { this.mb.put_int(extra); };
+                this.mb.put(40);
+                this.mb.put_str(rn);
+                this.mb.put(41);
+                -> this.mb.mem;
+            };
+
+            // Copies sz bytes from (%rsi) to (%rdi), clobbering rax and rcx
+            a_copy(int sz) -> void
+            {
+                int o;
+                if (sz > 64)
+                {
+                    this.a_ln(f"movq ${sz}, %rcx\0");
+                    this.a_ln(g"rep movsb\0");
+                    ->;
+                };
+                while (o + 8 <= sz)
+                {
+                    this.a_ln(f"movq {o}(%rsi), %rax\0");
+                    this.a_ln(f"movq %rax, {o}(%rdi)\0");
+                    o = o + 8;
+                };
+                if (o + 4 <= sz)
+                {
+                    this.a_ln(f"movl {o}(%rsi), %eax\0");
+                    this.a_ln(f"movl %eax, {o}(%rdi)\0");
+                    o = o + 4;
+                };
+                if (o + 2 <= sz)
+                {
+                    this.a_ln(f"movzwl {o}(%rsi), %eax\0");
+                    this.a_ln(f"movw %ax, {o}(%rdi)\0");
+                    o = o + 2;
+                };
+                if (o + 1 <= sz)
+                {
+                    this.a_ln(f"movzbl {o}(%rsi), %eax\0");
+                    this.a_ln(f"movb %al, {o}(%rdi)\0");
+                };
+                ->;
+            };
+
+            // rsi = address of the bytes of aggregate value v
+            a_agg_src(IRValue* v) -> void
+            {
+                byte* lb;
+                if (v.slot != 0)
+                {
+                    if (v.slot > 0) { this.a_ln(f"leaq {v.slot}(%rbp), %rsi\0"); }
+                    else { this.a_ln(f"leaq {v.slot}(%rbp), %rsi\0"); };
+                    ->;
+                };
+                if (this.a_pre(v.text, g"zeroinitializer\0") | this.a_pre(v.text, g"undef\0"))
+                {
+                    lb = this.a_zero_label(this.a_size(v.ty));
+                    this.a_ln(f"leaq {lb}(%rip), %rsi\0");
+                    ->;
+                };
+                lb = this.a_const_agg(v);
+                this.a_ln(f"leaq {lb}(%rip), %rsi\0");
+                ->;
+            };
+
+            // Label of a zero filled block of at least sz bytes
+            a_zero_label(int sz) -> byte*
+            {
+                if (sz > this.zmax) { this.zmax = sz; };
+                -> g".LZERO\0";
+            };
+
+            // ----------------------------------------------------------
+            // Builder hooks
+            // ----------------------------------------------------------
+
+            // Win64: argument position p (the hidden result pointer counts as position 0) is in
+            // rcx/rdx/r8/r9 or xmm0-3 for p < 4, and at 16(%rbp) + 8 * p after that.
+            a_func_begin_win(IRFunc* f) -> void
+            {
+                int i, p, base, sz;
+                IRType* t;
+                f.frame = 0;
+                f.sret_slot = 0;
+                f.cs_mask = 0;
+                f.cs = (int*)fmalloc((u64)20);
+                pv_push(this.blobs, (void*)f.cs);
+                if (this.a_ret_ptr(f.ftype.elem))
+                {
+                    f.sret_slot = this.a_slot_f(f, 8, 8);
+                    base = 1;
+                };
+                // rsi and rdi are callee saved in Win64 and this backend uses both as scratch
+                f.wsave = this.a_slot_f(f, 16, 16);
+                while (i < f.nargs)
+                {
+                    t = f.ftype.items[i];
+                    sz = this.a_size(t);
+                    p = base + i;
+                    if (lt_is_agg(t) & !this.a_small_agg(sz))
+                    {
+                        // passed by pointer, the callee works on a private copy
+                        f.args[i].slot = this.a_slot_f(f, (sz + 15) / 16 * 16, 16);
+                    }
+                    else
+                    {
+                        if (p < 4) { f.args[i].slot = this.a_slot_f(f, 8, 8); }
+                        else { f.args[i].slot = 16 + 8 * p; };
+                    };
+                    i++;
+                };
+                if (f.ftype.vararg) { f.va_gp = base + f.nargs; };
+                ->;
+            };
+
+            a_func_begin(IRFunc* f) -> void
+            {
+                int i, ngp, nfp, stk, sz;
+                IRType* t;
+                if (this.a_win()) { this.a_func_begin_win(f); ->; };
+                f.frame = 0;
+                f.sret_slot = 0;
+                f.cs_mask = 0;
+                f.cs = (int*)fmalloc((u64)20);
+                pv_push(this.blobs, (void*)f.cs);
+                stk = 16;
+                if (lt_is_agg(f.ftype.elem))
+                {
+                    f.sret_slot = this.a_slot_f(f, 8, 8);
+                    ngp = 1;
+                };
+                while (i < f.nargs)
+                {
+                    t = f.ftype.items[i];
+                    sz = this.a_size(t);
+                    if (lt_is_agg(t))
+                    {
+                        f.args[i].slot = stk;
+                        stk = stk + (sz + 7) / 8 * 8;
+                    }
+                    else
+                    {
+                        if (lt_is_fp(t))
+                        {
+                            if (nfp < 8) { f.args[i].slot = this.a_slot_f(f, 8, 8); nfp++; }
+                            else { f.args[i].slot = stk; stk = stk + 8; };
+                        }
+                        else
+                        {
+                            if (ngp < 6) { f.args[i].slot = this.a_slot_f(f, 8, 8); ngp++; }
+                            else { f.args[i].slot = stk; stk = stk + 8; };
+                        };
+                    };
+                    i++;
+                };
+                if (f.ftype.vararg)
+                {
+                    f.va_gp = ngp;
+                    f.va_fp = nfp;
+                    f.va_stk = stk;
+                    f.va_slot = this.a_slot_f(f, 176, 16);
+                };
+                ->;
+            };
+
+            // Win64 passes the first four arguments in rcx, rdx, r8, r9 and reserves 32 bytes of shadow space
+            a_win() -> bool -> this.abi == 1;
+
+            a_small_agg(int sz) -> bool -> sz == 1 | sz == 2 | sz == 4 | sz == 8;
+
+            // An aggregate result comes back through a hidden first pointer argument
+            a_ret_ptr(IRType* rt) -> bool
+            {
+                if (!lt_is_agg(rt)) { -> false; };
+                if (!this.a_win()) { -> true; };
+                -> !this.a_small_agg(this.a_size(rt));
+            };
+
+            // Loads the sz byte aggregate at (%rsi) into integer register r
+            a_agg_load(int sz, int r) -> void
+            {
+                switch (sz)
+                {
+                    case (1) { this.a_ln(f"movzbl (%rsi), {this.a_reg(r, 4)}\0"); }
+                    case (2) { this.a_ln(f"movzwl (%rsi), {this.a_reg(r, 4)}\0"); }
+                    case (4) { this.a_ln(f"movl (%rsi), {this.a_reg(r, 4)}\0"); }
+                    default { this.a_ln(f"movq (%rsi), {this.a_reg(r, 8)}\0"); };
+                };
+                ->;
+            };
+
+            // Register number of integer argument i
+            a_argreg(int i) -> int
+            {
+                if (this.a_win())
+                {
+                    switch (i)
+                    {
+                        case (0) { -> 1; }
+                        case (1) { -> 2; }
+                        case (2) { -> 5; }
+                        default { -> 6; };
+                    };
+                };
+                switch (i)
+                {
+                    case (0) { -> 4; }
+                    case (1) { -> 3; }
+                    case (2) { -> 2; }
+                    case (3) { -> 1; }
+                    case (4) { -> 5; }
+                    default { -> 6; };
+                };
+            };
+
+            a_term_begin() -> void
+            {
+                this.cb.term_at = this.cb.lines.len;
+                ->;
+            };
+
+            a_term_end() -> void
+            {
+                this.cb.terminated = true;
+                ->;
+            };
+
+            a_label(IRBlock* b) -> byte*
+            {
+                this.tb.clear();
+                this.tb.put_str(g".LB\0");
+                this.tb.put_int(b.id);
+                -> this.own(this.tb.mem);
+            };
+
+            a_binop(byte* op, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                IRType* t = a.ty;
+                IRValue* v = this.a_newv(t);
+                int w = t.width;
+                byte* ra;
+                byte* rc;
+                int k;
+                if (lt_is_fp(t))
+                {
+                    this.a_ldx(a, 0);
+                    this.a_ldx(b, 1);
+                    if (t.kind == LK.FLOAT)
+                    {
+                        if (this.a_pre(op, g"fadd\0")) { this.a_ln(g"addss %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fsub\0")) { this.a_ln(g"subss %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fmul\0")) { this.a_ln(g"mulss %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fdiv\0")) { this.a_ln(g"divss %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"frem\0")) { this.a_frem(true); };
+                        this.a_ln(g"movd %xmm0, %eax\0");
+                    }
+                    else
+                    {
+                        if (this.a_pre(op, g"fadd\0")) { this.a_ln(g"addsd %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fsub\0")) { this.a_ln(g"subsd %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fmul\0")) { this.a_ln(g"mulsd %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"fdiv\0")) { this.a_ln(g"divsd %xmm1, %xmm0\0"); };
+                        if (this.a_pre(op, g"frem\0")) { this.a_frem(false); };
+                        this.a_ln(g"movq %xmm0, %rax\0");
+                    };
+                    this.a_stv(v, 0);
+                    -> v;
+                };
+                if (w == 0) { w = 64; };
+                this.a_ld(a, 0);
+                this.a_ld(b, 1);
+                if (this.a_pre(op, g"add\0")) { this.a_ln(g"addq %rcx, %rax\0"); }
+                else
+                {
+                    if (this.a_pre(op, g"sub\0")) { this.a_ln(g"subq %rcx, %rax\0"); }
+                    else
+                    {
+                        if (this.a_pre(op, g"mul\0")) { this.a_ln(g"imulq %rcx, %rax\0"); }
+                        else
+                        {
+                            if (this.a_pre(op, g"and\0")) { this.a_ln(g"andq %rcx, %rax\0"); }
+                            else
+                            {
+                                if (this.a_pre(op, g"or\0")) { this.a_ln(g"orq %rcx, %rax\0"); }
+                                else
+                                {
+                                    if (this.a_pre(op, g"xor\0")) { this.a_ln(g"xorq %rcx, %rax\0"); }
+                                    else
+                                    {
+                                        if (this.a_pre(op, g"shl\0"))
+                                        {
+                                            // widths up to 32 use the 32 bit shifts like the hardware does, so the count wraps
+                                            if (w <= 32) { this.a_ln(g"shll %cl, %eax\0"); } else { this.a_ln(g"shlq %cl, %rax\0"); };
+                                        }
+                                        else
+                                        {
+                                            if (this.a_pre(op, g"lshr\0"))
+                                            {
+                                                if (w <= 32) { this.a_ln(g"shrl %cl, %eax\0"); } else { this.a_ln(g"shrq %cl, %rax\0"); };
+                                            }
+                                            else
+                                            {
+                                                if (this.a_pre(op, g"ashr\0"))
+                                                {
+                                                    this.a_sx(0, w);
+                                                    if (w <= 32) { this.a_ln(g"sarl %cl, %eax\0"); } else { this.a_ln(g"sarq %cl, %rax\0"); };
+                                                }
+                                                else
+                                                {
+                                                    if (this.a_pre(op, g"udiv\0"))
+                                                    {
+                                                        this.a_ln(g"xorl %edx, %edx\0");
+                                                        this.a_ln(g"divq %rcx\0");
+                                                    }
+                                                    else
+                                                    {
+                                                        if (this.a_pre(op, g"urem\0"))
+                                                        {
+                                                            this.a_ln(g"xorl %edx, %edx\0");
+                                                            this.a_ln(g"divq %rcx\0");
+                                                            this.a_ln(g"movq %rdx, %rax\0");
+                                                        }
+                                                        else
+                                                        {
+                                                            if (this.a_pre(op, g"sdiv\0"))
+                                                            {
+                                                                this.a_sx(0, w);
+                                                                this.a_sx(1, w);
+                                                                this.a_ln(g"cqto\0");
+                                                                this.a_ln(g"idivq %rcx\0");
+                                                            }
+                                                            else
+                                                            {
+                                                                if (this.a_pre(op, g"srem\0"))
+                                                                {
+                                                                    this.a_sx(0, w);
+                                                                    this.a_sx(1, w);
+                                                                    this.a_ln(g"cqto\0");
+                                                                    this.a_ln(g"idivq %rcx\0");
+                                                                    this.a_ln(g"movq %rdx, %rax\0");
+                                                                }
+                                                                else { this.a_unsup(op); };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+                this.a_norm(0, w);
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            // frem through fmod of libm is not available, so use the x87 remainder
+            a_frem(bool single) -> void
+            {
+                if (single)
+                {
+                    this.a_ln(g"subq $8, %rsp\0");
+                    this.a_ln(g"movss %xmm1, (%rsp)\0");
+                    this.a_ln(g"flds (%rsp)\0");
+                    this.a_ln(g"movss %xmm0, (%rsp)\0");
+                    this.a_ln(g"flds (%rsp)\0");
+                }
+                else
+                {
+                    this.a_ln(g"subq $8, %rsp\0");
+                    this.a_ln(g"movsd %xmm1, (%rsp)\0");
+                    this.a_ln(g"fldl (%rsp)\0");
+                    this.a_ln(g"movsd %xmm0, (%rsp)\0");
+                    this.a_ln(g"fldl (%rsp)\0");
+                };
+                this.lab++;
+                this.a_ln(f".LF{this.lab}:\0");
+                this.a_ln(g"fprem\0");
+                this.a_ln(g"fnstsw %ax\0");
+                this.a_ln(g"testb $4, %ah\0");
+                this.a_ln(f"jne .LF{this.lab}\0");
+                this.a_ln(g"fstp %st(1)\0");
+                if (single)
+                {
+                    this.a_ln(g"fstps (%rsp)\0");
+                    this.a_ln(g"movss (%rsp), %xmm0\0");
+                }
+                else
+                {
+                    this.a_ln(g"fstpl (%rsp)\0");
+                    this.a_ln(g"movsd (%rsp), %xmm0\0");
+                };
+                this.a_ln(g"addq $8, %rsp\0");
+                ->;
+            };
+
+            a_cmp(byte* kind, byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                IRValue* v = this.a_newv(this.t_int(1));
+                int w = a.ty.width;
+                bool dbl = a.ty.kind == LK.DOUBLE;
+                byte* uc;
+                if (this.a_pre(kind, g"fcmp\0"))
+                {
+                    this.a_ldx(a, 0);
+                    this.a_ldx(b, 1);
+                    uc = g"ucomisd\0";
+                    if (!dbl) { uc = g"ucomiss\0"; };
+                    this.a_fcmp(pred, uc);
+                    this.a_ln(g"movzbl %al, %eax\0");
+                    this.a_stv(v, 0);
+                    -> v;
+                };
+                if (a.ty.kind != LK.INT) { w = 64; };
+                this.a_ld(a, 0);
+                this.a_ld(b, 1);
+                if (pred[0] == 's' & !this.a_seq(pred, g"ne\0"))
+                {
+                    this.a_sx(0, w);
+                    this.a_sx(1, w);
+                };
+                this.a_ln(g"cmpq %rcx, %rax\0");
+                if (this.a_seq(pred, g"eq\0")) { this.a_ln(g"sete %al\0"); };
+                if (this.a_seq(pred, g"ne\0")) { this.a_ln(g"setne %al\0"); };
+                if (this.a_seq(pred, g"ugt\0")) { this.a_ln(g"seta %al\0"); };
+                if (this.a_seq(pred, g"uge\0")) { this.a_ln(g"setae %al\0"); };
+                if (this.a_seq(pred, g"ult\0")) { this.a_ln(g"setb %al\0"); };
+                if (this.a_seq(pred, g"ule\0")) { this.a_ln(g"setbe %al\0"); };
+                if (this.a_seq(pred, g"sgt\0")) { this.a_ln(g"setg %al\0"); };
+                if (this.a_seq(pred, g"sge\0")) { this.a_ln(g"setge %al\0"); };
+                if (this.a_seq(pred, g"slt\0")) { this.a_ln(g"setl %al\0"); };
+                if (this.a_seq(pred, g"sle\0")) { this.a_ln(g"setle %al\0"); };
+                this.a_ln(g"movzbl %al, %eax\0");
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            // Sets al from the flags of ucomis(xmm1, xmm0) style compares. xmm0 holds the left
+            // operand and xmm1 the right one.
+            a_fcmp(byte* pred, byte* uc) -> void
+            {
+                bool neg = false;
+                byte* p = pred;
+                if (this.a_seq(p, g"true\0")) { this.a_ln(g"movb $1, %al\0"); ->; };
+                if (this.a_seq(p, g"false\0")) { this.a_ln(g"xorl %eax, %eax\0"); ->; };
+                if (this.a_seq(p, g"ord\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"setnp %al\0");
+                    ->;
+                };
+                if (this.a_seq(p, g"uno\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"setp %al\0");
+                    ->;
+                };
+                if (this.a_seq(p, g"oeq\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"sete %al\0");
+                    this.a_ln(g"setnp %cl\0");
+                    this.a_ln(g"andb %cl, %al\0");
+                    ->;
+                };
+                if (this.a_seq(p, g"one\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"setne %al\0");
+                    this.a_ln(g"setnp %cl\0");
+                    this.a_ln(g"andb %cl, %al\0");
+                    ->;
+                };
+                if (this.a_seq(p, g"ueq\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"sete %al\0");
+                    this.a_ln(g"setp %cl\0");
+                    this.a_ln(g"orb %cl, %al\0");
+                    ->;
+                };
+                if (this.a_seq(p, g"une\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"setne %al\0");
+                    this.a_ln(g"setp %cl\0");
+                    this.a_ln(g"orb %cl, %al\0");
+                    ->;
+                };
+                // ordered greater forms compare xmm1 against xmm0 swapped for the less forms
+                if (this.a_seq(p, g"ogt\0") | this.a_seq(p, g"ule\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"seta %al\0");
+                    if (p[0] == 'u') { this.a_ln(g"xorb $1, %al\0"); };
+                    ->;
+                };
+                if (this.a_seq(p, g"oge\0") | this.a_seq(p, g"ult\0"))
+                {
+                    this.a_ln(f"{uc} %xmm1, %xmm0\0");
+                    this.a_ln(g"setae %al\0");
+                    if (p[0] == 'u') { this.a_ln(g"xorb $1, %al\0"); };
+                    ->;
+                };
+                if (this.a_seq(p, g"olt\0") | this.a_seq(p, g"uge\0"))
+                {
+                    this.a_ln(f"{uc} %xmm0, %xmm1\0");
+                    this.a_ln(g"seta %al\0");
+                    if (p[0] == 'u') { this.a_ln(g"xorb $1, %al\0"); };
+                    ->;
+                };
+                if (this.a_seq(p, g"ole\0") | this.a_seq(p, g"ugt\0"))
+                {
+                    this.a_ln(f"{uc} %xmm0, %xmm1\0");
+                    this.a_ln(g"setae %al\0");
+                    if (p[0] == 'u') { this.a_ln(g"xorb $1, %al\0"); };
+                    ->;
+                };
+                this.a_unsup(pred);
+                ->;
+            };
+
+            a_cast(byte* op, IRValue* v, IRType* to, byte* hint) -> IRValue*
+            {
+                IRValue* r = this.a_newv(to);
+                IRType* fromt = v.ty;
+                int fw = fromt.width;
+                int tw = to.width;
+                int lab1, lab2;
+                bool tdbl = to.kind == LK.DOUBLE;
+                bool fdbl = fromt.kind == LK.DOUBLE;
+                if (fromt.kind != LK.INT) { fw = 64; };
+                if (to.kind != LK.INT) { tw = 64; };
+                if (this.a_pre(op, g"fpext\0"))
+                {
+                    this.a_ldx(v, 0);
+                    this.a_ln(g"cvtss2sd %xmm0, %xmm0\0");
+                    this.a_ln(g"movq %xmm0, %rax\0");
+                    this.a_stv(r, 0);
+                    -> r;
+                };
+                if (this.a_pre(op, g"fptrunc\0"))
+                {
+                    this.a_ldx(v, 0);
+                    this.a_ln(g"cvtsd2ss %xmm0, %xmm0\0");
+                    this.a_ln(g"movd %xmm0, %eax\0");
+                    this.a_stv(r, 0);
+                    -> r;
+                };
+                if (this.a_pre(op, g"sitofp\0") | this.a_pre(op, g"uitofp\0"))
+                {
+                    this.a_ld(v, 0);
+                    if (this.a_pre(op, g"sitofp\0")) { this.a_sx(0, fw); };
+                    if (tdbl)
+                    {
+                        if (this.a_pre(op, g"uitofp\0") & fw == 64)
+                        {
+                            this.lab++;
+                            lab1 = this.lab;
+                            this.lab++;
+                            lab2 = this.lab;
+                            this.a_ln(g"testq %rax, %rax\0");
+                            this.a_ln(f"js .LU{lab1}\0");
+                            this.a_ln(g"cvtsi2sdq %rax, %xmm0\0");
+                            this.a_ln(f"jmp .LU{lab2}\0");
+                            this.a_ln(f".LU{lab1}:\0");
+                            this.a_ln(g"movq %rax, %rcx\0");
+                            this.a_ln(g"shrq %rcx\0");
+                            this.a_ln(g"andl $1, %eax\0");
+                            this.a_ln(g"orq %rax, %rcx\0");
+                            this.a_ln(g"cvtsi2sdq %rcx, %xmm0\0");
+                            this.a_ln(g"addsd %xmm0, %xmm0\0");
+                            this.a_ln(f".LU{lab2}:\0");
+                        }
+                        else { this.a_ln(g"cvtsi2sdq %rax, %xmm0\0"); };
+                        this.a_ln(g"movq %xmm0, %rax\0");
+                    }
+                    else
+                    {
+                        if (this.a_pre(op, g"uitofp\0") & fw == 64)
+                        {
+                            this.lab++;
+                            lab1 = this.lab;
+                            this.lab++;
+                            lab2 = this.lab;
+                            this.a_ln(g"testq %rax, %rax\0");
+                            this.a_ln(f"js .LU{lab1}\0");
+                            this.a_ln(g"cvtsi2ssq %rax, %xmm0\0");
+                            this.a_ln(f"jmp .LU{lab2}\0");
+                            this.a_ln(f".LU{lab1}:\0");
+                            this.a_ln(g"movq %rax, %rcx\0");
+                            this.a_ln(g"shrq %rcx\0");
+                            this.a_ln(g"andl $1, %eax\0");
+                            this.a_ln(g"orq %rax, %rcx\0");
+                            this.a_ln(g"cvtsi2ssq %rcx, %xmm0\0");
+                            this.a_ln(g"addss %xmm0, %xmm0\0");
+                            this.a_ln(f".LU{lab2}:\0");
+                        }
+                        else { this.a_ln(g"cvtsi2ssq %rax, %xmm0\0"); };
+                        this.a_ln(g"movd %xmm0, %eax\0");
+                    };
+                    this.a_stv(r, 0);
+                    -> r;
+                };
+                if (this.a_pre(op, g"fptosi\0") | this.a_pre(op, g"fptoui\0"))
+                {
+                    this.a_ldx(v, 0);
+                    if (this.a_pre(op, g"fptoui\0") & tw == 64)
+                    {
+                        // values at or above 2^63 are converted after subtracting 2^63
+                        this.lab++;
+                        lab1 = this.lab;
+                        this.lab++;
+                        lab2 = this.lab;
+                        if (fdbl)
+                        {
+                            this.a_ln(g"movabsq $0x43e0000000000000, %rcx\0");
+                            this.a_ln(g"movq %rcx, %xmm1\0");
+                            this.a_ln(g"ucomisd %xmm1, %xmm0\0");
+                            this.a_ln(f"jae .LU{lab1}\0");
+                            this.a_ln(g"cvttsd2siq %xmm0, %rax\0");
+                            this.a_ln(f"jmp .LU{lab2}\0");
+                            this.a_ln(f".LU{lab1}:\0");
+                            this.a_ln(g"subsd %xmm1, %xmm0\0");
+                            this.a_ln(g"cvttsd2siq %xmm0, %rax\0");
+                            this.a_ln(g"movabsq $0x8000000000000000, %rcx\0");
+                            this.a_ln(g"xorq %rcx, %rax\0");
+                            this.a_ln(f".LU{lab2}:\0");
+                        }
+                        else
+                        {
+                            this.a_ln(g"movl $0x5f000000, %ecx\0");
+                            this.a_ln(g"movd %ecx, %xmm1\0");
+                            this.a_ln(g"ucomiss %xmm1, %xmm0\0");
+                            this.a_ln(f"jae .LU{lab1}\0");
+                            this.a_ln(g"cvttss2siq %xmm0, %rax\0");
+                            this.a_ln(f"jmp .LU{lab2}\0");
+                            this.a_ln(f".LU{lab1}:\0");
+                            this.a_ln(g"subss %xmm1, %xmm0\0");
+                            this.a_ln(g"cvttss2siq %xmm0, %rax\0");
+                            this.a_ln(g"movabsq $0x8000000000000000, %rcx\0");
+                            this.a_ln(g"xorq %rcx, %rax\0");
+                            this.a_ln(f".LU{lab2}:\0");
+                        };
+                    }
+                    else
+                    {
+                        if (fdbl) { this.a_ln(g"cvttsd2siq %xmm0, %rax\0"); }
+                        else { this.a_ln(g"cvttss2siq %xmm0, %rax\0"); };
+                        this.a_norm(0, tw);
+                    };
+                    this.a_stv(r, 0);
+                    -> r;
+                };
+                this.a_ld(v, 0);
+                if (this.a_pre(op, g"sext\0")) { this.a_sx(0, fw); this.a_norm(0, tw); }
+                else
+                {
+                    // zext, trunc, ptrtoint, inttoptr and bitcast keep the bits
+                    if (tw < fw | this.a_pre(op, g"trunc\0")) { this.a_norm(0, tw); };
+                };
+                this.a_stv(r, 0);
+                -> r;
+            };
+
+            a_alloca(IRType* ty, byte* name) -> IRValue*
+            {
+                IRValue* av;
+                int sz = this.a_size(ty);
+                int al = this.a_align(ty);
+                if (sz < 8) { sz = 8; };
+                // The System V va_list object is 24 bytes; the front end types it as [1 x i8*].
+                // The copies made for indexing `...` are typed the same way and receive a full copy.
+                if (name != (byte*)0 & (this.a_pre(name, g"va_list\0") | this.a_pre(name, g"va_copy\0")) & sz < 24) { sz = 24; };
+                this.tb.clear();
+                this.tb.put_str(g"%a\0");
+                this.tb.put_int(this.lab);
+                this.lab++;
+                av = this.new_value(this.t_ptr(ty), this.tb.mem);
+                av.flags = VF_ALLOCA;
+                av.slot = this.a_slot(sz, al);
+                -> av;
+            };
+
+            a_alloca_count(IRType* ty, IRValue* count, byte* name) -> IRValue*
+            {
+                IRValue* v = this.a_newv(this.t_ptr(ty));
+                int sz = this.a_size(ty);
+                this.a_ld(count, 0);
+                this.a_ln(f"imulq ${sz}, %rax, %rax\0");
+                this.a_ln(g"addq $15, %rax\0");
+                this.a_ln(g"andq $-16, %rax\0");
+                this.a_ln(g"subq %rax, %rsp\0");
+                this.a_ln(g"movq %rsp, %rax\0");
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            a_load(IRValue* p, byte* hint) -> IRValue*
+            {
+                IRType* t = p.ty.elem;
+                IRValue* v = this.a_newv(t);
+                int sz = this.a_size(t);
+                byte* m;
+                if (lt_is_agg(t))
+                {
+                    this.a_ld(p, 3);
+                    this.a_ln(f"leaq {v.slot}(%rbp), %rdi\0");
+                    this.a_copy(sz);
+                    -> v;
+                };
+                m = this.a_mem(p, 1, 0);
+                switch (sz)
+                {
+                    case (1) { this.a_ln(f"movzbl {m}, %eax\0"); }
+                    case (2) { this.a_ln(f"movzwl {m}, %eax\0"); }
+                    case (4) { this.a_ln(f"movl {m}, %eax\0"); }
+                    default { this.a_ln(f"movq {m}, %rax\0"); };
+                };
+                if (t.kind == LK.INT & t.width == 1) { this.a_ln(g"andl $1, %eax\0"); };
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            a_store(IRValue* v, IRValue* p, bool vol) -> void
+            {
+                IRType* t = v.ty;
+                int sz = this.a_size(t);
+                byte* m;
+                if (lt_is_agg(t))
+                {
+                    this.a_agg_src(v);
+                    this.a_ld(p, 4);
+                    this.a_copy(sz);
+                    ->;
+                };
+                this.a_ld(v, 0);
+                m = this.a_mem(p, 1, 0);
+                switch (sz)
+                {
+                    case (1) { this.a_ln(f"movb %al, {m}\0"); }
+                    case (2) { this.a_ln(f"movw %ax, {m}\0"); }
+                    case (4) { this.a_ln(f"movl %eax, {m}\0"); }
+                    default { this.a_ln(f"movq %rax, {m}\0"); };
+                };
+                ->;
+            };
+
+            a_gep(IRValue* p, IRValue** idx, int n, bool inbounds, byte* hint) -> IRValue*
+            {
+                IRType* t = p.ty.elem;
+                IRType* cur = t;
+                IRValue* v;
+                IRValue* ix;
+                i64 off;
+                int i, k, sz, w;
+                this.a_ld(p, 0);
+                ix = idx[0];
+                sz = this.a_size(t);
+                if (this.a_isnum(ix.text)) { off = off + (i64)this.a_num(ix.text) * (i64)sz; }
+                else
+                {
+                    this.a_ld(ix, 1);
+                    w = ix.ty.width;
+                    if (ix.ty.kind != LK.INT) { w = 64; };
+                    this.a_sx(1, w);
+                    if (sz != 1) { this.a_ln(f"imulq ${sz}, %rcx, %rcx\0"); };
+                    this.a_ln(g"addq %rcx, %rax\0");
+                };
+                i = 1;
+                while (i < n)
+                {
+                    ix = idx[i];
+                    if (cur.kind == LK.STRUCT | cur.kind == LK.ISTRUCT)
+                    {
+                        k = (int)this.const_val(ix);
+                        off = off + (i64)this.a_foff(cur, k);
+                        cur = cur.items[k];
+                    }
+                    else
+                    {
+                        sz = this.a_size(cur.elem);
+                        if (this.a_isnum(ix.text)) { off = off + (i64)this.a_num(ix.text) * (i64)sz; }
+                        else
+                        {
+                            this.a_ld(ix, 1);
+                            w = ix.ty.width;
+                            if (ix.ty.kind != LK.INT) { w = 64; };
+                            this.a_sx(1, w);
+                            if (sz != 1) { this.a_ln(f"imulq ${sz}, %rcx, %rcx\0"); };
+                            this.a_ln(g"addq %rcx, %rax\0");
+                        };
+                        cur = cur.elem;
+                    };
+                    i++;
+                };
+                if (off != (i64)0)
+                {
+                    if (off > (i64)2147483647 | off < (i64)-2147483648)
+                    {
+                        this.a_imm((u64)off, 1);
+                        this.a_ln(g"addq %rcx, %rax\0");
+                    }
+                    else
+                    {
+                        this.ab.clear();
+                        this.ab.put_str(g"addq $\0");
+                        put_i64(@this.ab, off);
+                        this.ab.put_str(g", %rax\0");
+                        this.a_ab();
+                    };
+                };
+                v = this.a_newv(this.t_ptr(cur));
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            a_select(IRValue* c, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                IRValue* v = this.a_newv(a.ty);
+                int sz = this.a_size(a.ty);
+                int l1, l2;
+                if (lt_is_agg(a.ty))
+                {
+                    this.lab++;
+                    l1 = this.lab;
+                    this.lab++;
+                    l2 = this.lab;
+                    this.a_ld(c, 2);
+                    this.a_ln(g"testq %rdx, %rdx\0");
+                    this.a_ln(f"jne .LS{l1}\0");
+                    this.a_agg_src(b);
+                    this.a_ln(f"jmp .LS{l2}\0");
+                    this.a_ln(f".LS{l1}:\0");
+                    this.a_agg_src(a);
+                    this.a_ln(f".LS{l2}:\0");
+                    this.a_ln(f"leaq {v.slot}(%rbp), %rdi\0");
+                    this.a_copy(sz);
+                    -> v;
+                };
+                this.a_ld(a, 0);
+                this.a_ld(b, 1);
+                this.a_ld(c, 2);
+                this.a_ln(g"testq %rdx, %rdx\0");
+                this.a_ln(g"cmoveq %rcx, %rax\0");
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            a_phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
+            {
+                IRValue* v = this.a_newv(ty);
+                IRBlock* sb = this.cb;
+                IRBlock* b;
+                int i, at, before, sz;
+                sz = this.a_size(ty);
+                while (i < n)
+                {
+                    b = blocks[i];
+                    this.cb = b;
+                    at = b.lines.len;
+                    if (b.terminated) { at = b.term_at; };
+                    // emit the copy at the end of the block, then move it before the terminator
+                    before = b.lines.len;
+                    if (lt_is_agg(ty))
+                    {
+                        this.a_agg_src(vals[i]);
+                        this.a_ln(f"leaq {v.slot}(%rbp), %rdi\0");
+                        this.a_copy(sz);
+                    }
+                    else
+                    {
+                        this.a_ld(vals[i], 0);
+                        this.a_stv(v, 0);
+                    };
+                    this.a_move_tail(b, before, at);
+                    if (b.terminated) { b.term_at = b.term_at + (b.lines.len - before); };
+                    i++;
+                };
+                this.cb = sb;
+                -> v;
+            };
+
+            // Moves the lines from index from to the end of b so that they start at index to
+            a_move_tail(IRBlock* b, int fr, int dst) -> void
+            {
+                int cnt = b.lines.len - fr;
+                int i, j;
+                void* tmp;
+                void** items = b.lines.items;
+                if (dst >= fr | cnt <= 0) { ->; };
+                // rotate [dst, fr) and [fr, end) so the new lines come first
+                i = 0;
+                while (i < cnt)
+                {
+                    j = fr + i;
+                    tmp = items[j];
+                    while (j > dst + i)
+                    {
+                        items[j] = items[j - 1];
+                        j--;
+                    };
+                    items[dst + i] = tmp;
+                    i++;
+                };
+                ->;
+            };
+
+            a_br(IRBlock* target) -> void
+            {
+                byte* l = this.a_label(target);
+                this.a_term_begin();
+                this.a_ln(f"jmp {l}\0");
+                this.a_term_end();
+                ->;
+            };
+
+            a_cbr(IRValue* c, IRBlock* t, IRBlock* f) -> void
+            {
+                byte* lt = this.a_label(t);
+                byte* lf = this.a_label(f);
+                this.a_term_begin();
+                this.a_ld(c, 0);
+                this.a_ln(g"testl $1, %eax\0");
+                this.a_ln(f"jne {lt}\0");
+                this.a_ln(f"jmp {lf}\0");
+                this.a_term_end();
+                ->;
+            };
+
+            a_epilogue() -> void
+            {
+                this.a_ln(g"leave\0");
+                this.a_ln(g"ret\0");
+                ->;
+            };
+
+            a_ret(IRValue* v) -> void
+            {
+                IRType* t = v.ty;
+                IRFunc* f = this.cf;
+                this.a_term_begin();
+                if (this.a_ret_ptr(t))
+                {
+                    this.a_agg_src(v);
+                    this.a_ln(f"movq {f.sret_slot}(%rbp), %rdi\0");
+                    this.a_copy(this.a_size(t));
+                    this.a_ln(f"movq {f.sret_slot}(%rbp), %rax\0");
+                }
+                else
+                {
+                    if (lt_is_agg(t))
+                    {
+                        // Win64 returns a 1, 2, 4 or 8 byte aggregate in rax
+                        this.a_agg_src(v);
+                        this.a_agg_load(this.a_size(t), 0);
+                    }
+                    else
+                    {
+                        if (lt_is_fp(t))
+                        {
+                            this.a_ldx(v, 0);
+                        }
+                        else { this.a_ld(v, 0); };
+                    };
+                };
+                this.a_epilogue();
+                this.a_term_end();
+                ->;
+            };
+
+            a_ret_void() -> void
+            {
+                this.a_term_begin();
+                this.a_epilogue();
+                this.a_term_end();
+                ->;
+            };
+
+            a_unreachable() -> void
+            {
+                this.a_term_begin();
+                this.a_ln(g"ud2\0");
+                this.a_term_end();
+                ->;
+            };
+
+            a_switch(IRValue* v, IRBlock* dflt, IRValue** vals, IRBlock** blocks, int n) -> void
+            {
+                int i;
+                byte* l;
+                u64 cv;
+                int w = v.ty.width;
+                this.a_term_begin();
+                this.a_ld(v, 0);
+                while (i < n)
+                {
+                    cv = this.a_mask(this.a_cval(vals[i]), w);
+                    l = this.a_label(blocks[i]);
+                    if (cv <= (u64)2147483647)
+                    {
+                        this.ab.clear();
+                        this.ab.put_str(g"cmpq $\0");
+                        put_u64(@this.ab, cv);
+                        this.ab.put_str(g", %rax\0");
+                        this.a_ab();
+                    }
+                    else
+                    {
+                        this.a_imm(cv, 1);
+                        this.a_ln(g"cmpq %rcx, %rax\0");
+                    };
+                    this.a_ln(f"je {l}\0");
+                    i++;
+                };
+                l = this.a_label(dflt);
+                this.a_ln(f"jmp {l}\0");
+                this.a_term_end();
+                ->;
+            };
+
+            a_extractvalue(IRValue* agg, int i, byte* hint) -> IRValue*
+            {
+                IRType* t = this.index_type(agg.ty, this.c_int(this.t_int(32), (i64)i));
+                IRValue* v = this.a_newv(t);
+                int off = 0;
+                int sz = this.a_size(t);
+                if (agg.ty.kind == LK.STRUCT | agg.ty.kind == LK.ISTRUCT) { off = this.a_foff(agg.ty, i); }
+                else { off = i * this.a_size(agg.ty.elem); };
+                this.a_agg_src(agg);
+                if (off != 0) { this.a_ln(f"addq ${off}, %rsi\0"); };
+                this.a_ln(f"leaq {v.slot}(%rbp), %rdi\0");
+                this.a_copy(sz);
+                -> v;
+            };
+
+            a_insertvalue(IRValue* agg, IRValue* val, int i, byte* hint) -> IRValue*
+            {
+                IRValue* v = this.a_newv(agg.ty);
+                IRType* et = this.index_type(agg.ty, this.c_int(this.t_int(32), (i64)i));
+                int off = 0;
+                int sz = this.a_size(agg.ty);
+                if (agg.ty.kind == LK.STRUCT | agg.ty.kind == LK.ISTRUCT) { off = this.a_foff(agg.ty, i); }
+                else { off = i * this.a_size(agg.ty.elem); };
+                this.a_agg_src(agg);
+                this.a_ln(f"leaq {v.slot}(%rbp), %rdi\0");
+                this.a_copy(sz);
+                if (lt_is_agg(et))
+                {
+                    this.a_agg_src(val);
+                    this.a_ln(f"leaq {v.slot + off}(%rbp), %rdi\0");
+                    this.a_copy(this.a_size(et));
+                    -> v;
+                };
+                this.a_ld(val, 0);
+                switch (this.a_size(et))
+                {
+                    case (1) { this.a_ln(f"movb %al, {v.slot + off}(%rbp)\0"); }
+                    case (2) { this.a_ln(f"movw %ax, {v.slot + off}(%rbp)\0"); }
+                    case (4) { this.a_ln(f"movl %eax, {v.slot + off}(%rbp)\0"); }
+                    default { this.a_ln(f"movq %rax, {v.slot + off}(%rbp)\0"); };
+                };
+                -> v;
+            };
+
+            // ----------------------------------------------------------
+            // Calls
+            // ----------------------------------------------------------
+
+            // Win64 call: 32 bytes of shadow space, four register arguments chosen by position,
+            // aggregates that are not 1, 2, 4 or 8 bytes passed by pointer to a caller made copy.
+            a_call_win(IRValue* callee, IRValue** args, int n, byte* hint, bool tail) -> IRValue*
+            {
+                IRType* fty = callee.ty.elem;
+                IRType* rt = fty.elem;
+                IRValue* res = (IRValue*)0;
+                IRValue* a;
+                int i, p, base, stk, stk16, copyoff, cp, sz;
+                bool retp = this.a_ret_ptr(rt);
+                bool smallret = lt_is_agg(rt) & !retp;
+                bool direct = callee.text[0] == '@' & callee.slot == 0;
+                byte* sym;
+                if (rt.kind != LK.VOID) { res = this.a_newv(rt); };
+                if (retp) { base = 1; };
+                stk = 32;
+                if (base + n > 4) { stk = stk + (base + n - 4) * 8; };
+                copyoff = stk;
+                i = 0;
+                while (i < n)
+                {
+                    a = args[i];
+                    if (lt_is_agg(a.ty))
+                    {
+                        sz = this.a_size(a.ty);
+                        if (!this.a_small_agg(sz)) { stk = stk + (sz + 15) / 16 * 16; };
+                    };
+                    i++;
+                };
+                stk16 = (stk + 15) / 16 * 16;
+                this.a_ln(f"subq ${stk16}, %rsp\0");
+                // copies of by-pointer aggregates and the stack arguments
+                cp = copyoff;
+                i = 0;
+                while (i < n)
+                {
+                    a = args[i];
+                    p = base + i;
+                    if (lt_is_agg(a.ty))
+                    {
+                        sz = this.a_size(a.ty);
+                        if (this.a_small_agg(sz))
+                        {
+                            if (p >= 4)
+                            {
+                                this.a_agg_src(a);
+                                this.a_agg_load(sz, 0);
+                                this.a_ln(f"movq %rax, {8 * p}(%rsp)\0");
+                            };
+                        }
+                        else
+                        {
+                            this.a_agg_src(a);
+                            this.a_ln(f"leaq {cp}(%rsp), %rdi\0");
+                            this.a_copy(sz);
+                            if (p >= 4)
+                            {
+                                this.a_ln(f"leaq {cp}(%rsp), %rax\0");
+                                this.a_ln(f"movq %rax, {8 * p}(%rsp)\0");
+                            };
+                            cp = cp + (sz + 15) / 16 * 16;
+                        };
+                    }
+                    else
+                    {
+                        if (p >= 4)
+                        {
+                            this.a_ld(a, 0);
+                            this.a_ln(f"movq %rax, {8 * p}(%rsp)\0");
+                        };
+                    };
+                    i++;
+                };
+                if (!direct) { this.a_ld(callee, 8); };
+                if (retp) { this.a_ln(f"leaq {res.slot}(%rbp), %rcx\0"); };
+                // register arguments
+                cp = copyoff;
+                i = 0;
+                while (i < n)
+                {
+                    a = args[i];
+                    p = base + i;
+                    if (lt_is_agg(a.ty))
+                    {
+                        sz = this.a_size(a.ty);
+                        if (this.a_small_agg(sz))
+                        {
+                            if (p < 4)
+                            {
+                                this.a_agg_src(a);
+                                this.a_agg_load(sz, this.a_argreg(p));
+                            };
+                        }
+                        else
+                        {
+                            if (p < 4) { this.a_ln(f"leaq {cp}(%rsp), {this.a_reg(this.a_argreg(p), 8)}\0"); };
+                            cp = cp + (sz + 15) / 16 * 16;
+                        };
+                    }
+                    else
+                    {
+                        if (p < 4)
+                        {
+                            if (lt_is_fp(a.ty))
+                            {
+                                this.a_ldx(a, p);
+                                // a variadic callee reads floating point arguments from the integer registers
+                                if (fty.vararg) { this.a_ln(f"movq %xmm{p}, {this.a_reg(this.a_argreg(p), 8)}\0"); };
+                            }
+                            else { this.a_ld(a, this.a_argreg(p)); };
+                        };
+                    };
+                    i++;
+                };
+                if (direct)
+                {
+                    sym = this.a_sym(callee.text);
+                    this.a_ln(f"callq {sym}\0");
+                }
+                else { this.a_ln(g"callq *%r11\0"); };
+                this.a_ln(f"addq ${stk16}, %rsp\0");
+                if (rt.kind == LK.VOID) { -> (IRValue*)0; };
+                if (retp) { -> res; };
+                if (smallret)
+                {
+                    sz = this.a_size(rt);
+                    switch (sz)
+                    {
+                        case (1) { this.a_ln(f"movb %al, {res.slot}(%rbp)\0"); }
+                        case (2) { this.a_ln(f"movw %ax, {res.slot}(%rbp)\0"); }
+                        case (4) { this.a_ln(f"movl %eax, {res.slot}(%rbp)\0"); }
+                        default { this.a_ln(f"movq %rax, {res.slot}(%rbp)\0"); };
+                    };
+                    -> res;
+                };
+                if (rt.kind == LK.FLOAT) { this.a_ln(g"movd %xmm0, %eax\0"); }
+                else
+                {
+                    if (rt.kind == LK.DOUBLE) { this.a_ln(g"movq %xmm0, %rax\0"); }
+                    else { if (rt.kind == LK.INT) { this.a_norm(0, rt.width); }; };
+                };
+                this.a_stv(res, 0);
+                -> res;
+            };
+
+            a_call(IRValue* callee, IRValue** args, int n, byte* hint, bool tail) -> IRValue*
+            {
+                IRType* fty = callee.ty.elem;
+                IRType* rt = fty.elem;
+                IRValue* res = (IRValue*)0;
+                IRValue* a;
+                int i, ngp, nfp, stk, stk16, cur, sz, nx;
+                bool agg_ret = lt_is_agg(rt);
+                bool direct = callee.text[0] == '@' & callee.slot == 0;
+                byte* sym;
+                byte* rn;
+                if (this.a_pre(callee.text, g"asm\0")) { -> this.a_inline(callee, args, n); };
+                if (direct & this.a_pre(callee.text, g"@\"llvm.\0"))
+                {
+                    res = this.a_intrinsic(callee.text + 7, args, n, rt);
+                    if (res != (IRValue*)0 | this.a_handled) { this.a_handled = false; -> res; };
+                };
+                if (this.a_win()) { -> this.a_call_win(callee, args, n, hint, tail); };
+                if (rt.kind != LK.VOID) { res = this.a_newv(rt); };
+                if (agg_ret) { ngp = 1; };
+                i = 0;
+                while (i < n)
+                {
+                    a = args[i];
+                    sz = this.a_size(a.ty);
+                    if (lt_is_agg(a.ty)) { stk = stk + (sz + 7) / 8 * 8; }
+                    else
+                    {
+                        if (lt_is_fp(a.ty))
+                        {
+                            if (nfp < 8) { nfp++; } else { stk = stk + 8; };
+                        }
+                        else
+                        {
+                            if (ngp < 6) { ngp++; } else { stk = stk + 8; };
+                        };
+                    };
+                    i++;
+                };
+                stk16 = (stk + 15) / 16 * 16;
+                if (stk16 > 0)
+                {
+                    this.a_ln(f"subq ${stk16}, %rsp\0");
+                    ngp = 0;
+                    nfp = 0;
+                    if (agg_ret) { ngp = 1; };
+                    cur = 0;
+                    i = 0;
+                    while (i < n)
+                    {
+                        a = args[i];
+                        sz = this.a_size(a.ty);
+                        if (lt_is_agg(a.ty))
+                        {
+                            this.a_agg_src(a);
+                            this.a_ln(f"leaq {cur}(%rsp), %rdi\0");
+                            this.a_copy(sz);
+                            cur = cur + (sz + 7) / 8 * 8;
+                        }
+                        else
+                        {
+                            if (lt_is_fp(a.ty))
+                            {
+                                if (nfp < 8) { nfp++; }
+                                else
+                                {
+                                    this.a_ld(a, 0);
+                                    this.a_ln(f"movq %rax, {cur}(%rsp)\0");
+                                    cur = cur + 8;
+                                };
+                            }
+                            else
+                            {
+                                if (ngp < 6) { ngp++; }
+                                else
+                                {
+                                    this.a_ld(a, 0);
+                                    this.a_ln(f"movq %rax, {cur}(%rsp)\0");
+                                    cur = cur + 8;
+                                };
+                            };
+                        };
+                        i++;
+                    };
+                };
+                if (!direct) { this.a_ld(callee, 8); };
+                ngp = 0;
+                nfp = 0;
+                if (agg_ret)
+                {
+                    this.a_ln(f"leaq {res.slot}(%rbp), %rdi\0");
+                    ngp = 1;
+                };
+                i = 0;
+                while (i < n)
+                {
+                    a = args[i];
+                    if (!lt_is_agg(a.ty))
+                    {
+                        if (lt_is_fp(a.ty))
+                        {
+                            if (nfp < 8)
+                            {
+                                this.a_ldx(a, nfp);
+                                nfp++;
+                            };
+                        }
+                        else
+                        {
+                            if (ngp < 6)
+                            {
+                                this.a_ld(a, this.a_argreg(ngp));
+                                ngp++;
+                            };
+                        };
+                    };
+                    i++;
+                };
+                if (fty.vararg) { this.a_ln(f"movl ${nfp}, %eax\0"); };
+                if (direct)
+                {
+                    sym = this.a_sym(callee.text);
+                    this.a_ln(f"callq {sym}\0");
+                }
+                else { this.a_ln(g"callq *%r11\0"); };
+                if (stk16 > 0) { this.a_ln(f"addq ${stk16}, %rsp\0"); };
+                if (rt.kind == LK.VOID) { -> (IRValue*)0; };
+                if (agg_ret) { -> res; };
+                if (rt.kind == LK.FLOAT) { this.a_ln(g"movd %xmm0, %eax\0"); }
+                else
+                {
+                    if (rt.kind == LK.DOUBLE) { this.a_ln(g"movq %xmm0, %rax\0"); }
+                    else { if (rt.kind == LK.INT) { this.a_norm(0, rt.width); }; };
+                };
+                this.a_stv(res, 0);
+                -> res;
+            };
+
+            // ----------------------------------------------------------
+            // Intrinsics
+            // ----------------------------------------------------------
+
+            // nm is the text after @"llvm. Returns the result value, or sets a_handled for a
+            // void intrinsic.
+            a_intrinsic(byte* nm, IRValue** args, int n, IRType* rt) -> IRValue*
+            {
+                IRValue* v;
+                int w;
+                int l1, l2;
+                this.a_handled = false;
+                if (this.a_pre(nm, g"memset.\0"))
+                {
+                    this.a_ld(args[0], 4);
+                    this.a_ld(args[1], 0);
+                    this.a_ld(args[2], 1);
+                    this.a_ln(g"rep stosb\0");
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"memcpy.\0"))
+                {
+                    this.a_ld(args[0], 4);
+                    this.a_ld(args[1], 3);
+                    this.a_ld(args[2], 1);
+                    this.a_ln(g"rep movsb\0");
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"memmove.\0"))
+                {
+                    this.lab++;
+                    l1 = this.lab;
+                    this.lab++;
+                    l2 = this.lab;
+                    this.a_ld(args[0], 4);
+                    this.a_ld(args[1], 3);
+                    this.a_ld(args[2], 1);
+                    this.a_ln(g"cmpq %rsi, %rdi\0");
+                    this.a_ln(f"jbe .LM{l1}\0");
+                    this.a_ln(g"leaq -1(%rsi,%rcx), %rsi\0");
+                    this.a_ln(g"leaq -1(%rdi,%rcx), %rdi\0");
+                    this.a_ln(g"std\0");
+                    this.a_ln(g"rep movsb\0");
+                    this.a_ln(g"cld\0");
+                    this.a_ln(f"jmp .LM{l2}\0");
+                    this.a_ln(f".LM{l1}:\0");
+                    this.a_ln(g"rep movsb\0");
+                    this.a_ln(f".LM{l2}:\0");
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"bswap.i\0"))
+                {
+                    v = this.a_newv(rt);
+                    w = rt.width;
+                    this.a_ld(args[0], 0);
+                    if (w == 16) { this.a_ln(g"rolw $8, %ax\0"); this.a_ln(g"movzwl %ax, %eax\0"); };
+                    if (w == 32) { this.a_ln(g"bswapl %eax\0"); };
+                    if (w == 64) { this.a_ln(g"bswapq %rax\0"); };
+                    this.a_stv(v, 0);
+                    this.a_handled = true;
+                    -> v;
+                };
+                if (this.a_pre(nm, g"trap\0"))
+                {
+                    this.a_ln(g"ud2\0");
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"debugtrap\0"))
+                {
+                    this.a_ln(g"int3\0");
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"va_start\0"))
+                {
+                    this.a_va_start(args[0]);
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"va_end\0"))
+                {
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                if (this.a_pre(nm, g"va_copy\0"))
+                {
+                    this.a_ld(args[0], 4);
+                    this.a_ld(args[1], 3);
+                    // the Win64 va_list is one pointer, the System V one is 24 bytes
+                    if (this.a_win()) { this.a_copy(8); }
+                    else { this.a_copy(24); };
+                    this.a_handled = true;
+                    -> (IRValue*)0;
+                };
+                this.a_unsup(nm);
+                this.a_handled = true;
+                -> (IRValue*)0;
+            };
+
+            // ----------------------------------------------------------
+            // Variadic functions (System V va_list)
+            // ----------------------------------------------------------
+
+            a_va_start(IRValue* ap) -> void
+            {
+                IRFunc* f = this.cf;
+                if (this.a_win())
+                {
+                    // Win64 va_list is a pointer to the first unnamed argument in the home area
+                    this.a_ld(ap, 1);
+                    this.a_ln(f"leaq {16 + 8 * f.va_gp}(%rbp), %rax\0");
+                    this.a_ln(g"movq %rax, (%rcx)\0");
+                    ->;
+                };
+                this.a_ld(ap, 1);
+                this.a_ln(f"movl ${f.va_gp * 8}, (%rcx)\0");
+                this.a_ln(f"movl ${48 + f.va_fp * 16}, 4(%rcx)\0");
+                this.a_ln(f"leaq {f.va_stk}(%rbp), %rax\0");
+                this.a_ln(g"movq %rax, 8(%rcx)\0");
+                this.a_ln(f"leaq {f.va_slot}(%rbp), %rax\0");
+                this.a_ln(g"movq %rax, 16(%rcx)\0");
+                ->;
+            };
+
+            a_va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
+            {
+                IRValue* v = this.a_newv(ty);
+                int l1, l2, sz;
+                bool fp = lt_is_fp(ty);
+                if (this.a_win())
+                {
+                    sz = this.a_size(ty);
+                    if (lt_is_agg(ty))
+                    {
+                        this.a_unsup(g"va_arg of an aggregate on Win64\0");
+                        -> v;
+                    };
+                    this.a_ld(list, 1);
+                    this.a_ln(g"movq (%rcx), %rdx\0");
+                    this.a_ln(g"leaq 8(%rdx), %r8\0");
+                    this.a_ln(g"movq %r8, (%rcx)\0");
+                    switch (sz)
+                    {
+                        case (1) { this.a_ln(g"movzbl (%rdx), %eax\0"); }
+                        case (2) { this.a_ln(g"movzwl (%rdx), %eax\0"); }
+                        case (4) { this.a_ln(g"movl (%rdx), %eax\0"); }
+                        default { this.a_ln(g"movq (%rdx), %rax\0"); };
+                    };
+                    this.a_stv(v, 0);
+                    -> v;
+                };
+                this.lab++;
+                l1 = this.lab;
+                this.lab++;
+                l2 = this.lab;
+                sz = this.a_size(ty);
+                this.a_ld(list, 1);
+                if (fp)
+                {
+                    this.a_ln(g"movl 4(%rcx), %eax\0");
+                    this.a_ln(g"cmpl $160, %eax\0");
+                }
+                else
+                {
+                    this.a_ln(g"movl (%rcx), %eax\0");
+                    this.a_ln(g"cmpl $40, %eax\0");
+                };
+                this.a_ln(f"ja .LV{l1}\0");
+                this.a_ln(g"movq 16(%rcx), %rdx\0");
+                this.a_ln(g"addq %rax, %rdx\0");
+                if (fp) { this.a_ln(g"addl $16, 4(%rcx)\0"); }
+                else { this.a_ln(g"addl $8, (%rcx)\0"); };
+                this.a_ln(f"jmp .LV{l2}\0");
+                this.a_ln(f".LV{l1}:\0");
+                this.a_ln(g"movq 8(%rcx), %rdx\0");
+                this.a_ln(g"leaq 8(%rdx), %rax\0");
+                this.a_ln(g"movq %rax, 8(%rcx)\0");
+                this.a_ln(f".LV{l2}:\0");
+                switch (sz)
+                {
+                    case (1) { this.a_ln(g"movzbl (%rdx), %eax\0"); }
+                    case (2) { this.a_ln(g"movzwl (%rdx), %eax\0"); }
+                    case (4) { this.a_ln(g"movl (%rdx), %eax\0"); }
+                    default { this.a_ln(g"movq (%rdx), %rax\0"); };
+                };
+                this.a_stv(v, 0);
+                -> v;
+            };
+
+            // ----------------------------------------------------------
+            // Inline asm
+            // ----------------------------------------------------------
+
+            // Register index of a name such as rax, eax, ax, al, r10d, or -1
+            a_regidx(byte* nm) -> int
+            {
+                int r, k;
+                while (r < 14)
+                {
+                    k = 0;
+                    while (k < 4)
+                    {
+                        if (this.a_seq(nm, this.rtab[r * 4 + k] + 1)) { -> r; };
+                        k++;
+                    };
+                    r++;
+                };
+                -> -1;
+            };
+
+            a_inline(IRValue* callee, IRValue** args, int n) -> IRValue*
+            {
+                byte* t = callee.text;
+                IRType* fty = callee.ty.elem;
+                IRType* rt = fty.elem;
+                IRFunc* f = this.cf;
+                int len, i, j, bs, ce, qs, bodyend, no, ni, nop, used, cb, ce2, k, c, r, sz;
+                int[40] opreg = noinit;
+                int[40] opkind = noinit;
+                int[40] opty = noinit;
+                int[40] opx = noinit;
+                int[40] opmem = noinit;
+                int nxr, xi;
+                IRValue* res = (IRValue*)0;
+                IRType* ot;
+                byte* rn;
+                bool brace;
+                int modc;
+                // locate body and constraint strings
+                len = 0;
+                while (t[len] != 0) { len++; };
+                while (len > 0 & t[len - 1] != 34) { len--; };
+                ce = len - 1;
+                qs = ce - 1;
+                while (qs > 0 & t[qs] != 34) { qs--; };
+                bodyend = qs - 3;
+                bs = 0;
+                while (t[bs] != 34) { bs++; };
+                bs++;
+                // constraints: count outputs and inputs, collect clobbers and explicit registers
+                i = qs + 1;
+                nop = 0;
+                no = 0;
+                ni = 0;
+                used = 0;
+                while (i < ce)
+                {
+                    cb = i;
+                    while (i < ce & t[i] != ',') { i++; };
+                    ce2 = i;
+                    if (t[cb] == '~')
+                    {
+                        // ~{reg}
+                        this.mb.clear();
+                        j = cb + 2;
+                        while (j < ce2 & t[j] != '}') { this.mb.put((int)t[j]); j++; };
+                        r = this.a_regidx(this.mb.mem);
+                        if (r >= 0) { used = used `| (1 << r); };
+                    }
+                    else
+                    {
+                        if (t[cb] == '=')
+                        {
+                            opkind[nop] = 1;
+                            opreg[nop] = -1;
+                            opx[nop] = -1;
+                            opmem[nop] = 0;
+                            if (t[ce2 - 1] == 'x') { opkind[nop] = 10; opx[nop] = -2; };
+                            if (t[cb + 1] == '{' & t[cb + 2] == 'x' & t[cb + 3] == 'm') { opkind[nop] = 10; opx[nop] = (int)t[cb + 6] - 48; };
+                            j = cb + 1;
+                            while (j < ce2)
+                            {
+                                if (t[j] == '{')
+                                {
+                                    this.mb.clear();
+                                    j++;
+                                    while (j < ce2 & t[j] != '}') { this.mb.put((int)t[j]); j++; };
+                                    r = this.a_regidx(this.mb.mem);
+                                    opreg[nop] = r;
+                                    if (r >= 0) { used = used `| (1 << r); };
+                                };
+                                if (t[j] == '&') { opkind[nop] = 3; };
+                                j++;
+                            };
+                            nop++;
+                            no++;
+                        }
+                        else
+                        {
+                            opkind[nop] = 2;
+                            opreg[nop] = -1;
+                            opx[nop] = -1;
+                            opmem[nop] = 0;
+                            if (t[cb] == 'm') { opmem[nop] = 1; };
+                            if (t[ce2 - 1] == 'x') { opkind[nop] = 9; opx[nop] = -2; };
+                            if (t[cb] == '{' & t[cb + 1] == 'x' & t[cb + 2] == 'm') { opkind[nop] = 9; opx[nop] = (int)t[cb + 5] - 48; };
+                            if (t[cb] == '{' & opkind[nop] == 2)
+                            {
+                                this.mb.clear();
+                                j = cb + 1;
+                                while (j < ce2 & t[j] != '}') { this.mb.put((int)t[j]); j++; };
+                                r = this.a_regidx(this.mb.mem);
+                                opreg[nop] = r;
+                                if (r >= 0) { used = used `| (1 << r); };
+                            };
+                            if (t[cb] >= 48 & t[cb] <= 57)
+                            {
+                                opkind[nop] = 4;
+                                opreg[nop] = (int)t[cb] - 48;
+                            };
+                            if (t[cb] == 'i' | t[cb] == 'n') { opkind[nop] = 5; };
+                            nop++;
+                            ni++;
+                        };
+                    };
+                    i = ce2 + 1;
+                };
+                // operand types
+                i = 0;
+                while (i < no)
+                {
+                    if (no == 1) { opty[i] = this.a_size(rt); }
+                    else { opty[i] = this.a_size(rt.items[i]); };
+                    i++;
+                };
+                i = 0;
+                while (i < ni)
+                {
+                    opty[no + i] = this.a_size(args[i].ty);
+                    i++;
+                };
+                // xmm operands take consecutive registers unless named
+                nxr = 0;
+                i = 0;
+                while (i < nop)
+                {
+                    if (opx[i] == -2) { opx[i] = nxr; nxr++; };
+                    i++;
+                };
+                // inputs take the first free registers
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 2 & opreg[i] < 0)
+                    {
+                        r = this.a_pick(used);
+                        opreg[i] = r;
+                        used = used `| (1 << r);
+                    };
+                    i++;
+                };
+                // tied inputs share the register of their output, explicit outputs keep theirs
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 4)
+                    {
+                        k = opreg[i];
+                        if (opreg[k] < 0)
+                        {
+                            r = this.a_pick(used);
+                            opreg[k] = r;
+                            used = used `| (1 << r);
+                        };
+                        opreg[i] = opreg[k];
+                    };
+                    i++;
+                };
+                // outputs reuse an input register when they are not early clobbered
+                i = 0;
+                while (i < no)
+                {
+                    if (opreg[i] < 0 & opkind[i] != 10)
+                    {
+                        r = -1;
+                        if (opkind[i] != 3)
+                        {
+                            j = no;
+                            while (j < nop & r < 0)
+                            {
+                                if (opkind[j] == 2 & opreg[j] >= 0 & !this.a_tied(@opreg[0], @opkind[0], no, nop, opreg[j]))
+                                {
+                                    r = opreg[j];
+                                    opkind[j] = 6;
+                                };
+                                j++;
+                            };
+                        };
+                        if (r < 0)
+                        {
+                            r = this.a_pick(used);
+                            used = used `| (1 << r);
+                        };
+                        opreg[i] = r;
+                    };
+                    i++;
+                };
+                // callee saved registers used by the asm are saved by the prologue
+                i = 0;
+                while (i < nop)
+                {
+                    if (opreg[i] >= 9) { this.a_cs_use(opreg[i] - 9); };
+                    i++;
+                };
+                if ((used `& (1 << 9)) != 0) { this.a_cs_use(0); };
+                if ((used `& (1 << 10)) != 0) { this.a_cs_use(1); };
+                if ((used `& (1 << 11)) != 0) { this.a_cs_use(2); };
+                if ((used `& (1 << 12)) != 0) { this.a_cs_use(3); };
+                if ((used `& (1 << 13)) != 0) { this.a_cs_use(4); };
+                // load inputs (tied inputs load into the output register)
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 2 | opkind[i] == 6 | opkind[i] == 4)
+                    {
+                        this.a_ld(args[i - no], opreg[i]);
+                    };
+                    if (opkind[i] == 9) { this.a_ldx(args[i - no], opx[i]); };
+                    i++;
+                };
+                // body text
+                this.mb.clear();
+                i = bs;
+                while (i < bodyend)
+                {
+                    c = (int)t[i];
+                    if (c == '$')
+                    {
+                        if (t[i + 1] == '$') { this.mb.put(36); i = i + 2; }
+                        else
+                        {
+                            i++;
+                            if (t[i] == '{') { brace = true; i++; };
+                            k = 0;
+                            while (t[i] >= 48 & t[i] <= 57) { k = k * 10 + ((int)t[i] - 48); i++; };
+                            if (brace)
+                            {
+                                if (t[i] == ':') { i++; modc = (int)t[i]; i++; };
+                                if (t[i] == '}') { i++; };
+                            };
+                            sz = opty[k];
+                            if (modc == 'q') { sz = 8; };
+                            if (modc == 'k') { sz = 4; };
+                            if (modc == 'w') { sz = 2; };
+                            if (modc == 'b') { sz = 1; };
+                            if (opkind[k] == 5)
+                            {
+                                put_i64(@this.mb, (i64)this.a_cval(args[k - no]));
+                            }
+                            else
+                            {
+                                if (opkind[k] == 9 | opkind[k] == 10)
+                                {
+                                    xi = opx[k];
+                                    this.mb.put_str(g"%xmm\0");
+                                    this.mb.put_int(xi);
+                                }
+                                else
+                                {
+                                    // a memory operand is addressed through the register holding its pointer
+                                    if (opmem[k] == 1)
+                                    {
+                                        this.mb.put(40);
+                                        this.mb.put_str(this.a_reg(opreg[k], 8));
+                                        this.mb.put(41);
+                                    }
+                                    else { this.mb.put_str(this.a_reg(opreg[k], sz)); };
+                                };
+                            };
+                        };
+                    }
+                    else { this.mb.put(c); i++; };
+                };
+                this.a_asm_lines(this.mb.mem);
+                // outputs
+                if (no == 1 & opkind[0] == 10)
+                {
+                    res = this.a_stx(rt, opx[0]);
+                }
+                else
+                {
+                    if (no == 1)
+                    {
+                        res = this.a_newv(rt);
+                        if (rt.kind == LK.INT) { this.a_norm(opreg[0], rt.width); };
+                        this.a_stv(res, opreg[0]);
+                    };
+                };
+                if (no > 1)
+                {
+                    res = this.a_newv(rt);
+                    i = 0;
+                    while (i < no)
+                    {
+                        ot = rt.items[i];
+                        if (ot.kind == LK.INT) { this.a_norm(opreg[i], ot.width); };
+                        k = res.slot + this.a_foff(rt, i);
+                        sz = this.a_size(ot);
+                        rn = this.a_reg(opreg[i], sz);
+                        switch (sz)
+                        {
+                            case (1) { this.a_ln(f"movb {rn}, {k}(%rbp)\0"); }
+                            case (2) { this.a_ln(f"movw {rn}, {k}(%rbp)\0"); }
+                            case (4) { this.a_ln(f"movl {rn}, {k}(%rbp)\0"); }
+                            default { this.a_ln(f"movq {rn}, {k}(%rbp)\0"); };
+                        };
+                        i++;
+                    };
+                };
+                -> res;
+            };
+
+            // True when a tied input points at register reg
+            a_tied(int* opreg, int* opkind, int no, int nop, int reg) -> bool
+            {
+                int i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 4 & opreg[i] == reg) { -> true; };
+                    i++;
+                };
+                -> false;
+            };
+
+            // First register not in used, caller saved ones first
+            a_pick(int used) -> int
+            {
+                int r;
+                while (r < 14)
+                {
+                    if ((used `& (1 << r)) == 0) { -> r; };
+                    r++;
+                };
+                -> 13;
+            };
+
+            // Marks callee saved register k (0 rbx, 1 r12 ... 4 r15) as used by the function
+            a_cs_use(int k) -> void
+            {
+                IRFunc* f = this.cf;
+                if ((f.cs_mask `& (1 << k)) == 0)
+                {
+                    f.cs_mask = f.cs_mask `| (1 << k);
+                    f.cs[k] = this.a_slot(8, 8);
+                };
+                ->;
+            };
+
+            // Splits asm body text into lines, trimming blanks
+            a_asm_lines(byte* s) -> void
+            {
+                int i, a, b;
+                int n;
+                while (s[n] != 0) { n++; };
+                while (i <= n)
+                {
+                    a = i;
+                    while (i < n & s[i] != 10) { i++; };
+                    b = i;
+                    while (a < b & (s[a] == ' ' | s[a] == 9 | s[a] == 13)) { a++; };
+                    while (b > a & (s[b - 1] == ' ' | s[b - 1] == 9 | s[b - 1] == 13)) { b--; };
+                    if (b > a)
+                    {
+                        this.ab.clear();
+                        while (a < b) { this.ab.put((int)s[a]); a++; };
+                        this.a_ab();
+                    };
+                    i++;
+                };
+                ->;
+            };
+
+            // ----------------------------------------------------------
+            // Constant data
+            // ----------------------------------------------------------
+
+            a_emit_int(Buf* o, int sz, u64 bits) -> void
+            {
+                switch (sz)
+                {
+                    case (1) { o.put_str(g"\t.byte \0"); }
+                    case (2) { o.put_str(g"\t.short \0"); }
+                    case (4) { o.put_str(g"\t.long \0"); }
+                    default { o.put_str(g"\t.quad \0"); };
+                };
+                put_u64(o, this.a_mask(bits, sz * 8));
+                o.put(10);
+                ->;
+            };
+
+            a_zero(Buf* o, int n) -> void
+            {
+                if (n > 0)
+                {
+                    o.put_str(g"\t.zero \0");
+                    o.put_int(n);
+                    o.put(10);
+                };
+                ->;
+            };
+
+            // Emits the initializer text s (at p, without its type) for type t
+            a_dat(IRType* t, byte* s, int* p, Buf* o) -> void
+            {
+                int k = t.kind;
+                int sz = this.a_size(t);
+                int i, off, a, c, cnt, hi, lo;
+                u64 bits;
+                byte* sym;
+                i64 so;
+                while (s[*p] == ' ') { *p = *p + 1; };
+                if (this.a_pre(s + *p, g"zeroinitializer\0"))
+                {
+                    *p = *p + 15;
+                    this.a_zero(o, sz);
+                    ->;
+                };
+                if (this.a_pre(s + *p, g"undef\0"))
+                {
+                    *p = *p + 5;
+                    this.a_zero(o, sz);
+                    ->;
+                };
+                if (k == LK.INT)
+                {
+                    if (this.a_pre(s + *p, g"true\0")) { bits = (u64)1; *p = *p + 4; }
+                    else
+                    {
+                        if (this.a_pre(s + *p, g"false\0")) { bits = (u64)0; *p = *p + 5; }
+                        else
+                        {
+                            bits = this.a_num(s + *p);
+                            if (s[*p] == '-') { *p = *p + 1; };
+                            while (s[*p] >= 48 & s[*p] <= 57) { *p = *p + 1; };
+                        };
+                    };
+                    this.a_emit_int(o, sz, bits);
+                    ->;
+                };
+                if (k == LK.FLOAT | k == LK.DOUBLE)
+                {
+                    bits = this.a_num(s + *p);
+                    if (s[*p] == '0' & s[*p + 1] == 'x')
+                    {
+                        *p = *p + 2;
+                        while ((s[*p] >= 48 & s[*p] <= 57) | (s[*p] >= 97 & s[*p] <= 102) | (s[*p] >= 65 & s[*p] <= 70)) { *p = *p + 1; };
+                        if (k == LK.FLOAT) { bits = this.a_f32bits(bits); };
+                    }
+                    else
+                    {
+                        if (s[*p] == '-') { *p = *p + 1; };
+                        while ((s[*p] >= 48 & s[*p] <= 57) | s[*p] == '.') { *p = *p + 1; };
+                    };
+                    this.a_emit_int(o, sz, bits);
+                    ->;
+                };
+                if (k == LK.PTR | k == LK.FUNC)
+                {
+                    if (this.a_cx(s, p))
+                    {
+                        sym = this.cx_sym;
+                        so = this.cx_off;
+                        o.put_str(g"\t.quad \0");
+                        if (sym != (byte*)0)
+                        {
+                            o.put_str(sym);
+                            if (so != (i64)0) { o.put(43); put_i64(o, so); };
+                        }
+                        else { put_i64(o, so); };
+                        o.put(10);
+                    }
+                    else
+                    {
+                        o.put_str(g"\t.quad 0 # unsupported pointer constant\n\0");
+                        this.nunsup++;
+                    };
+                    ->;
+                };
+                if (k == LK.ARRAY)
+                {
+                    if (s[*p] == 'c' & s[*p + 1] == '"')
+                    {
+                        *p = *p + 2;
+                        cnt = 0;
+                        while (s[*p] != 34 & s[*p] != 0)
+                        {
+                            c = (int)s[*p];
+                            if (c == 92)
+                            {
+                                hi = (int)s[*p + 1];
+                                lo = (int)s[*p + 2];
+                                if (hi >= 97) { hi = hi - 87; } else { if (hi >= 65) { hi = hi - 55; } else { hi = hi - 48; }; };
+                                if (lo >= 97) { lo = lo - 87; } else { if (lo >= 65) { lo = lo - 55; } else { lo = lo - 48; }; };
+                                c = hi * 16 + lo;
+                                *p = *p + 3;
+                            }
+                            else { *p = *p + 1; };
+                            if (cnt % 16 == 0) { o.put_str(g"\t.byte \0"); }
+                            else { o.put_str(g", \0"); };
+                            o.put_int(c);
+                            cnt++;
+                            if (cnt % 16 == 0) { o.put(10); };
+                        };
+                        if (cnt % 16 != 0) { o.put(10); };
+                        *p = *p + 1;
+                        ->;
+                    };
+                    *p = *p + 1;
+                    i = 0;
+                    while (i < t.count)
+                    {
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        this.a_skiptype(s, p);
+                        this.a_dat(t.elem, s, p, o);
+                        while (s[*p] == ',' | s[*p] == ' ') { *p = *p + 1; };
+                        i++;
+                    };
+                    if (s[*p] == ']') { *p = *p + 1; };
+                    ->;
+                };
+                if (k == LK.STRUCT | k == LK.ISTRUCT)
+                {
+                    *p = *p + 1;
+                    i = 0;
+                    while (i < t.nitems)
+                    {
+                        a = this.a_foff(t, i);
+                        this.a_zero(o, a - off);
+                        off = a;
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        this.a_skiptype(s, p);
+                        this.a_dat(t.items[i], s, p, o);
+                        off = off + this.a_size(t.items[i]);
+                        while (s[*p] == ',' | s[*p] == ' ') { *p = *p + 1; };
+                        i++;
+                    };
+                    this.a_zero(o, sz - off);
+                    if (s[*p] == '}') { *p = *p + 1; };
+                    ->;
+                };
+                this.a_zero(o, sz);
+                this.nunsup++;
+                ->;
+            };
+
+            a_log2(int a) -> int
+            {
+                int n;
+                while ((1 << n) < a) { n++; };
+                -> n;
+            };
+
+            a_put_global(Buf* out, IRGlobal* g) -> void
+            {
+                int sz = this.a_size(g.ty);
+                int al = this.a_align(g.ty);
+                int p;
+                byte* nm;
+                bool zero;
+                bool islocal = false;
+                if (g.linkage != (byte*)0)
+                {
+                    if (this.a_seq(g.linkage, g"internal\0") | this.a_seq(g.linkage, g"private\0")) { islocal = true; };
+                    if (this.a_seq(g.linkage, g"external\0") & g.init == (byte*)0) { ->; };
+                };
+                nm = this.a_sym(g.self.text);
+                zero = g.init == (byte*)0;
+                if (!zero)
+                {
+                    if (this.a_pre(g.init, g"zeroinitializer\0") | this.a_pre(g.init, g"null\0") | this.a_pre(g.init, g"false\0")) { zero = true; };
+                    if (g.init[0] == '0' & g.init[1] == 0) { zero = true; };
+                };
+                if (g.constant & !zero) { out.put_str(this.a_rodata()); }
+                else
+                {
+                    if (zero) { out.put_str(g"\t.bss\n\0"); }
+                    else { out.put_str(g"\t.data\n\0"); };
+                };
+                if (al < 8 & sz >= 8) { al = 8; };
+                if (sz >= 16 & al < 16) { al = 16; };
+                out.put_str(g"\t.p2align \0");
+                out.put_int(this.a_log2(al));
+                out.put(10);
+                if (!islocal)
+                {
+                    out.put_str(g"\t.globl \0");
+                    out.put_str(nm);
+                    out.put(10);
+                };
+                if (!this.a_win())
+                {
+                    out.put_str(g"\t.type \0");
+                    out.put_str(nm);
+                    out.put_str(g",@object\n\t.size \0");
+                    out.put_str(nm);
+                    out.put_str(g", \0");
+                    out.put_int(sz);
+                    out.put(10);
+                };
+                out.put_str(nm);
+                out.put_str(g":\n\0");
+                if (zero) { this.a_zero(out, sz); }
+                else { this.a_dat(g.ty, g.init, @p, out); };
+                ->;
+            };
+
+            // ----------------------------------------------------------
+            // Functions and module
+            // ----------------------------------------------------------
+
+            // Zero extends the low w bits of register r into the text buffer
+            a_norm_buf(Buf* o, int r, int w) -> void
+            {
+                byte* r32 = this.a_reg(r, 4);
+                if (w >= 64) { ->; };
+                o.put(9);
+                if (w == 32) { o.put_str(f"movl {r32}, {r32}\n\0"); ->; };
+                if (w == 16) { o.put_str(f"movzwl {this.a_reg(r, 2)}, {r32}\n\0"); ->; };
+                if (w == 8) { o.put_str(f"movzbl {this.a_reg(r, 1)}, {r32}\n\0"); ->; };
+                o.put_str(f"andl $1, {r32}\n\0");
+                ->;
+            };
+
+            // a naked function has no prologue, epilogue or spilled arguments
+            a_naked(IRFunc* f) -> bool
+            {
+                int i = 0;
+                while (i < f.attrs.len)
+                {
+                    if (this.a_seq((byte*)f.attrs.items[i], g"naked\0")) { -> true; };
+                    i++;
+                };
+                -> false;
+            };
+
+            // Win64 prologue part after the frame exists: save rsi and rdi, home and spill the
+            // register arguments, then make private copies of aggregates passed by pointer.
+            a_prologue_win(Buf* out, IRFunc* f) -> void
+            {
+                int i, p, base, sz, j, sl;
+                IRType* t;
+                if (this.a_ret_ptr(f.ftype.elem)) { base = 1; };
+                out.put_str(f"\tmovq %rsi, {f.wsave}(%rbp)\n\tmovq %rdi, {f.wsave + 8}(%rbp)\n\0");
+                if (f.ftype.vararg)
+                {
+                    out.put_str(g"\tmovq %rcx, 16(%rbp)\n\tmovq %rdx, 24(%rbp)\n\tmovq %r8, 32(%rbp)\n\tmovq %r9, 40(%rbp)\n\0");
+                };
+                if (base == 1) { out.put_str(f"\tmovq %rcx, {f.sret_slot}(%rbp)\n\0"); };
+                i = 0;
+                while (i < f.nargs)
+                {
+                    t = f.ftype.items[i];
+                    sz = this.a_size(t);
+                    p = base + i;
+                    if (p < 4)
+                    {
+                        j = this.a_argreg(p);
+                        sl = f.args[i].slot;
+                        if (lt_is_agg(t))
+                        {
+                            if (this.a_small_agg(sz)) { out.put_str(f"\tmovq {this.a_reg(j, 8)}, {sl}(%rbp)\n\0"); }
+                            else { out.put_str(f"\tmovq {this.a_reg(j, 8)}, {16 + 8 * p}(%rbp)\n\0"); };
+                        }
+                        else
+                        {
+                            if (lt_is_fp(t))
+                            {
+                                if (t.kind == LK.FLOAT) { out.put_str(f"\tmovd %xmm{p}, %eax\n\tmovq %rax, {sl}(%rbp)\n\0"); }
+                                else { out.put_str(f"\tmovq %xmm{p}, {sl}(%rbp)\n\0"); };
+                            }
+                            else
+                            {
+                                if (t.kind == LK.INT) { this.a_norm_buf(out, j, t.width); };
+                                out.put_str(f"\tmovq {this.a_reg(j, 8)}, {sl}(%rbp)\n\0");
+                            };
+                        };
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < f.nargs)
+                {
+                    t = f.ftype.items[i];
+                    sz = this.a_size(t);
+                    p = base + i;
+                    if (lt_is_agg(t) & !this.a_small_agg(sz))
+                    {
+                        sl = f.args[i].slot;
+                        out.put_str(f"\tleaq {sl}(%rbp), %rdi\n\tmovq {16 + 8 * p}(%rbp), %rsi\n\tmovl ${sz}, %ecx\n\trep movsb\n\0");
+                    };
+                    i++;
+                };
+                ->;
+            };
+
+            a_put_function(Buf* out, IRFunc* f) -> void
+            {
+                int i, j, k, ngp, nfp, frame, sz, sl;
+                IRBlock* bl;
+                IRType* t;
+                byte* nm;
+                byte* line;
+                bool islocal = false;
+                bool weak = false;
+                if (f.is_decl) { ->; };
+                nm = this.a_sym(f.self.text);
+                if (f.linkage != (byte*)0)
+                {
+                    if (this.a_seq(f.linkage, g"internal\0") | this.a_seq(f.linkage, g"private\0")) { islocal = true; };
+                    if (this.a_pre(f.linkage, g"linkonce\0") | this.a_pre(f.linkage, g"weak\0")) { weak = true; };
+                };
+                frame = (f.frame + 15) / 16 * 16;
+                out.put_str(g"\t.text\n\0");
+                if (weak)
+                {
+                    out.put_str(g"\t.weak \0");
+                    out.put_str(nm);
+                    out.put(10);
+                }
+                else
+                {
+                    if (!islocal)
+                    {
+                        out.put_str(g"\t.globl \0");
+                        out.put_str(nm);
+                        out.put(10);
+                    };
+                };
+                if (this.a_win())
+                {
+                    // COFF marks a function with a symbol definition: storage class 2 external, 3 static
+                    out.put_str(g"\t.def \0");
+                    out.put_str(nm);
+                    if (islocal) { out.put_str(g";\n\t.scl 3;\n\t.type 32;\n\t.endef\n\0"); }
+                    else { out.put_str(g";\n\t.scl 2;\n\t.type 32;\n\t.endef\n\0"); };
+                }
+                else
+                {
+                    out.put_str(g"\t.type \0");
+                    out.put_str(nm);
+                    out.put_str(g",@function\n\0");
+                };
+                out.put_str(nm);
+                out.put_str(g":\n\0");
+                if (this.a_naked(f))
+                {
+                    // the body is inline asm only, emitted exactly as written
+                    j = 0;
+                    while (j < f.blocks.len)
+                    {
+                        bl = (IRBlock*)f.blocks.items[j];
+                        out.put_str(f".LB{bl.id}:\n\0");
+                        k = 0;
+                        while (k < bl.lines.len)
+                        {
+                            out.put(9);
+                            out.put_str((byte*)bl.lines.items[k]);
+                            out.put(10);
+                            k++;
+                        };
+                        j++;
+                    };
+                    if (!this.a_win())
+                    {
+                        out.put_str(g"\t.size \0");
+                        out.put_str(nm);
+                        out.put_str(g", .-\0");
+                        out.put_str(nm);
+                        out.put(10);
+                    };
+                    ->;
+                };
+                out.put_str(g"\tpushq %rbp\n\tmovq %rsp, %rbp\n\0");
+                if (this.a_win() & frame >= 4096)
+                {
+                    // the stack grows by touching each page in turn
+                    out.put_str(f"\tmovl ${frame}, %eax\n\tcallq __chkstk\n\tsubq %rax, %rsp\n\0");
+                }
+                else
+                {
+                    if (frame > 0) { out.put_str(f"\tsubq ${frame}, %rsp\n\0"); };
+                };
+                k = 0;
+                while (k < 5)
+                {
+                    if ((f.cs_mask `& (1 << k)) != 0)
+                    {
+                        sl = f.cs[k];
+                        out.put_str(f"\tmovq {this.a_reg(9 + k, 8)}, {sl}(%rbp)\n\0");
+                    };
+                    k++;
+                };
+                if (this.a_win())
+                {
+                    this.a_prologue_win(out, f);
+                }
+                else
+                {
+                if (lt_is_agg(f.ftype.elem))
+                {
+                    out.put_str(f"\tmovq %rdi, {f.sret_slot}(%rbp)\n\0");
+                    ngp = 1;
+                };
+                if (f.ftype.vararg)
+                {
+                    j = f.va_slot;
+                    out.put_str(f"\tmovq %rdi, {j}(%rbp)\n\tmovq %rsi, {j + 8}(%rbp)\n\tmovq %rdx, {j + 16}(%rbp)\n\0");
+                    out.put_str(f"\tmovq %rcx, {j + 24}(%rbp)\n\tmovq %r8, {j + 32}(%rbp)\n\tmovq %r9, {j + 40}(%rbp)\n\0");
+                    k = 0;
+                    while (k < 8)
+                    {
+                        sl = j + 48 + k * 16;
+                        out.put_str(f"\tmovaps %xmm{k}, {sl}(%rbp)\n\0");
+                        k++;
+                    };
+                };
+                i = 0;
+                while (i < f.nargs)
+                {
+                    t = f.ftype.items[i];
+                    if (!lt_is_agg(t) & f.args[i].slot < 0)
+                    {
+                        if (lt_is_fp(t))
+                        {
+                            sl = f.args[i].slot;
+                            if (t.kind == LK.FLOAT) { out.put_str(f"\tmovd %xmm{nfp}, %eax\n\tmovq %rax, {sl}(%rbp)\n\0"); }
+                            else { out.put_str(f"\tmovq %xmm{nfp}, {sl}(%rbp)\n\0"); };
+                            nfp++;
+                        }
+                        else
+                        {
+                            j = this.a_argreg(ngp);
+                            if (t.kind == LK.INT) { this.a_norm_buf(out, j, t.width); };
+                            sl = f.args[i].slot;
+                            out.put_str(f"\tmovq {this.a_reg(j, 8)}, {sl}(%rbp)\n\0");
+                            ngp++;
+                        };
+                    };
+                    i++;
+                };
+                };
+                j = 0;
+                while (j < f.blocks.len)
+                {
+                    bl = (IRBlock*)f.blocks.items[j];
+                    out.put_str(f".LB{bl.id}:\n\0");
+                    k = 0;
+                    while (k < bl.lines.len)
+                    {
+                        line = (byte*)bl.lines.items[k];
+                        if (this.a_seq(line, g"leave\0"))
+                        {
+                            if (this.a_win())
+                            {
+                                out.put_str(f"\tmovq {f.wsave}(%rbp), %rsi\n\tmovq {f.wsave + 8}(%rbp), %rdi\n\0");
+                            };
+                            // restore the callee saved registers the function used
+                            i = 0;
+                            while (i < 5)
+                            {
+                                if ((f.cs_mask `& (1 << i)) != 0)
+                                {
+                                    sl = f.cs[i];
+                                    out.put_str(f"\tmovq {sl}(%rbp), {this.a_reg(9 + i, 8)}\n\0");
+                                };
+                                i++;
+                            };
+                        };
+                        out.put(9);
+                        out.put_str(line);
+                        out.put(10);
+                        k++;
+                    };
+                    j++;
+                };
+                if (!this.a_win())
+                {
+                    out.put_str(g"\t.size \0");
+                    out.put_str(nm);
+                    out.put_str(g", .-\0");
+                    out.put_str(nm);
+                    out.put(10);
+                };
+                ->;
+            };
+
+            a_emit(Buf* out) -> void
+            {
+                int i;
+                out.put_str(g"\t.file \0");
+                put_quoted(out, this.mod_name);
+                out.put(10);
+                while (i < this.funcs.len)
+                {
+                    this.a_put_function(out, (IRFunc*)this.funcs.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.globals.len)
+                {
+                    this.a_put_global(out, (IRGlobal*)this.globals.items[i]);
+                    i++;
+                };
+                out.put_str(this.cdata.mem);
+                if (this.zmax > 0)
+                {
+                    out.put_str(this.a_rodata());
+                    out.put_str(g"\t.p2align 4\n.LZERO:\n\0");
+                    this.a_zero(out, this.zmax);
+                };
+                if (!this.a_win()) { out.put_str(g"\t.section .note.GNU-stack,\"\",@progbits\n\0"); };
+                ->;
+            };
+
+            // ----------------------------------------------------------
+            // Printing
+            // ----------------------------------------------------------
+
+            emit(Buf* out) -> void
+            {
+                this.a_emit(out);
+                ->;
+            };
+
+        };
+
+    };
+};
+
+#endif;

@@ -1,0 +1,512 @@
+// Author: Karac V. Thweatt
+//
+// imodel.idk - backend independent code model shared by every code generator backend
+//
+// Types, values, blocks, functions and globals as the code generator (icodegen.idk) sees
+// them. A backend (i_llvmir.idk for LLVM IR text, ix64.idk for x86_64 assembly) builds and
+// owns these through its builder methods. Fields named as scratch belong to native backends.
+//
+#ifndef IDEKA_STANDARD
+#import <standard.idk>;
+#endif;
+
+#ifndef IDEKA_AST
+#import "iast.idk";
+#endif;
+
+#ifndef IDEKA_TYPES
+#import "itypesys.idk";
+#endif;
+
+#ifndef IDEKA_MODEL
+#def IDEKA_MODEL 1;
+
+// IRValue.flags
+#def VF_FROM_EXPR 1;
+#def VF_TYPEFUNC_STR 2;
+#def VF_ALLOCA 4;
+#def VF_GLOBAL 8;
+
+using IDEKA::ast;
+using IDEKA::preprocessor;
+using IDEKA::types;
+
+namespace IDEKA
+{
+    namespace ir
+    {
+        enum LK
+        {
+            VOID,
+            INT,
+            FLOAT,
+            DOUBLE,
+            PTR,
+            ARRAY,
+            STRUCT,     // literal struct { a, b }
+            ISTRUCT,    // identified struct %"name"
+            FUNC
+        };
+
+        // LLVM type. elem is the return type of a FUNC, the pointee of a PTR and
+        // the element of an ARRAY; items are struct fields or function parameters.
+        struct IRType
+        {
+            int kind, width, count;
+            IRType* elem;
+            IRType** items;
+            int nitems;
+            byte* name;
+            bool vararg, defined;
+        };
+
+        // A value: ty and the operand text (without the type), plus the IDEKA type
+        // the value was derived from when known.
+        struct IRValue
+        {
+            IRType* ty;
+            byte* text;
+            TypeSpec* spec;
+            TypeSpec* espec;    // array element spec carried by a member array pointer
+            int flags;
+            bool is_const;
+            int slot;           // scratch owned by a native code backend (frame offset), unused by the LLVM text backend
+        };
+
+        struct IRBlock
+        {
+            byte* name;
+            PtrVec* lines;
+            bool terminated;
+            int id, term_at;    // scratch owned by a native code backend (label number, first terminator line)
+        };
+
+        struct IRFunc
+        {
+            byte* name;
+            IRType* ftype;
+            IRValue** args;
+            int nargs;
+            PtrVec* blocks;
+            byte* cconv, linkage;
+            PtrVec* attrs;
+            NameMap* names;
+            int counter;
+            bool is_decl;
+            IRValue* self;      // the function as a value (pointer to its type)
+            int frame, sret_slot, cs_mask, va_gp, va_fp, va_stk, va_slot, wsave;   // scratch owned by a native code backend
+            int* cs;
+        };
+
+        struct IRGlobal
+        {
+            byte* name;
+            IRType* ty;
+            byte* init,         // initializer text, null when none
+                  linkage;
+            bool constant;
+            IRValue* self;
+        };
+
+        // ------------------------------------------------------------------
+        // Text helpers
+        // ------------------------------------------------------------------
+
+        put_i64(Buf* b, i64 v) -> void
+        {
+            byte[24] tmp = noinit;
+            int n, k;
+            u64 u;
+            switch (v < (i64)0)
+            {
+                case (true) {
+                b.put(45);
+                u = (u64)0 - (u64)v;
+            }
+                default { u = (u64)v; };
+            };
+            switch (u == (u64)0)
+            {
+                case (true) {
+                -> b.put(48);
+            }
+                default
+                {
+                    while (u > (u64)0)
+                    {
+                        tmp[n] = (byte)((int)(u % (u64)10) + 48);
+                        u = u / (u64)10;
+                        n++;
+                    };
+                    k = n - 1;
+                    while (k >= 0)
+                    {
+                        b.put((int)tmp[k]);
+                        k--;
+                    };
+                    ->;
+                };
+            };
+        };
+
+        put_u64(Buf* b, u64 u) -> void
+        {
+            byte[24] tmp = noinit;
+            int n, k;
+            switch (u == (u64)0)
+            {
+                case (true) {
+                -> b.put(48);
+            }
+                default
+                {
+                    while (u > (u64)0)
+                    {
+                        tmp[n] = (byte)((int)(u % (u64)10) + 48);
+                        u = u / (u64)10;
+                        n++;
+                    };
+                    k = n - 1;
+                    while (k >= 0)
+                    {
+                        b.put((int)tmp[k]);
+                        k--;
+                    };
+                    ->;
+                };
+            };
+        };
+
+        hexdig(int v) -> int
+        {
+            switch (v < 10)
+            {
+                case (true) { -> 48 + v; }
+                default
+                {
+                    -> 65 + v - 10;
+                };
+            };
+        };
+
+        // 0x followed by 16 uppercase hex digits
+        // llvmlite formats float constants with {:#16x}: 0x prefix, no leading
+        // zeros, right justified in 16 columns
+        put_hex64(Buf* b, u64 u) -> void
+        {
+            int nd = 1;
+            int i, d, pad;
+            while (nd < 16)
+            {
+                switch ((u >> (u64)(nd * 4)) == (u64)0)
+                {
+                    case (true) { break; }
+                    default
+                    {
+                        nd++;
+                    };
+                };
+            };
+            pad = 16 - (nd + 2);
+            while (pad > 0)
+            {
+                b.put(32);
+                pad--;
+            };
+            b.put_str(g"0x\0");
+            i = nd - 1;
+            while (i >= 0)
+            {
+                d = (int)((u >> (u64)(i * 4)) `& (u64)15);
+                switch (d < 10)
+                {
+                    case (true) { b.put(48 + d); }
+                    default { b.put(87 + d); };
+                };
+                i--;
+            };
+            ->;
+        };
+
+        // "name" with the characters llvmlite escapes
+        put_quoted(Buf* b, byte* s) -> void
+        {
+            int i, c;
+            b.put(34);
+            while (s[i]!?)
+            {
+                c = (int)s[i];
+                switch (c < 32 | c > 126 | c == 34 | c == 92)
+                {
+                    case (true) {
+                    b.put(92);
+                    b.put(hexdig(c / 16));
+                    b.put(hexdig(c % 16));
+                }
+                    default { b.put(c); };
+                };
+                i++;
+            };
+            -> b.put(34);
+        };
+
+        // Block label line: name followed by a colon
+        put_quoted_label(Buf* out, byte* name) -> void
+        {
+            int i;
+            bool plain = true;
+            int c;
+            while (name[i]!?)
+            {
+                c = (int)name[i];
+                switch (!((c >= 48 & c <= 57) | (c >= 65 & c <= 90) | (c >= 97 & c <= 122) | c == 95 | c == 46 | c == 36 | c == 45))
+                {
+                    case (true) {
+                    plain = false;
+                }
+                    default {};
+                };
+                i++;
+            };
+            switch (plain)
+            {
+                case (true) { out.put_str(name); }
+                default { put_quoted(out, name); };
+            };
+            -> out.put_str(g":\n\0");
+        };
+
+        // ------------------------------------------------------------------
+        // Types
+        // ------------------------------------------------------------------
+
+        lt_text(Buf* b, IRType* t) -> void
+        {
+            int i;
+            int k = t.kind;
+            switch (k == LK.VOID)
+            {
+                case (true) { -> b.put_str(g"void\0"); }
+                default
+                {
+                    switch (k == LK.INT)
+                    {
+                        case (true) {
+                        b.put(105);
+                        -> b.put_int(t.width);
+                    }
+                        default
+                        {
+                            switch (k == LK.FLOAT)
+                            {
+                                case (true) { -> b.put_str(g"float\0"); }
+                                default
+                                {
+                                    switch (k == LK.DOUBLE)
+                                    {
+                                        case (true) { -> b.put_str(g"double\0"); }
+                                        default
+                                        {
+                                            switch (k == LK.PTR)
+                                            {
+                                                case (true) {
+                                                lt_text(b, t.elem);
+                                                -> b.put(42);
+                                            }
+                                                default
+                                                {
+                                                    switch (k == LK.ARRAY)
+                                                    {
+                                                        case (true) {
+                                                        b.put(91);
+                                                        b.put_str(f"{t.count} x \0");
+                                                        lt_text(b, t.elem);
+                                                        -> b.put(93);
+                                                    }
+                                                        default
+                                                        {
+                                                            switch (k == LK.STRUCT)
+                                                            {
+                                                                case (true) {
+                                                                b.put_str(g"{\0");
+                                                                while (i < t.nitems)
+                                                                {
+                                                                    switch (i > 0)
+                                                                    {
+                                                                        case (true) { b.put_str(g", \0"); }
+                                                                        default {};
+                                                                    };
+                                                                    lt_text(b, t.items[i]);
+                                                                    i++;
+                                                                };
+                                                                -> b.put_str(g"}\0");
+                                                            }
+                                                                default
+                                                                {
+                                                                    switch (k == LK.ISTRUCT)
+                                                                    {
+                                                                        case (true) {
+                                                                        b.put(37);
+                                                                        -> put_quoted(b, t.name);
+                                                                    }
+                                                                        default
+                                                                        {
+                                                                            // FUNC
+                                                                            lt_text(b, t.elem);
+                                                                            b.put_str(g" (\0");
+                                                                            while (i < t.nitems)
+                                                                            {
+                                                                                switch (i > 0)
+                                                                                {
+                                                                                    case (true) { b.put_str(g", \0"); }
+                                                                                    default {};
+                                                                                };
+                                                                                lt_text(b, t.items[i]);
+                                                                                i++;
+                                                                            };
+                                                                            switch (t.vararg)
+                                                                            {
+                                                                                case (true) {
+                                                                                switch (t.nitems > 0)
+                                                                                {
+                                                                                    case (true) { b.put_str(g", \0"); }
+                                                                                    default {};
+                                                                                };
+                                                                                b.put_str(g"...\0");
+                                                                            }
+                                                                                default {};
+                                                                            };
+                                                                            -> b.put(41);
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+
+        lt_eq(IRType* a, IRType* b) -> bool
+        {
+            int i;
+            switch (a == b)
+            {
+                case (true) { -> true; }
+                default
+                {
+                    switch (a == (IRType*)0 | b == (IRType*)0)
+                    {
+                        case (true) { -> false; }
+                        default
+                        {
+                            switch (a.kind != b.kind)
+                            {
+                                case (true) { -> false; }
+                                default
+                                {
+                                    int k = a.kind;
+                                    switch (k == LK.VOID | k == LK.FLOAT | k == LK.DOUBLE)
+                                    {
+                                        case (true) { -> true; }
+                                        default
+                                        {
+                                            switch (k == LK.INT)
+                                            {
+                                                case (true) { -> a.width == b.width; }
+                                                default
+                                                {
+                                                    switch (k == LK.PTR)
+                                                    {
+                                                        case (true) { -> lt_eq(a.elem, b.elem); }
+                                                        default
+                                                        {
+                                                            switch (k == LK.ARRAY)
+                                                            {
+                                                                case (true) {
+                                                                switch (a.count != b.count)
+                                                                {
+                                                                    case (true) { -> false; }
+                                                                    default {};
+                                                                };
+                                                                -> lt_eq(a.elem, b.elem);
+                                                            }
+                                                                default
+                                                                {
+                                                                    switch (k == LK.ISTRUCT)
+                                                                    {
+                                                                        case (true) { -> cstr_eq(a.name, b.name); }
+                                                                        default
+                                                                        {
+                                                                            switch (a.nitems != b.nitems)
+                                                                            {
+                                                                                case (true) { -> false; }
+                                                                                default
+                                                                                {
+                                                                                    switch (k == LK.FUNC)
+                                                                                    {
+                                                                                        case (true) {
+                                                                                        switch (a.vararg != b.vararg)
+                                                                                        {
+                                                                                            case (true) { -> false; }
+                                                                                            default
+                                                                                            {
+                                                                                                switch (!lt_eq(a.elem, b.elem))
+                                                                                                {
+                                                                                                    case (true) { -> false; }
+                                                                                                    default {};
+                                                                                                };
+                                                                                            };
+                                                                                        };
+                                                                                    }
+                                                                                        default {};
+                                                                                    };
+                                                                                    while (i < a.nitems)
+                                                                                    {
+                                                                                        switch (!lt_eq(a.items[i], b.items[i]))
+                                                                                        {
+                                                                                            case (true) { -> false; }
+                                                                                            default
+                                                                                            {
+                                                                                                i++;
+                                                                                            };
+                                                                                        };
+                                                                                    };
+                                                                                    -> true;
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+
+        lt_is_int(IRType* t) -> bool -> t.kind == LK.INT;
+        lt_is_ptr(IRType* t) -> bool -> t.kind == LK.PTR;
+        lt_is_fp(IRType* t) -> bool -> t.kind == LK.FLOAT | t.kind == LK.DOUBLE;
+        lt_is_agg(IRType* t) -> bool -> t.kind == LK.ARRAY | t.kind == LK.STRUCT | t.kind == LK.ISTRUCT;
+
+    };
+};
+
+#endif;

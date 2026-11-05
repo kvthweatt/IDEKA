@@ -1,0 +1,3048 @@
+// Author: Karac V. Thweatt
+//
+// iasm_core.idk - IDEKA x86-64 assembler core: sections, symbols, directives, layout
+//
+// Library, no main. It builds on the instruction encoder of iasm.idk. The object file
+// writers are in iasm_elf.idk.
+//
+// Usage:
+//
+//     #import "src/compiler/iasm_core.idk";
+//     using IDEKA::iasm;
+//
+//     Asm* a = iasm_new();
+//     iasm_assemble(a, text, len);        // false on error, a.err and a.line tell where
+//     iasm_finish(a);                     // layout, branch relaxation, fixups
+//     ... iasm_write_elf(a, "out.o");
+//
+// Layout model: a section is a list of items. BYTES items hold instruction and data bytes,
+// ALIGN items pad, ZERO items reserve space, BRANCH items are jmp and jcc whose size is
+// decided by relaxation (short form first, long form when the target does not fit).
+
+#ifndef IDEKA_IASM
+#import "src/compiler/iasm.idk";
+#endif;
+
+#ifndef IDEKA_IASM_CORE
+#def IDEKA_IASM_CORE 1;
+
+// ===== ITEM KINDS =====
+
+#def IA_IT_BYTES 0;
+#def IA_IT_ALIGN 1;
+#def IA_IT_ZERO 2;
+#def IA_IT_BRANCH 3;
+
+// ===== SECTION FLAGS (ELF) =====
+
+#def IA_SHF_WRITE 1;
+#def IA_SHF_ALLOC 2;
+#def IA_SHF_EXEC 4;
+#def IA_SHF_MERGE 16;
+#def IA_SHF_STRINGS 32;
+#def IA_SHF_TLS 1024;
+
+#def IA_SHT_PROGBITS 1;
+#def IA_SHT_NOBITS 8;
+#def IA_SHT_NOTE 7;
+#def IA_SHT_X86_64_UNWIND 0x70000001;
+
+// ===== OBJECT FORMATS =====
+
+#def IA_FMT_ELF 0;
+#def IA_FMT_COFF 1;
+
+// ===== COFF SECTION CHARACTERISTICS =====
+
+#def IA_COFF_CODE 0x20;
+#def IA_COFF_IDATA 0x40;
+#def IA_COFF_UDATA 0x80;
+#def IA_COFF_COMDAT 0x1000;
+#def IA_COFF_REMOVE 0x800;
+#def IA_COFF_INFO 0x200;
+#def IA_SF_ALLOC 1;
+#def IA_SF_CODE 2;
+#def IA_SF_LOAD 4;
+#def IA_SF_INITDATA 8;
+#def IA_SF_SHARED 16;
+#def IA_SF_NOLOAD 32;
+#def IA_SF_NOREAD 64;
+#def IA_SF_NOWRITE 128;
+#def IA_SF_DISCARD 256;
+#def IA_SF_INFO 512;
+#def IA_COFF_DISCARD 0x02000000;
+#def IA_COFF_SHARED 0x10000000;
+#def IA_COFF_EXEC 0x20000000;
+#def IA_COFF_READ 0x40000000;
+#def IA_COFF_WRITE 0x80000000;
+
+// ===== SEH OPERATION KINDS =====
+
+#def IA_SEH_PUSHREG 1;
+#def IA_SEH_STACKALLOC 2;
+#def IA_SEH_SETFRAME 3;
+#def IA_SEH_SAVEXMM 4;
+#def IA_SEH_SAVEREG 5;
+#def IA_SEH_PUSHFRAME 6;
+
+// ===== CFI OPERATION KINDS =====
+
+#def IA_CFI_DEF_CFA_OFFSET 1;
+#def IA_CFI_OFFSET 2;
+#def IA_CFI_DEF_CFA 3;
+#def IA_CFI_DEF_CFA_REGISTER 4;
+#def IA_CFI_RESTORE 5;
+#def IA_CFI_REMEMBER 6;
+#def IA_CFI_RESTORE_STATE 7;
+
+// ===== SYMBOL BINDING, TYPE, KIND =====
+
+#def IA_SB_LOCAL 0;
+#def IA_SB_GLOBAL 1;
+#def IA_SB_WEAK 2;
+
+#def IA_ST_NONE 0;
+#def IA_ST_OBJECT 1;
+#def IA_ST_FUNC 2;
+#def IA_ST_SECTION 3;
+#def IA_ST_TLS 6;
+
+#def IA_SK_NORMAL 0;
+#def IA_SK_COMMON 1;
+#def IA_SK_ABS 2;
+
+// ===== FIXUP KINDS ADDED HERE =====
+
+#def IA_FX_DIFF 12;
+#def IA_FX_PCDATA 13;
+#def IA_FX_IMGREL 14;
+#def IA_FX_SECREL 15;
+#def IA_FX_SECIDX 16;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        struct Item
+        {
+            int kind, off, len, a, b, c, sym;
+            i64 add, pos;
+        };
+
+        struct FixRec
+        {
+            int item, delta, kind, sym, sym2;
+            i64 add;
+            int size;
+        };
+
+        struct Reloc
+        {
+            i64 off;
+            int type, sym;
+            i64 add;
+        };
+
+        struct ISym
+        {
+            byte* name;
+            int sec, item, delta;
+            i64 val;
+            int bind, type;
+            i64 size;
+            int se_a, se_b;
+            i64 se_c;
+            bool has_se, defined, temp, used, declared;
+            int align, kind, vis, cscl, ctype;
+            i64 pos;
+            int outidx, hnext;
+        };
+
+        struct Sect
+        {
+            byte* name;
+            int stype;
+            i64 flags, entsize;
+            int align;
+            byte* d;
+            int dlen, dcap;
+            Item* items;
+            int nitems, icap;
+            FixRec* fx;
+            int nfx, fcap;
+            Reloc* rel;
+            int nrel, rcap;
+            i64 size;
+            byte* out;
+            bool code;
+            int secsym, symseq, elf_index, rela_index;
+            byte* cname;
+            int sel, assoc, lsym;
+        };
+
+        // One call frame instruction and the section position it applies at
+        struct CfiOp
+        {
+            int kind, reg;
+            i64 val;
+            int item, delta;
+        };
+
+        // One procedure between .cfi_startproc and .cfi_endproc
+        struct CfiFrame
+        {
+            int sec, sitem, sdelta, eitem, edelta, first, count;
+        };
+
+        // One Windows x64 unwind operation and the section position it applies at
+        struct SehOp
+        {
+            int kind, reg;
+            i64 val;
+            int item, delta;
+        };
+
+        // One procedure between .seh_proc and .seh_endproc
+        struct SehFrame
+        {
+            int sec, sitem, sdelta, eitem, edelta, pitem, pdelta, first, count;
+            bool prolog;
+            int xsec;
+        };
+
+        // A growing byte buffer for the .eh_frame bytes
+        struct Cbuf
+        {
+            byte* d;
+            int n, cap;
+        };
+
+        struct Asm
+        {
+            IasmCtx* cx;
+            Sect[4096] secs;
+            int nsec, cur;
+            ISym* syms;
+            int nsyms, scap;
+            int[8192] shash;
+            byte* file, err;
+            int line, anon;
+            bool finished;
+            CfiOp* cops;
+            int ncop, copcap;
+            CfiFrame* frs;
+            int nfr, frcap;
+            bool inframe;
+            int cfa;
+            int[16] cstack;
+            int csp, fmt, defsym;
+            SehFrame* sfr;
+            int nsfr, sfrcap;
+            SehOp* sop;
+            int nsop, sopcap;
+            bool inseh;
+            int xdsec;
+        };
+
+        // ===== SYMBOLS =====
+
+        as_sym_new(Asm* a, byte* name, int n) -> int
+        {
+            int h = 0;
+            int i = 0;
+            ISym* s;
+            if (a.nsyms >= a.scap)
+            {
+                a.scap = a.scap * 2;
+                if (a.scap < 256) { a.scap = 256; };
+                a.syms = (ISym*)ia_grow((byte*)a.syms, a.scap * sizeof(ISym));
+            };
+            i = a.nsyms;
+            a.nsyms++;
+            s = @a.syms[i];
+            s.name = ia_dup(name, n);
+            s.sec = -1;
+            s.item = 0;
+            s.delta = 0;
+            s.val = 0;
+            s.bind = IA_SB_LOCAL;
+            s.type = IA_ST_NONE;
+            s.size = 0;
+            s.se_a = -1;
+            s.se_b = -1;
+            s.se_c = 0;
+            s.has_se = false;
+            s.defined = false;
+            s.temp = n >= 2 & name[0] == '.' & name[1] == 'L';
+            s.used = false;
+            s.declared = false;
+            s.align = 0;
+            s.kind = IA_SK_NORMAL;
+            s.vis = 0;
+            s.cscl = -1;
+            s.ctype = -1;
+            s.pos = 0;
+            s.outidx = -1;
+            h = ia_hash(name, n) % 8192;
+            s.hnext = a.shash[h] - 1;
+            a.shash[h] = i + 1;
+            -> i;
+        };
+
+        as_sym_find(Asm* a, byte* name, int n) -> int
+        {
+            int h = ia_hash(name, n) % 8192;
+            int i = a.shash[h] - 1;
+            while (i >= 0)
+            {
+                if (ia_eqn(name, n, a.syms[i].name)) { -> i; };
+                i = a.syms[i].hnext;
+            };
+            -> -1;
+        };
+
+        as_sym_get(Asm* a, byte* name, int n) -> int
+        {
+            int i = as_sym_find(a, name, n);
+            if (i >= 0) { -> i; };
+            -> as_sym_new(a, name, n);
+        };
+
+        // A symbol named in a directive argument, which may be quoted
+        as_sym_arg(Asm* a, byte* s, int n) -> int
+        {
+            if (n >= 2 & s[0] == '"') { -> as_sym_get(a, s + 1, n - 2); };
+            -> as_sym_get(a, s, n);
+        };
+
+        // A symbol with no name, for the location counter and local expressions
+        as_sym_anon(Asm* a) -> int
+        {
+            int i = 0;
+            ISym* s;
+            if (a.nsyms >= a.scap)
+            {
+                a.scap = a.scap * 2;
+                if (a.scap < 256) { a.scap = 256; };
+                a.syms = (ISym*)ia_grow((byte*)a.syms, a.scap * sizeof(ISym));
+            };
+            i = a.nsyms;
+            a.nsyms++;
+            s = @a.syms[i];
+            s.name = ia_dup("\0", 0);
+            s.sec = -1;
+            s.item = 0;
+            s.delta = 0;
+            s.val = 0;
+            s.bind = IA_SB_LOCAL;
+            s.type = IA_ST_NONE;
+            s.size = 0;
+            s.se_a = -1;
+            s.se_b = -1;
+            s.se_c = 0;
+            s.has_se = false;
+            s.defined = false;
+            s.temp = true;
+            s.used = false;
+            s.declared = false;
+            s.align = 0;
+            s.kind = IA_SK_NORMAL;
+            s.vis = 0;
+            s.cscl = -1;
+            s.ctype = -1;
+            s.pos = 0;
+            s.outidx = -1;
+            s.hnext = -1;
+            -> i;
+        };
+
+        // ===== SECTIONS =====
+
+        as_sect_init(Sect* s, byte* name, int stype, i64 flags, i64 entsize) -> void
+        {
+            s.name = ia_dup(name, ia_strlen(name));
+            s.stype = stype;
+            s.flags = flags;
+            s.entsize = entsize;
+            s.align = 1;
+            s.d = (byte*)0;
+            s.dlen = 0;
+            s.dcap = 0;
+            s.items = (Item*)0;
+            s.nitems = 0;
+            s.icap = 0;
+            s.fx = (FixRec*)0;
+            s.nfx = 0;
+            s.fcap = 0;
+            s.rel = (Reloc*)0;
+            s.nrel = 0;
+            s.rcap = 0;
+            s.size = 0;
+            s.out = (byte*)0;
+            s.code = (flags `& IA_SHF_EXEC) != 0;
+            s.secsym = -1;
+            s.symseq = 0;
+            s.elf_index = 0;
+            s.rela_index = 0;
+            s.cname = (byte*)0;
+            s.sel = 0;
+            s.assoc = -1;
+            s.lsym = -1;
+            ->;
+        };
+
+        // A COFF COMDAT section is told apart from the others by its leader symbol name.
+        as_section_c(Asm* a, byte* name, int stype, i64 flags, i64 entsize, bool explicit, byte* cname, int sel, int assoc) -> int
+        {
+            int i = 0;
+            bool same;
+            int lim = 64;
+            if (a.fmt == IA_FMT_COFF) { lim = 4096; };
+            while (i < a.nsec)
+            {
+                if (ia_streq(a.secs[i].name, name))
+                {
+                    same = (a.secs[i].cname == 0 & cname == 0);
+                    if (a.secs[i].cname != 0 & cname != 0)
+                    {
+                        same = ia_streq(a.secs[i].cname, cname);
+                    };
+                    if (same) { -> i; };
+                };
+                i++;
+            };
+            if (a.nsec >= lim) { -> -1; };
+            i = a.nsec;
+            a.nsec++;
+            as_sect_init(@a.secs[i], name, stype, flags, entsize);
+            if (cname != 0) { a.secs[i].cname = ia_dup(cname, ia_strlen(cname)); };
+            a.secs[i].sel = sel;
+            a.secs[i].assoc = assoc;
+            a.secs[i].symseq = a.nsyms;
+            // the standard .text section is created with an alignment of 4
+            if (ia_streq(name, ".text\0") & cname == 0) { a.secs[i].align = 4; };
+            -> i;
+        };
+
+        // Finds or creates a section by name. Defaults depend on the name.
+        as_section(Asm* a, byte* name, int stype, i64 flags, i64 entsize, bool explicit) -> int
+        {
+            -> as_section_c(a, name, stype, flags, entsize, explicit, (byte*)0, 0, -1);
+        };
+
+        // The standard sections by name when no flags are given
+        as_std_section(Asm* a, byte* name) -> int
+        {
+            if (ia_streq(name, ".text\0")) { -> as_section(a, name, IA_SHT_PROGBITS, 6, 0, false); };
+            if (ia_streq(name, ".data\0")) { -> as_section(a, name, IA_SHT_PROGBITS, 3, 0, false); };
+            if (ia_streq(name, ".bss\0")) { -> as_section(a, name, IA_SHT_NOBITS, 3, 0, false); };
+            if (ia_streq(name, ".rodata\0")) { -> as_section(a, name, IA_SHT_PROGBITS, 2, 0, false); };
+            -> as_section(a, name, IA_SHT_PROGBITS, 0, 0, false);
+        };
+
+        as_item_add(Sect* s) -> int
+        {
+            int i = 0;
+            if (s.nitems >= s.icap)
+            {
+                s.icap = s.icap * 2;
+                if (s.icap < 16) { s.icap = 16; };
+                s.items = (Item*)ia_grow((byte*)s.items, s.icap * sizeof(Item));
+            };
+            i = s.nitems;
+            s.nitems++;
+            s.items[i].kind = IA_IT_BYTES;
+            s.items[i].off = 0;
+            s.items[i].len = 0;
+            s.items[i].a = 0;
+            s.items[i].b = 0;
+            s.items[i].c = 0;
+            s.items[i].sym = -1;
+            s.items[i].add = 0;
+            s.items[i].pos = 0;
+            -> i;
+        };
+
+        as_fix_add(Sect* s, int item, int delta, int kind, int sym, int sym2, i64 add, int size) -> void
+        {
+            int i = 0;
+            if (s.nfx >= s.fcap)
+            {
+                s.fcap = s.fcap * 2;
+                if (s.fcap < 16) { s.fcap = 16; };
+                s.fx = (FixRec*)ia_grow((byte*)s.fx, s.fcap * sizeof(FixRec));
+            };
+            i = s.nfx;
+            s.nfx++;
+            s.fx[i].item = item;
+            s.fx[i].delta = delta;
+            s.fx[i].kind = kind;
+            s.fx[i].sym = sym;
+            s.fx[i].sym2 = sym2;
+            s.fx[i].add = add;
+            s.fx[i].size = size;
+            ->;
+        };
+
+        as_rel_add(Sect* s, i64 off, int type, int sym, i64 add) -> void
+        {
+            int i = 0;
+            if (s.nrel >= s.rcap)
+            {
+                s.rcap = s.rcap * 2;
+                if (s.rcap < 16) { s.rcap = 16; };
+                s.rel = (Reloc*)ia_grow((byte*)s.rel, s.rcap * sizeof(Reloc));
+            };
+            i = s.nrel;
+            s.nrel++;
+            s.rel[i].off = off;
+            s.rel[i].type = type;
+            s.rel[i].sym = sym;
+            s.rel[i].add = add;
+            ->;
+        };
+
+        // Appends bytes to the current section, merging into the open BYTES item
+        as_emit(Asm* a, byte* p, int n) -> bool
+        {
+            Sect* s = @a.secs[a.cur];
+            int start = s.dlen;
+            int i = 0;
+            int li = 0;
+            if (s.stype == IA_SHT_NOBITS)
+            {
+                if (a.fmt != IA_FMT_COFF) { a.err = g"bytes in a NOBITS section\0"; -> false; };
+                // COFF keeps the size of data in a bss section and drops the bytes
+                li = as_item_add(s);
+                s.items[li].kind = IA_IT_ZERO;
+                s.items[li].len = n;
+                -> true;
+            };
+            if (s.dlen + n + 1 > s.dcap)
+            {
+                s.dcap = s.dcap * 2;
+                if (s.dcap < 256) { s.dcap = 256; };
+                while (s.dcap < s.dlen + n + 1) { s.dcap = s.dcap * 2; };
+                s.d = ia_grow(s.d, s.dcap);
+            };
+            i = 0;
+            while (i < n) { s.d[start + i] = p[i]; i++; };
+            s.dlen = start + n;
+            li = s.nitems - 1;
+            if (li >= 0 & s.items[li].kind == IA_IT_BYTES & s.items[li].off + s.items[li].len == start)
+            {
+                s.items[li].len = s.items[li].len + n;
+            }
+            else
+            {
+                li = as_item_add(s);
+                s.items[li].kind = IA_IT_BYTES;
+                s.items[li].off = start;
+                s.items[li].len = n;
+            };
+            -> true;
+        };
+
+        // The position for a label: item index and offset into that item
+        as_here(Asm* a, int* item, int* delta) -> void
+        {
+            Sect* s = @a.secs[a.cur];
+            int li = s.nitems - 1;
+            if (li >= 0 & s.items[li].kind == IA_IT_BYTES)
+            {
+                *item = li;
+                *delta = s.items[li].len;
+            }
+            else
+            {
+                *item = s.nitems;
+                *delta = 0;
+            };
+            ->;
+        };
+
+        // Absolute section offset of an item/delta position
+        as_pos_of(Sect* s, int item, int delta) -> i64
+        {
+            if (item < s.nitems) { -> s.items[item].pos + delta; };
+            -> s.size + delta;
+        };
+
+        // Section offset of a defined symbol. Valid after layout.
+        as_sym_pos(Asm* a, int si) -> i64
+        {
+            ISym* s = @a.syms[si];
+            if (s.sec < 0) { -> s.val; };
+            -> as_pos_of(@a.secs[s.sec], s.item, s.delta);
+        };
+
+        as_define(Asm* a, int si) -> bool
+        {
+            ISym* s = @a.syms[si];
+            int it, dl;
+            if (s.defined) { a.err = g"symbol redefined\0"; -> false; };
+            as_here(a, @it, @dl);
+            s.defined = true;
+            s.sec = a.cur;
+            s.item = it;
+            s.delta = dl;
+            -> true;
+        };
+
+        // ===== EXPRESSIONS: [pos_sym] - [neg_sym] + add =====
+
+        struct Expr
+        {
+            int pos = 0;
+            int neg;
+            i64 add;
+            int mod;              // 1 @IMGREL, 2 @SECREL32, 3 section index (.secidx)
+            bool ok = false;
+        };
+
+        // Does s[i] start a COFF symbol modifier? Returns its mod value and sets *len, or 0.
+        as_at_mod(byte* s, int i, int n, int* len) -> int
+        {
+            int k = 0;
+            int j = 0;
+            byte* t1 = g"IMGREL\0";
+            byte* t2 = g"SECREL32\0";
+            if (i >= n | s[i] != '@') { -> 0; };
+            // compare case-insensitively against IMGREL and SECREL32
+            k = 0;
+            while (k < 6 & i + 1 + k < n)
+            {
+                j = s[i + 1 + k];
+                if (j >= 'a' & j <= 'z') { j = j - 32; };
+                if (j != t1[k]) { break; };
+                k++;
+            };
+            if (k == 6) { *len = 7; -> 1; };
+            k = 0;
+            while (k < 8 & i + 1 + k < n)
+            {
+                j = s[i + 1 + k];
+                if (j >= 'a' & j <= 'z') { j = j - 32; };
+                if (j != t2[k]) { break; };
+                k++;
+            };
+            if (k == 8) { *len = 9; -> 2; };
+            -> 0;
+        };
+
+        // Parses the expression in s[0, n). The location counter becomes an anonymous symbol.
+        as_parse_expr(Asm* a, byte* s, int n, Expr* e) -> bool
+        {
+            int i = 0;
+            int sign = 1;
+            int st = 0;
+            int k = 0;
+            int si = 0;
+            int ml = 0;
+            int mk = 0;
+            i64 v;
+            e.pos = -1;
+            e.neg = -1;
+            e.add = 0;
+            e.mod = 0;
+            e.ok = true;
+            while (i < n & (s[i] == 32 | s[i] == 9)) { i++; };
+            while (i < n)
+            {
+                while (i < n & (s[i] == 32 | s[i] == 9)) { i++; };
+                if (i >= n) { break; };
+                if (s[i] == '+') { sign = 1; i++; continue; };
+                if (s[i] == '-') { sign = 0 - 1; i++; continue; };
+                if (ia_isdig(s[i]))
+                {
+                    k = ia_parse_int(s, i, n, @v);
+                    if (k < 0) { -> false; };
+                    if (sign < 0) { v = (0 - v); };
+                    e.add = (e.add + v);
+                    i = k;
+                    sign = 1;
+                    continue;
+                };
+                // symbol, quoted symbol, or the location counter
+                st = i;
+                if (s[i] == '"')
+                {
+                    i++;
+                    st = i;
+                    while (i < n & s[i] != '"') { i++; };
+                    si = as_sym_get(a, s + st, i - st);
+                    i++;
+                }
+                else
+                {
+                    if (s[i] == '.' & (i + 1 >= n | !ia_issym(s[i + 1])))
+                    {
+                        si = as_sym_anon(a);
+                        as_define(a, si);
+                        i++;
+                    }
+                    else
+                    {
+                        while (i < n & ia_issym(s[i])) { i++; };
+                        if (i == st) { -> false; };
+                        k = i - st;
+                        ml = 0;
+                        mk = as_at_mod(s, i, n, @ml);
+                        if (mk > 0)
+                        {
+                            e.mod = mk;
+                            i = i + ml;
+                        };
+                        si = as_sym_get(a, s + st, k);
+                    };
+                };
+                if (sign > 0)
+                {
+                    if (e.pos >= 0) { -> false; };
+                    e.pos = si;
+                }
+                else
+                {
+                    if (e.neg >= 0) { -> false; };
+                    e.neg = si;
+                };
+                sign = 1;
+            };
+            -> true;
+        };
+
+        // ===== EMITTING DATA =====
+
+        // One data value of size bytes (1, 2, 4 or 8) from an expression
+        as_emit_value(Asm* a, Expr* e, int size) -> bool
+        {
+            Sect* s = @a.secs[a.cur];
+            byte[8] b;
+            int k = 0;
+            int li = 0;
+            int start;
+            i64 v = e.add;
+            int kind;
+            if (e.pos < 0 & e.neg < 0)
+            {
+                k = 0;
+                while (k < size) { b[k] = ((v >> (8 * k)) `& 255); k++; };
+                -> as_emit(a, (byte*)b, size);
+            };
+            // symbolic: emit zeros and a fixup
+            k = 0;
+            while (k < size) { b[k] = 0; k++; };
+            start = s.dlen;
+            if (!as_emit(a, (byte*)b, size)) { -> false; };
+            li = s.nitems - 1;
+            kind = IA_FX_DIFF;
+            if (e.neg < 0)
+            {
+                if (size == 8) { kind = IA_FX_ABS64; };
+                if (size == 4) { kind = IA_FX_ABS32; };
+                if (size == 2) { kind = IA_FX_ABS16; };
+                if (size == 1) { kind = IA_FX_ABS8; };
+            };
+            if (e.pos < 0) { a.err = g"unsupported expression\0"; -> false; };
+            if (e.mod != 0)
+            {
+                if (a.fmt != IA_FMT_COFF | e.neg >= 0) { a.err = g"a COFF symbol modifier needs COFF output and no symbol difference\0"; -> false; };
+                if (e.mod == 3)
+                {
+                    if (size != 2 | e.add != 0) { a.err = g"a section index is a plain 16 bit symbol reference\0"; -> false; };
+                    kind = IA_FX_SECIDX;
+                }
+                else
+                {
+                    if (size != 4) { a.err = g"@IMGREL and @SECREL32 need a 32 bit value in COFF output\0"; -> false; };
+                    kind = IA_FX_IMGREL;
+                    if (e.mod == 2) { kind = IA_FX_SECREL; };
+                };
+            };
+            as_fix_add(s, li, start - s.items[li].off, kind, e.pos, e.neg, e.add, size);
+            -> true;
+        };
+
+        // ===== PARSING HELPERS =====
+
+        as_skip_ws(byte* s, int i, int n) -> int
+        {
+            while (i < n & (s[i] == 32 | s[i] == 9)) { i++; };
+            -> i;
+        };
+
+        // Splits s[0, n) at top level commas; calls back through arrays of start and end
+        as_split(byte* s, int n, int* st, int* en, int max) -> int
+        {
+            int i = 0;
+            int cnt = 0;
+            int b = 0;
+            int e;
+            int depth = 0;
+            bool inq = false;
+            while (i <= n)
+            {
+                if (i < n & s[i] == '"' & (i == 0 | s[i - 1] != '\\')) { inq = !inq; };
+                if (i < n & !inq & s[i] == '(') { depth++; };
+                if (i < n & !inq & s[i] == ')') { depth--; };
+                if (i == n | (!inq & depth == 0 & s[i] == ','))
+                {
+                    e = i;
+                    while (b < e & (s[b] == 32 | s[b] == 9)) { b++; };
+                    while (e > b & (s[e - 1] == 32 | s[e - 1] == 9)) { e--; };
+                    if (cnt < max)
+                    {
+                        st[cnt] = b;
+                        en[cnt] = e;
+                        cnt++;
+                    };
+                    b = i + 1;
+                };
+                i++;
+            };
+            -> cnt;
+        };
+
+        // Parses the integer expression s[0, n); constants only
+        as_const(Asm* a, byte* s, int n, i64* out) -> bool
+        {
+            Expr e;
+            if (!as_parse_expr(a, s, n, @e)) { -> false; };
+            if (e.pos >= 0 | e.neg >= 0) { -> false; };
+            *out = e.add;
+            -> true;
+        };
+
+        // Decodes a quoted string at s[0, n) into dst, returns its length or -1
+        as_unquote(byte* s, int n, byte* dst) -> int
+        {
+            int i = 1;
+            int k = 0;
+            int c, d;
+            int cnt = 0;
+            if (n < 2 | s[0] != '"') { -> -1; };
+            while (i < n - 1)
+            {
+                c = s[i];
+                if (c == '\\' & i + 1 < n - 1)
+                {
+                    i++;
+                    c = s[i];
+                    if (c == 'n') { dst[k] = 10; k++; i++; continue; };
+                    if (c == 't') { dst[k] = 9; k++; i++; continue; };
+                    if (c == 'r') { dst[k] = 13; k++; i++; continue; };
+                    if (c == 'b') { dst[k] = 8; k++; i++; continue; };
+                    if (c == 'f') { dst[k] = 12; k++; i++; continue; };
+                    if (c == '\\') { dst[k] = 92; k++; i++; continue; };
+                    if (c == '"') { dst[k] = 34; k++; i++; continue; };
+                    if (c == 'x')
+                    {
+                        i++;
+                        d = 0;
+                        cnt = 0;
+                        while (i < n - 1 & cnt < 2 & ia_hexval(s[i]) >= 0)
+                        {
+                            d = d * 16 + ia_hexval(s[i]);
+                            i++;
+                            cnt++;
+                        };
+                        dst[k] = d;
+                        k++;
+                        continue;
+                    };
+                    if (c >= '0' & c <= '7')
+                    {
+                        d = 0;
+                        cnt = 0;
+                        while (i < n - 1 & cnt < 3 & s[i] >= '0' & s[i] <= '7')
+                        {
+                            d = d * 8 + (s[i] - 48);
+                            i++;
+                            cnt++;
+                        };
+                        dst[k] = (d `& 255);
+                        k++;
+                        continue;
+                    };
+                    dst[k] = c;
+                    k++;
+                    i++;
+                    continue;
+                };
+                dst[k] = c;
+                k++;
+                i++;
+            };
+            -> k;
+        };
+
+        // ===== DIRECTIVES =====
+
+        as_nop_bytes(int n, byte* out) -> void
+        {
+            int i = 0;
+            int extra;
+            if (n == 1) { out[0] = 0x90; ->; };
+            if (n == 2) { out[0] = 0x66; out[1] = 0x90; ->; };
+            if (n == 3) { out[0] = 0x0F; out[1] = 0x1F; out[2] = 0x00; ->; };
+            if (n == 4) { out[0] = 0x0F; out[1] = 0x1F; out[2] = 0x40; out[3] = 0x00; ->; };
+            if (n == 5) { out[0] = 0x0F; out[1] = 0x1F; out[2] = 0x44; out[3] = 0x00; out[4] = 0x00; ->; };
+            if (n == 6)
+            {
+                out[0] = 0x66; out[1] = 0x0F; out[2] = 0x1F; out[3] = 0x44; out[4] = 0x00; out[5] = 0x00;
+                ->;
+            };
+            if (n == 7)
+            {
+                out[0] = 0x0F; out[1] = 0x1F; out[2] = 0x80;
+                i = 3;
+                while (i < 7) { out[i] = 0; i++; };
+                ->;
+            };
+            if (n == 8)
+            {
+                out[0] = 0x0F; out[1] = 0x1F; out[2] = 0x84;
+                i = 3;
+                while (i < 8) { out[i] = 0; i++; };
+                ->;
+            };
+            if (n == 9)
+            {
+                out[0] = 0x66; out[1] = 0x0F; out[2] = 0x1F; out[3] = 0x84;
+                i = 4;
+                while (i < 9) { out[i] = 0; i++; };
+                ->;
+            };
+            // 10 to 15: extra 0x66 prefixes, then 66 2E 0F 1F 84 00 00 00 00 00
+            extra = n - 10;
+            i = 0;
+            while (i < extra) { out[i] = 0x66; i++; };
+            out[extra] = 0x66;
+            out[extra + 1] = 0x2E;
+            out[extra + 2] = 0x0F;
+            out[extra + 3] = 0x1F;
+            out[extra + 4] = 0x84;
+            i = extra + 5;
+            while (i < n) { out[i] = 0; i++; };
+            ->;
+        };
+
+        as_dir_align(Asm* a, byte* s, int n, bool log2) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            i64 al;
+            i64 fill = 0;
+            i64 maxs = (0 - 1);
+            bool hasfill = false;
+            Sect* sc = @a.secs[a.cur];
+            int ii = 0;
+            if (cnt < 1) { a.err = g"missing alignment\0"; -> false; };
+            if (!as_const(a, s + st[0], en[0] - st[0], @al)) { a.err = g"bad alignment\0"; -> false; };
+            if (log2) { al = 1 << al; };
+            if (cnt >= 2 & en[1] > st[1])
+            {
+                if (!as_const(a, s + st[1], en[1] - st[1], @fill)) { a.err = g"bad fill\0"; -> false; };
+                hasfill = true;
+            };
+            if (cnt >= 3 & en[2] > st[2])
+            {
+                if (!as_const(a, s + st[2], en[2] - st[2], @maxs)) { a.err = g"bad max skip\0"; -> false; };
+            };
+            if (al < 1) { al = 1; };
+            ii = as_item_add(sc);
+            sc.items[ii].kind = IA_IT_ALIGN;
+            sc.items[ii].a = al;
+            sc.items[ii].b = (fill `& 255);
+            sc.items[ii].c = maxs;
+            sc.items[ii].len = 0;
+            // code alignment (multi byte nops) when no fill is given in an executable section
+            if (sc.code & !hasfill) { sc.items[ii].sym = 1; } else { sc.items[ii].sym = 0; };
+            if (al > sc.align) { sc.align = al; };
+            -> true;
+        };
+
+        as_dir_data(Asm* a, byte* s, int n, int size, int mod) -> bool
+        {
+            int[64] st;
+            int[64] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 64);
+            int i = 0;
+            Expr e;
+            while (i < cnt)
+            {
+                if (en[i] > st[i])
+                {
+                    if (!as_parse_expr(a, s + st[i], en[i] - st[i], @e)) { a.err = g"bad expression\0"; -> false; };
+                    if (mod != 0) { e.mod = mod; };
+                    if (!as_emit_value(a, @e, size)) { -> false; };
+                };
+                i++;
+            };
+            -> true;
+        };
+
+        as_dir_string(Asm* a, byte* s, int n, bool zero) -> bool
+        {
+            int[16] st;
+            int[16] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 16);
+            int i = 0;
+            int k = 0;
+            byte* buf;
+            while (i < cnt)
+            {
+                buf = (byte*)fmalloc(en[i] - st[i] + 2);
+                k = as_unquote(s + st[i], en[i] - st[i], buf);
+                if (k < 0) { ffree(buf); a.err = g"bad string\0"; -> false; };
+                if (zero) { buf[k] = 0; k++; };
+                if (k > 0)
+                {
+                    if (!as_emit(a, buf, k)) { ffree(buf); -> false; };
+                };
+                ffree(buf);
+                i++;
+            };
+            -> true;
+        };
+
+        as_dir_zero(Asm* a, byte* s, int n) -> bool
+        {
+            i64 cnt;
+            i64 fill = 0;
+            Sect* sc = @a.secs[a.cur];
+            int ii = 0;
+            byte[1] z;
+            i64 k;
+            int cm = 0;
+            int depth = 0;
+            // .zero size, value: the optional second argument is the fill byte
+            while (cm < n)
+            {
+                if (s[cm] == '(') { depth++; };
+                if (s[cm] == ')') { depth--; };
+                if (s[cm] == ',' & depth == 0) { break; };
+                cm++;
+            };
+            if (cm < n)
+            {
+                if (!as_const(a, s + cm + 1, n - cm - 1, @fill)) { a.err = g"bad fill value\0"; -> false; };
+                n = cm;
+            };
+            if (!as_const(a, s, n, @cnt)) { a.err = g"bad size\0"; -> false; };
+            if (cnt <= 0) { -> true; };
+            if (sc.stype == IA_SHT_NOBITS)
+            {
+                if (fill != 0) { a.err = g"non-zero fill in a NOBITS section\0"; -> false; };
+                ii = as_item_add(sc);
+                sc.items[ii].kind = IA_IT_ZERO;
+                sc.items[ii].len = cnt;
+                -> true;
+            };
+            z[0] = (fill `& 255);
+            k = 0;
+            while (k < cnt)
+            {
+                if (!as_emit(a, (byte*)z, 1)) { -> false; };
+                k++;
+            };
+            -> true;
+        };
+
+        // .section name,"flags",@type,entsize
+        // ===== COFF DIRECTIVES =====
+
+        // A COFF section by name with its characteristics (without the alignment)
+        as_coff_section_c(Asm* a, byte* name, i64 chars, byte* cname, int sel, int assoc) -> int
+        {
+            int before = a.nsec;
+            int stype = IA_SHT_PROGBITS;
+            int si;
+            if ((chars `& IA_COFF_UDATA) != 0) { stype = IA_SHT_NOBITS; };
+            si = as_section_c(a, name, stype, chars, 0, true, cname, sel, assoc);
+            if (si < 0) { -> si; };
+            if (a.nsec > before)
+            {
+                a.secs[si].code = (chars `& IA_COFF_CODE) != 0;
+                if (ia_streq(name, ".data\0") | ia_streq(name, ".bss\0") | ia_streq(name, ".xdata\0") | ia_streq(name, ".pdata\0"))
+                {
+                    a.secs[si].align = 4;
+                };
+            };
+            -> si;
+        };
+
+        as_coff_section(Asm* a, byte* name, i64 chars) -> int
+        {
+            -> as_coff_section_c(a, name, chars, (byte*)0, 0, -1);
+        };
+
+        // The COMDAT selection number for a .section selection word, or -1
+        as_comdat_sel(byte* s, int n) -> int
+        {
+            if (ia_eqn(s, n, "one_only\0") | ia_eqn(s, n, "no_duplicates\0")) { -> 1; };
+            if (ia_eqn(s, n, "discard\0")) { -> 2; };
+            if (ia_eqn(s, n, "same_size\0")) { -> 3; };
+            if (ia_eqn(s, n, "same_contents\0")) { -> 4; };
+            if (ia_eqn(s, n, "associative\0")) { -> 5; };
+            if (ia_eqn(s, n, "largest\0")) { -> 6; };
+            if (ia_eqn(s, n, "newest\0")) { -> 7; };
+            -> -1;
+        };
+
+        // Drops a trailing ; and blanks from a directive operand
+        as_trim_semi(byte* s, int n) -> int
+        {
+            while (n > 0 & (s[n - 1] == ';' | s[n - 1] == 32 | s[n - 1] == 9)) { n--; };
+            -> n;
+        };
+
+        // .section name,"flags" for COFF: d data, b bss, r read, w write, x code, n discard, s shared
+        as_dir_section_coff(Asm* a, byte* s, int n) -> bool
+        {
+            int[8] st;
+            int[8] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 8);
+            int i = 0;
+            int k = 0;
+            int l, si;
+            i64 chars = 0;
+            byte[256] nb;
+            byte[256] cb;
+            int sel = 0;
+            int assoc = -1;
+            int ls = -1;
+            if (cnt < 1) { a.err = g"missing section name\0"; -> false; };
+            l = en[0] - st[0];
+            if (s[st[0]] == '"') { k = as_unquote(s + st[0], l, (byte*)nb); }
+            else
+            {
+                k = 0;
+                while (k < l & k < 255) { nb[k] = s[st[0] + k]; k++; };
+            };
+            nb[k] = 0;
+            if (cnt == 1)
+            {
+                si = as_section(a, (byte*)nb, IA_SHT_PROGBITS, 0, 0, false);
+                if (si < 0) { a.err = g"unknown section\0"; -> false; };
+                a.cur = si;
+                -> true;
+            };
+            if (cnt == 3) { a.err = g"a COMDAT section needs a symbol name\0"; -> false; };
+            if (s[st[1]] == '"')
+            {
+                // the flag letters work on llvm's internal bits and map to characteristics at the end
+                int fb = 0;
+                bool rorem = false;
+                int c;
+                i = st[1] + 1;
+                while (i < en[1] - 1)
+                {
+                    c = s[i];
+                    if (c == 'b')
+                    {
+                        if ((fb `& IA_SF_INITDATA) != 0) { a.err = g"conflicting section flags 'b' and 'd'\0"; -> false; };
+                        fb = (fb `| IA_SF_ALLOC) `& (0 - 1 - IA_SF_LOAD);
+                    };
+                    if (c == 'd')
+                    {
+                        if ((fb `& IA_SF_ALLOC) != 0) { a.err = g"conflicting section flags 'b' and 'd'\0"; -> false; };
+                        fb = (fb `| IA_SF_INITDATA) `& (0 - 1 - IA_SF_NOWRITE);
+                        if ((fb `& IA_SF_NOLOAD) == 0) { fb = fb `| IA_SF_LOAD; };
+                    };
+                    if (c == 'n') { fb = (fb `| IA_SF_NOLOAD) `& (0 - 1 - IA_SF_LOAD); };
+                    if (c == 'D') { fb = fb `| IA_SF_DISCARD; };
+                    if (c == 'r')
+                    {
+                        rorem = false;
+                        fb = fb `| IA_SF_NOWRITE;
+                        if ((fb `& IA_SF_CODE) == 0) { fb = fb `| IA_SF_INITDATA; };
+                        if ((fb `& IA_SF_NOLOAD) == 0) { fb = fb `| IA_SF_LOAD; };
+                    };
+                    if (c == 's')
+                    {
+                        fb = (fb `| IA_SF_SHARED `| IA_SF_INITDATA) `& (0 - 1 - IA_SF_NOWRITE);
+                        if ((fb `& IA_SF_NOLOAD) == 0) { fb = fb `| IA_SF_LOAD; };
+                    };
+                    if (c == 'w')
+                    {
+                        fb = fb `& (0 - 1 - IA_SF_NOWRITE);
+                        rorem = true;
+                    };
+                    if (c == 'x')
+                    {
+                        fb = fb `| IA_SF_CODE;
+                        if ((fb `& IA_SF_NOLOAD) == 0) { fb = fb `| IA_SF_LOAD; };
+                        if (!rorem) { fb = fb `| IA_SF_NOWRITE; };
+                    };
+                    if (c == 'y') { fb = fb `| IA_SF_NOREAD `| IA_SF_NOWRITE; };
+                    if (c == 'i') { fb = fb `| IA_SF_INFO; };
+                    if (c != 'a' & c != 'b' & c != 'd' & c != 'n' & c != 'D' & c != 'r' & c != 's' & c != 'w' & c != 'x' & c != 'y' & c != 'i')
+                    {
+                        a.err = g"unknown section flag\0";
+                        -> false;
+                    };
+                    i++;
+                };
+                if (fb == 0) { fb = IA_SF_INITDATA; };
+                if ((fb `& IA_SF_CODE) != 0) { chars = chars `| IA_COFF_CODE `| IA_COFF_EXEC; };
+                if ((fb `& IA_SF_INITDATA) != 0) { chars = chars `| IA_COFF_IDATA; };
+                if ((fb `& IA_SF_ALLOC) != 0 & (fb `& IA_SF_LOAD) == 0) { chars = chars `| IA_COFF_UDATA; };
+                if ((fb `& IA_SF_NOLOAD) != 0) { chars = chars `| IA_COFF_REMOVE; };
+                if ((fb `& IA_SF_DISCARD) != 0 | (l >= 6 & nb[0] == '.' & nb[1] == 'd' & nb[2] == 'e' & nb[3] == 'b' & nb[4] == 'u' & nb[5] == 'g'))
+                {
+                    chars = chars `| IA_COFF_DISCARD;
+                };
+                if ((fb `& IA_SF_NOREAD) == 0) { chars = chars `| IA_COFF_READ; };
+                if ((fb `& IA_SF_NOWRITE) == 0) { chars = chars `| IA_COFF_WRITE; };
+                if ((fb `& IA_SF_SHARED) != 0) { chars = chars `| IA_COFF_SHARED; };
+                if ((fb `& IA_SF_INFO) != 0) { chars = chars `| IA_COFF_INFO; };
+            };
+            if (cnt >= 4)
+            {
+                sel = as_comdat_sel(s + st[2], en[2] - st[2]);
+                if (sel < 0) { a.err = g"unknown COMDAT selection\0"; -> false; };
+                if (s[st[3]] == '"') { k = as_unquote(s + st[3], en[3] - st[3], (byte*)cb); }
+                else
+                {
+                    k = 0;
+                    while (k < en[3] - st[3] & k < 255) { cb[k] = s[st[3] + k]; k++; };
+                };
+                cb[k] = 0;
+                ls = as_sym_get(a, (byte*)cb, k);
+                chars = chars `| IA_COFF_COMDAT;
+                if (sel == 5)
+                {
+                    // associative: tied to the section that holds the named symbol
+                    if (!a.syms[ls].defined) { a.err = g"cannot associate with an undefined symbol\0"; -> false; };
+                    assoc = a.syms[ls].sec;
+                    ls = -1;
+                };
+                si = as_coff_section_c(a, (byte*)nb, chars, (byte*)cb, sel, assoc);
+                if (si >= 0 & ls >= 0) { a.secs[si].lsym = ls; };
+            }
+            else { si = as_coff_section(a, (byte*)nb, chars); };
+            if (si < 0) { a.err = g"too many sections\0"; -> false; };
+            a.cur = si;
+            -> true;
+        };
+
+        // .def name; .scl n; .type n; .endef : storage class and type of a symbol
+        as_dir_coff_def(Asm* a, byte* name, int nl, byte* s, int n) -> bool
+        {
+            i64 v = 0;
+            n = as_trim_semi(s, n);
+            if (ia_eqn(name, nl, ".def\0"))
+            {
+                if (n < 1) { a.err = g"bad .def\0"; -> false; };
+                a.defsym = as_sym_arg(a, s, n);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".endef\0")) { a.defsym = -1; -> true; };
+            if (a.defsym < 0) { a.err = g".scl or .type outside .def\0"; -> false; };
+            if (!as_const(a, s, n, @v)) { a.err = g"bad number\0"; -> false; };
+            if (ia_eqn(name, nl, ".scl\0")) { a.syms[a.defsym].cscl = v; -> true; };
+            a.syms[a.defsym].ctype = v;
+            -> true;
+        };
+
+        // The register number Windows x64 unwind information uses, or -1
+        as_seh_reg(byte* s, int n) -> int
+        {
+            int v = 0;
+            int i = 0;
+            if (n > 0 & s[0] == '%') { s = s + 1; n = n - 1; };
+            if (ia_eqn(s, n, "rax\0")) { -> 0; };
+            if (ia_eqn(s, n, "rcx\0")) { -> 1; };
+            if (ia_eqn(s, n, "rdx\0")) { -> 2; };
+            if (ia_eqn(s, n, "rbx\0")) { -> 3; };
+            if (ia_eqn(s, n, "rsp\0")) { -> 4; };
+            if (ia_eqn(s, n, "rbp\0")) { -> 5; };
+            if (ia_eqn(s, n, "rsi\0")) { -> 6; };
+            if (ia_eqn(s, n, "rdi\0")) { -> 7; };
+            if (n >= 2 & s[0] == 'r' & ia_isdig(s[1]))
+            {
+                i = 1;
+                while (i < n)
+                {
+                    if (!ia_isdig(s[i])) { -> -1; };
+                    v = v * 10 + (s[i] - 48);
+                    i++;
+                };
+                if (v >= 8 & v <= 15) { -> v; };
+            };
+            -> -1;
+        };
+
+        // The xmm register number in an operand like %xmm6, or -1
+        as_seh_xmm(byte* s, int n) -> int
+        {
+            int v = 0;
+            int i = 3;
+            if (n > 0 & s[0] == '%') { s = s + 1; n = n - 1; };
+            if (n < 4 | s[0] != 'x' | s[1] != 'm' | s[2] != 'm') { -> -1; };
+            while (i < n)
+            {
+                if (!ia_isdig(s[i])) { -> -1; };
+                v = v * 10 + (s[i] - 48);
+                i++;
+            };
+            if (v > 15) { -> -1; };
+            -> v;
+        };
+
+        as_seh_add(Asm* a, int kind, int reg, i64 val) -> void
+        {
+            int it = 0;
+            int dl = 0;
+            int i;
+            if (a.nsop >= a.sopcap)
+            {
+                a.sopcap = a.sopcap * 2;
+                if (a.sopcap < 64) { a.sopcap = 64; };
+                a.sop = (SehOp*)ia_grow((byte*)a.sop, a.sopcap * sizeof(SehOp));
+            };
+            as_here(a, @it, @dl);
+            i = a.nsop;
+            a.nsop++;
+            a.sop[i].kind = kind;
+            a.sop[i].reg = reg;
+            a.sop[i].val = val;
+            a.sop[i].item = it;
+            a.sop[i].delta = dl;
+            ->;
+        };
+
+        // .seh_* directives
+        as_dir_seh(Asm* a, byte* name, int nl, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            int reg = 0;
+            i64 v = 0;
+            int fi = 0;
+            int it = 0;
+            int dl = 0;
+            int xsi = -1;
+            if (ia_eqn(name, nl, ".seh_proc\0"))
+            {
+                if (a.inseh) { a.err = g".seh_proc inside another procedure\0"; -> false; };
+                if (!ia_streq(a.secs[a.cur].name, ".text\0")) { a.err = g".seh_proc is only supported in .text\0"; -> false; };
+                xsi = -1;
+                if (a.secs[a.cur].cname != 0)
+                {
+                    // a function in a COMDAT section keeps its unwind information in an
+                    // associative .xdata section of its own
+                    xsi = as_coff_section_c(a, g".xdata\0", (IA_COFF_IDATA `| IA_COFF_READ `| IA_COFF_COMDAT), a.secs[a.cur].cname, 5, a.cur);
+                    if (xsi < 0) { a.err = g"too many sections\0"; -> false; };
+                }
+                else
+                {
+                    if (a.xdsec < 0) { a.xdsec = as_coff_section(a, g".xdata\0", (IA_COFF_IDATA `| IA_COFF_READ)); };
+                };
+                if (a.nsfr >= a.sfrcap)
+                {
+                    a.sfrcap = a.sfrcap * 2;
+                    if (a.sfrcap < 16) { a.sfrcap = 16; };
+                    a.sfr = (SehFrame*)ia_grow((byte*)a.sfr, a.sfrcap * sizeof(SehFrame));
+                };
+                as_here(a, @it, @dl);
+                fi = a.nsfr;
+                a.nsfr++;
+                a.sfr[fi].sec = a.cur;
+                a.sfr[fi].sitem = it;
+                a.sfr[fi].sdelta = dl;
+                a.sfr[fi].eitem = it;
+                a.sfr[fi].edelta = dl;
+                a.sfr[fi].pitem = it;
+                a.sfr[fi].pdelta = dl;
+                a.sfr[fi].first = a.nsop;
+                a.sfr[fi].count = 0;
+                a.sfr[fi].prolog = false;
+                a.sfr[fi].xsec = xsi;
+                a.inseh = true;
+                -> true;
+            };
+            if (!a.inseh) { a.err = g".seh directive outside .seh_proc\0"; -> false; };
+            fi = a.nsfr - 1;
+            if (ia_eqn(name, nl, ".seh_endproc\0"))
+            {
+                as_here(a, @it, @dl);
+                a.sfr[fi].eitem = it;
+                a.sfr[fi].edelta = dl;
+                a.sfr[fi].count = a.nsop - a.sfr[fi].first;
+                a.inseh = false;
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_endprologue\0"))
+            {
+                as_here(a, @it, @dl);
+                a.sfr[fi].pitem = it;
+                a.sfr[fi].pdelta = dl;
+                a.sfr[fi].prolog = true;
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_startepilogue\0") | ia_eqn(name, nl, ".seh_endepilogue\0")) { -> true; };
+            if (ia_eqn(name, nl, ".seh_pushreg\0"))
+            {
+                if (cnt < 1) { a.err = g"bad .seh_pushreg\0"; -> false; };
+                reg = as_seh_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .seh directive\0"; -> false; };
+                as_seh_add(a, IA_SEH_PUSHREG, reg, 0);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_stackalloc\0"))
+            {
+                if (cnt < 1 | !as_const(a, s + st[0], en[0] - st[0], @v)) { a.err = g"bad .seh_stackalloc\0"; -> false; };
+                as_seh_add(a, IA_SEH_STACKALLOC, 0, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_setframe\0"))
+            {
+                if (cnt < 2 | !as_const(a, s + st[1], en[1] - st[1], @v)) { a.err = g"bad .seh_setframe\0"; -> false; };
+                reg = as_seh_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .seh directive\0"; -> false; };
+                as_seh_add(a, IA_SEH_SETFRAME, reg, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_savexmm\0"))
+            {
+                if (cnt < 2 | !as_const(a, s + st[1], en[1] - st[1], @v)) { a.err = g"bad .seh_savexmm\0"; -> false; };
+                reg = as_seh_xmm(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .seh directive\0"; -> false; };
+                as_seh_add(a, IA_SEH_SAVEXMM, reg, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_savereg\0"))
+            {
+                if (cnt < 2 | !as_const(a, s + st[1], en[1] - st[1], @v)) { a.err = g"bad .seh_savereg\0"; -> false; };
+                reg = as_seh_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .seh directive\0"; -> false; };
+                as_seh_add(a, IA_SEH_SAVEREG, reg, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".seh_pushframe\0"))
+            {
+                // an optional @code says the machine frame has an error code
+                v = 0;
+                if (cnt >= 1)
+                {
+                    if (ia_eqn(s + st[0], en[0] - st[0], "@code\0")) { v = 1; };
+                };
+                as_seh_add(a, IA_SEH_PUSHFRAME, 0, v);
+                -> true;
+            };
+            a.err = g"unsupported .seh directive\0";
+            -> false;
+        };
+
+        as_dir_section(Asm* a, byte* s, int n) -> bool
+        {
+            int[8] st;
+            int[8] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 8);
+            int i = 0;
+            int stype = IA_SHT_PROGBITS;
+            i64 flags = 0;
+            i64 ent = 0;
+            int si = 0;
+            byte[256] nb;
+            int k = 0;
+            int l;
+            if (cnt < 1) { a.err = g"missing section name\0"; -> false; };
+            l = en[0] - st[0];
+            if (s[st[0]] == '"') { k = as_unquote(s + st[0], l, (byte*)nb); }
+            else
+            {
+                k = 0;
+                while (k < l & k < 255) { nb[k] = s[st[0] + k]; k++; };
+            };
+            nb[k] = 0;
+            if (cnt == 1)
+            {
+                a.cur = as_std_section(a, (byte*)nb);
+                -> a.cur >= 0;
+            };
+            // flags
+            if (cnt >= 2 & s[st[1]] == '"')
+            {
+                i = st[1] + 1;
+                while (i < en[1] - 1)
+                {
+                    if (s[i] == 'a') { flags = flags `| IA_SHF_ALLOC; };
+                    if (s[i] == 'w') { flags = flags `| IA_SHF_WRITE; };
+                    if (s[i] == 'x') { flags = flags `| IA_SHF_EXEC; };
+                    if (s[i] == 'M') { flags = flags `| IA_SHF_MERGE; };
+                    if (s[i] == 'S') { flags = flags `| IA_SHF_STRINGS; };
+                    if (s[i] == 'T') { flags = flags `| IA_SHF_TLS; };
+                    i++;
+                };
+            };
+            if (cnt >= 3)
+            {
+                if (ia_eqn(s + st[2], en[2] - st[2], "@progbits\0")) { stype = IA_SHT_PROGBITS; };
+                if (ia_eqn(s + st[2], en[2] - st[2], "@nobits\0")) { stype = IA_SHT_NOBITS; };
+                if (ia_eqn(s + st[2], en[2] - st[2], "@note\0")) { stype = IA_SHT_NOTE; };
+                if (ia_eqn(s + st[2], en[2] - st[2], "@init_array\0")) { stype = 14; };
+                if (ia_eqn(s + st[2], en[2] - st[2], "@fini_array\0")) { stype = 15; };
+            };
+            if (cnt >= 4)
+            {
+                if (!as_const(a, s + st[3], en[3] - st[3], @ent)) { ent = 0; };
+            };
+            si = as_section(a, (byte*)nb, stype, flags, ent, true);
+            if (si < 0) { a.err = g"too many sections\0"; -> false; };
+            a.cur = si;
+            -> true;
+        };
+
+        as_dir_comm(Asm* a, byte* s, int n, bool islocal) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            i64 size;
+            i64 al = 1;
+            int si = 0;
+            ISym* sy;
+            int save, bi;
+            int ii = 0;
+            Sect* sc;
+            if (cnt < 2) { a.err = g"bad .comm\0"; -> false; };
+            si = as_sym_arg(a, s + st[0], en[0] - st[0]);
+            if (!as_const(a, s + st[1], en[1] - st[1], @size)) { a.err = g"bad size\0"; -> false; };
+            if (cnt >= 3) { if (!as_const(a, s + st[2], en[2] - st[2], @al)) { al = 1; }; };
+            sy = @a.syms[si];
+            sy.size = size;
+            if (islocal | (sy.bind == IA_SB_LOCAL & sy.declared))
+            {
+                // a local common symbol is allocated in .bss
+                save = a.cur;
+                bi = as_section(a, g".bss\0", IA_SHT_NOBITS, 3, 0, false);
+                a.cur = bi;
+                sc = @a.secs[bi];
+                ii = as_item_add(sc);
+                sc.items[ii].kind = IA_IT_ALIGN;
+                sc.items[ii].a = al;
+                sc.items[ii].b = 0;
+                sc.items[ii].c = -1;
+                sc.items[ii].sym = 0;
+                if (al > sc.align) { sc.align = al; };
+                as_define(a, si);
+                ii = as_item_add(sc);
+                sc.items[ii].kind = IA_IT_ZERO;
+                sc.items[ii].len = size;
+                a.cur = save;
+                -> true;
+            };
+            sy.kind = IA_SK_COMMON;
+            sy.align = al;
+            sy.bind = IA_SB_GLOBAL;
+            sy.defined = true;
+            sy.declared = true;
+            -> true;
+        };
+
+        // .type name, @function
+        as_dir_type(Asm* a, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            int si = 0;
+            if (cnt < 2) { a.err = g"bad .type\0"; -> false; };
+            si = as_sym_arg(a, s + st[0], en[0] - st[0]);
+            if (ia_eqn(s + st[1], en[1] - st[1], "@function\0") | ia_eqn(s + st[1], en[1] - st[1], "%function\0")) { a.syms[si].type = IA_ST_FUNC; };
+            if (ia_eqn(s + st[1], en[1] - st[1], "@object\0") | ia_eqn(s + st[1], en[1] - st[1], "%object\0")) { a.syms[si].type = IA_ST_OBJECT; };
+            if (ia_eqn(s + st[1], en[1] - st[1], "@tls_object\0")) { a.syms[si].type = IA_ST_TLS; };
+            if (ia_eqn(s + st[1], en[1] - st[1], "@notype\0")) { a.syms[si].type = IA_ST_NONE; };
+            -> true;
+        };
+
+        // .size name, expr
+        as_dir_size(Asm* a, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            int si = 0;
+            Expr e;
+            if (cnt < 2) { a.err = g"bad .size\0"; -> false; };
+            si = as_sym_arg(a, s + st[0], en[0] - st[0]);
+            if (!as_parse_expr(a, s + st[1], en[1] - st[1], @e)) { a.err = g"bad .size expression\0"; -> false; };
+            if (e.pos < 0 & e.neg < 0) { a.syms[si].size = e.add; -> true; };
+            a.syms[si].has_se = true;
+            a.syms[si].se_a = e.pos;
+            a.syms[si].se_b = e.neg;
+            a.syms[si].se_c = e.add;
+            -> true;
+        };
+
+        // .globl .local .weak .hidden .protected: a list of symbol names
+        as_dir_binding(Asm* a, byte* s, int n, int bind, int vis) -> bool
+        {
+            int[32] st;
+            int[32] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 32);
+            int i = 0;
+            int si = 0;
+            while (i < cnt)
+            {
+                si = as_sym_arg(a, s + st[i], en[i] - st[i]);
+                if (bind >= 0) { a.syms[si].bind = bind; };
+                if (vis > 0) { a.syms[si].vis = vis; };
+                a.syms[si].declared = true;
+                i++;
+            };
+            -> true;
+        };
+
+        // name = expr / .set name, expr
+        as_dir_set(Asm* a, byte* name, int nl, byte* s, int n) -> bool
+        {
+            Expr e;
+            int si = as_sym_get(a, name, nl);
+            ISym* sy;
+            if (!as_parse_expr(a, s, n, @e)) { a.err = g"bad expression\0"; -> false; };
+            sy = @a.syms[si];
+            if (e.pos < 0 & e.neg < 0)
+            {
+                sy.sec = -2;
+                sy.val = e.add;
+                sy.kind = IA_SK_ABS;
+                sy.defined = true;
+                -> true;
+            };
+            a.err = g"symbolic .set is not supported\0";
+            -> false;
+        };
+
+        // Handles one directive line. line[0] is the dot.
+        // ===== CALL FRAME INFORMATION =====
+
+        // DWARF register number of a register operand (%rbp, rbp or a plain number), or -1
+        as_dwarf_reg(byte* s, int n) -> int
+        {
+            int i = 0;
+            int v = 0;
+            if (n > 0 & s[0] == '%') { s = s + 1; n = n - 1; };
+            if (n < 1) { -> -1; };
+            if (ia_isdig(s[0]))
+            {
+                while (i < n)
+                {
+                    if (!ia_isdig(s[i])) { -> -1; };
+                    v = v * 10 + (s[i] - 48);
+                    i++;
+                };
+                -> v;
+            };
+            if (ia_eqn(s, n, "rax\0")) { -> 0; };
+            if (ia_eqn(s, n, "rdx\0")) { -> 1; };
+            if (ia_eqn(s, n, "rcx\0")) { -> 2; };
+            if (ia_eqn(s, n, "rbx\0")) { -> 3; };
+            if (ia_eqn(s, n, "rsi\0")) { -> 4; };
+            if (ia_eqn(s, n, "rdi\0")) { -> 5; };
+            if (ia_eqn(s, n, "rbp\0")) { -> 6; };
+            if (ia_eqn(s, n, "rsp\0")) { -> 7; };
+            if (ia_eqn(s, n, "rip\0")) { -> 16; };
+            if (n >= 2 & s[0] == 'r' & ia_isdig(s[1]))
+            {
+                i = 1;
+                while (i < n)
+                {
+                    if (!ia_isdig(s[i])) { -> -1; };
+                    v = v * 10 + (s[i] - 48);
+                    i++;
+                };
+                if (v >= 8 & v <= 15) { -> v; };
+                -> -1;
+            };
+            if (n >= 4 & s[0] == 'x' & s[1] == 'm' & s[2] == 'm')
+            {
+                i = 3;
+                while (i < n)
+                {
+                    if (!ia_isdig(s[i])) { -> -1; };
+                    v = v * 10 + (s[i] - 48);
+                    i++;
+                };
+                if (v <= 15) { -> 17 + v; };
+            };
+            -> -1;
+        };
+
+        as_cfi_add(Asm* a, int kind, int reg, i64 val) -> void
+        {
+            int it = 0;
+            int dl = 0;
+            int i;
+            if (a.ncop >= a.copcap)
+            {
+                a.copcap = a.copcap * 2;
+                if (a.copcap < 64) { a.copcap = 64; };
+                a.cops = (CfiOp*)ia_grow((byte*)a.cops, a.copcap * sizeof(CfiOp));
+            };
+            as_here(a, @it, @dl);
+            i = a.ncop;
+            a.ncop++;
+            a.cops[i].kind = kind;
+            a.cops[i].reg = reg;
+            a.cops[i].val = val;
+            a.cops[i].item = it;
+            a.cops[i].delta = dl;
+            ->;
+        };
+
+        // .cfi_* directives. name is the directive, s and n its operands.
+        as_dir_cfi(Asm* a, byte* name, int nl, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = as_split(s, n, (int*)st, (int*)en, 4);
+            int reg = 0;
+            i64 v = 0;
+            int fi = 0;
+            int it = 0;
+            int dl = 0;
+            if (ia_eqn(name, nl, ".cfi_startproc\0"))
+            {
+                if (a.inframe) { a.err = g"starting new .cfi frame before finishing the previous one\0"; -> false; };
+                if (a.nfr >= a.frcap)
+                {
+                    a.frcap = a.frcap * 2;
+                    if (a.frcap < 16) { a.frcap = 16; };
+                    a.frs = (CfiFrame*)ia_grow((byte*)a.frs, a.frcap * sizeof(CfiFrame));
+                };
+                as_here(a, @it, @dl);
+                fi = a.nfr;
+                a.nfr++;
+                a.frs[fi].sec = a.cur;
+                a.frs[fi].sitem = it;
+                a.frs[fi].sdelta = dl;
+                a.frs[fi].eitem = it;
+                a.frs[fi].edelta = dl;
+                a.frs[fi].first = a.ncop;
+                a.frs[fi].count = 0;
+                a.inframe = true;
+                a.cfa = 8;
+                a.csp = 0;
+                -> true;
+            };
+            if (!a.inframe) { a.err = g".cfi directive outside .cfi_startproc\0"; -> false; };
+            fi = a.nfr - 1;
+            if (ia_eqn(name, nl, ".cfi_endproc\0"))
+            {
+                as_here(a, @it, @dl);
+                a.frs[fi].eitem = it;
+                a.frs[fi].edelta = dl;
+                a.frs[fi].count = a.ncop - a.frs[fi].first;
+                a.inframe = false;
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_def_cfa_offset\0"))
+            {
+                if (cnt < 1 | !as_const(a, s + st[0], en[0] - st[0], @v)) { a.err = g"bad .cfi_def_cfa_offset\0"; -> false; };
+                a.cfa = v;
+                as_cfi_add(a, IA_CFI_DEF_CFA_OFFSET, 0, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_adjust_cfa_offset\0"))
+            {
+                if (cnt < 1 | !as_const(a, s + st[0], en[0] - st[0], @v)) { a.err = g"bad .cfi_adjust_cfa_offset\0"; -> false; };
+                a.cfa = a.cfa + v;
+                as_cfi_add(a, IA_CFI_DEF_CFA_OFFSET, 0, a.cfa);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_def_cfa_register\0"))
+            {
+                if (cnt < 1) { a.err = g"bad .cfi_def_cfa_register\0"; -> false; };
+                reg = as_dwarf_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .cfi directive\0"; -> false; };
+                as_cfi_add(a, IA_CFI_DEF_CFA_REGISTER, reg, 0);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_def_cfa\0"))
+            {
+                if (cnt < 2 | !as_const(a, s + st[1], en[1] - st[1], @v)) { a.err = g"bad .cfi_def_cfa\0"; -> false; };
+                reg = as_dwarf_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .cfi directive\0"; -> false; };
+                a.cfa = v;
+                as_cfi_add(a, IA_CFI_DEF_CFA, reg, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_offset\0"))
+            {
+                if (cnt < 2 | !as_const(a, s + st[1], en[1] - st[1], @v)) { a.err = g"bad .cfi_offset\0"; -> false; };
+                reg = as_dwarf_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .cfi directive\0"; -> false; };
+                as_cfi_add(a, IA_CFI_OFFSET, reg, v);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_restore\0"))
+            {
+                if (cnt < 1) { a.err = g"bad .cfi_restore\0"; -> false; };
+                reg = as_dwarf_reg(s + st[0], en[0] - st[0]);
+                if (reg < 0) { a.err = g"unknown register in .cfi directive\0"; -> false; };
+                as_cfi_add(a, IA_CFI_RESTORE, reg, 0);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_remember_state\0"))
+            {
+                if (a.csp < 16) { a.cstack[a.csp] = a.cfa; a.csp++; };
+                as_cfi_add(a, IA_CFI_REMEMBER, 0, 0);
+                -> true;
+            };
+            if (ia_eqn(name, nl, ".cfi_restore_state\0"))
+            {
+                if (a.csp < 1) { a.err = g".cfi_restore_state without .cfi_remember_state\0"; -> false; };
+                a.csp--;
+                a.cfa = a.cstack[a.csp];
+                as_cfi_add(a, IA_CFI_RESTORE_STATE, 0, 0);
+                -> true;
+            };
+            a.err = g"unsupported .cfi directive\0";
+            -> false;
+        };
+
+        as_directive(Asm* a, byte* line, int n) -> bool
+        {
+            int i = 0;
+            int st = 0;
+            byte* arg;
+            int an = 0;
+            while (i < n & line[i] != 32 & line[i] != 9) { i++; };
+            st = i;
+            i = as_skip_ws(line, i, n);
+            arg = line + i;
+            an = n - i;
+            if (a.fmt == IA_FMT_COFF)
+            {
+                if (st > 5 & line[1] == 's' & line[2] == 'e' & line[3] == 'h' & line[4] == '_') { -> as_dir_seh(a, line, st, arg, an); };
+                if (ia_eqn(line, st, ".def\0") | ia_eqn(line, st, ".scl\0") | ia_eqn(line, st, ".type\0") | ia_eqn(line, st, ".endef\0"))
+                {
+                    -> as_dir_coff_def(a, line, st, arg, an);
+                };
+                if (ia_eqn(line, st, ".section\0")) { -> as_dir_section_coff(a, arg, an); };
+                if (ia_eqn(line, st, ".rva\0")) { -> as_dir_data(a, arg, an, 4, 1); };
+                if (ia_eqn(line, st, ".secrel32\0")) { -> as_dir_data(a, arg, an, 4, 2); };
+                if (ia_eqn(line, st, ".secidx\0")) { -> as_dir_data(a, arg, an, 2, 3); };
+            };
+            if (ia_eqn(line, st, ".lcomm\0")) { -> as_dir_comm(a, arg, an, true); };
+            if (st > 5 & line[1] == 'c' & line[2] == 'f' & line[3] == 'i' & line[4] == '_') { -> as_dir_cfi(a, line, st, arg, an); };
+            if (ia_eqn(line, st, ".text\0")) { a.cur = as_std_section(a, g".text\0"); -> true; };
+            if (ia_eqn(line, st, ".data\0")) { a.cur = as_std_section(a, g".data\0"); -> true; };
+            if (ia_eqn(line, st, ".bss\0")) { a.cur = as_std_section(a, g".bss\0"); -> true; };
+            if (ia_eqn(line, st, ".section\0")) { -> as_dir_section(a, arg, an); };
+            if (ia_eqn(line, st, ".globl\0") | ia_eqn(line, st, ".global\0")) { -> as_dir_binding(a, arg, an, IA_SB_GLOBAL, 0); };
+            if (ia_eqn(line, st, ".local\0")) { -> as_dir_binding(a, arg, an, IA_SB_LOCAL, 0); };
+            if (ia_eqn(line, st, ".weak\0")) { -> as_dir_binding(a, arg, an, IA_SB_WEAK, 0); };
+            if (ia_eqn(line, st, ".hidden\0")) { -> as_dir_binding(a, arg, an, -1, 2); };
+            if (ia_eqn(line, st, ".protected\0")) { -> as_dir_binding(a, arg, an, -1, 3); };
+            if (ia_eqn(line, st, ".type\0")) { -> as_dir_type(a, arg, an); };
+            if (ia_eqn(line, st, ".size\0")) { -> as_dir_size(a, arg, an); };
+            if (ia_eqn(line, st, ".p2align\0")) { -> as_dir_align(a, arg, an, true); };
+            if (ia_eqn(line, st, ".align\0") | ia_eqn(line, st, ".balign\0")) { -> as_dir_align(a, arg, an, false); };
+            if (ia_eqn(line, st, ".comm\0")) { -> as_dir_comm(a, arg, an, false); };
+            if (ia_eqn(line, st, ".long\0") | ia_eqn(line, st, ".int\0")) { -> as_dir_data(a, arg, an, 4, 0); };
+            if (ia_eqn(line, st, ".quad\0")) { -> as_dir_data(a, arg, an, 8, 0); };
+            if (ia_eqn(line, st, ".short\0") | ia_eqn(line, st, ".word\0") | ia_eqn(line, st, ".value\0")) { -> as_dir_data(a, arg, an, 2, 0); };
+            if (ia_eqn(line, st, ".byte\0")) { -> as_dir_data(a, arg, an, 1, 0); };
+            if (ia_eqn(line, st, ".asciz\0") | ia_eqn(line, st, ".string\0")) { -> as_dir_string(a, arg, an, true); };
+            if (ia_eqn(line, st, ".ascii\0")) { -> as_dir_string(a, arg, an, false); };
+            if (ia_eqn(line, st, ".zero\0") | ia_eqn(line, st, ".skip\0") | ia_eqn(line, st, ".space\0")) { -> as_dir_zero(a, arg, an); };
+            if (ia_eqn(line, st, ".file\0"))
+            {
+                if (a.file == 0 & an > 2 & arg[0] == '"')
+                {
+                    a.file = (byte*)fmalloc(an + 1);
+                    an = as_unquote(arg, an, a.file);
+                    if (an < 0) { an = 0; };
+                    a.file[an] = 0;
+                };
+                -> true;
+            };
+            if (ia_eqn(line, st, ".ident\0") | ia_eqn(line, st, ".addrsig\0") | ia_eqn(line, st, ".addrsig_sym\0")) { -> true; };
+            if (ia_eqn(line, st, ".set\0") | ia_eqn(line, st, ".equ\0"))
+            {
+                // .set name, expr
+                an = 0;
+                while (an < n - i & arg[an] != ',') { an++; };
+                -> as_dir_set(a, arg, an, arg + an + 1, n - i - an - 1);
+            };
+            a.err = g"unknown directive\0";
+            -> false;
+        };
+
+        // ===== INSTRUCTIONS =====
+
+        // Section data offset of the start of the bytes just emitted becomes fixups
+        as_instruction(Asm* a, byte* line) -> bool
+        {
+            Ib ib;
+            Sect* s;
+            int start;
+            int li = 0;
+            int k = 0;
+            int ii = 0;
+            int fsz, fk;
+            int sy = 0;
+            if (!iasm_encode_line(a.cx, line, @ib)) { a.err = a.cx.err; -> false; };
+            s = @a.secs[a.cur];
+            if (ib.br != 0 & ib.br != 3 & ib.sym != 0)
+            {
+                // jmp and jcc: a BRANCH item decided by relaxation
+                sy = as_sym_get(a, ib.sym, ia_strlen(ib.sym));
+                ii = as_item_add(s);
+                s.items[ii].kind = IA_IT_BRANCH;
+                s.items[ii].a = ib.br;
+                s.items[ii].b = ib.brcc;
+                s.items[ii].c = 0;
+                s.items[ii].sym = sy;
+                s.items[ii].add = ib.fx[0].add + 1;
+                -> true;
+            };
+            start = s.dlen;
+            if (!as_emit(a, (byte*)ib.b, ib.n)) { -> false; };
+            li = s.nitems - 1;
+            k = 0;
+            while (k < ib.nfx)
+            {
+                fk = ib.fx[k].kind;
+                fsz = 4;
+                if (fk == IA_FX_ABS64) { fsz = 8; };
+                if (fk == IA_FX_ABS16) { fsz = 2; };
+                if (fk == IA_FX_ABS8 | fk == IA_FX_BR8) { fsz = 1; };
+                sy = as_sym_get(a, ib.fx[k].sym, ia_strlen(ib.fx[k].sym));
+                as_fix_add(s, li, start + ib.fx[k].off - s.items[li].off, fk, sy, -1, ib.fx[k].add, fsz);
+                k++;
+            };
+            -> true;
+        };
+
+        // ===== LINE PARSING =====
+
+        // Removes a trailing # comment outside double quotes. Returns the new length.
+        as_strip_comment(byte* s, int n) -> int
+        {
+            int i = 0;
+            bool inq = false;
+            while (i < n)
+            {
+                if (s[i] == '"' & (i == 0 | s[i - 1] != '\\')) { inq = !inq; };
+                if (s[i] == '#' & !inq) { -> i; };
+                i++;
+            };
+            -> n;
+        };
+
+        // Handles one source line (modifies the line in place)
+        as_line1(Asm* a, byte* line) -> bool
+        {
+            int n = ia_strlen(line);
+            int i = 0;
+            int st = 0;
+            int k = 0;
+            int si = 0;
+            bool found;
+            n = as_strip_comment(line, n);
+            line[n] = 0;
+            while (n > 0 & (line[n - 1] == 32 | line[n - 1] == 9 | line[n - 1] == 13)) { n--; line[n] = 0; };
+            i = as_skip_ws(line, 0, n);
+            // labels
+            found = true;
+            while (found)
+            {
+                found = false;
+                st = i;
+                k = i;
+                if (k < n & line[k] == '"')
+                {
+                    k++;
+                    while (k < n & line[k] != '"') { k++; };
+                    k++;
+                }
+                else
+                {
+                    while (k < n & (ia_issym(line[k]) | line[k] == '@')) { k++; };
+                };
+                if (k > st & k < n & line[k] == ':')
+                {
+                    if (line[st] == '"') { si = as_sym_get(a, line + st + 1, k - st - 2); }
+                    else { si = as_sym_get(a, line + st, k - st); };
+                    if (!as_define(a, si)) { -> false; };
+                    i = as_skip_ws(line, k + 1, n);
+                    found = true;
+                };
+            };
+            if (i >= n) { -> true; };
+            if (line[i] == '.')
+            {
+                // a directive, or a symbol assignment like .Lname = expr
+                k = i;
+                while (k < n & ia_issym(line[k])) { k++; };
+                st = as_skip_ws(line, k, n);
+                if (st < n & line[st] == '=')
+                {
+                    -> as_dir_set(a, line + i, k - i, line + st + 1, n - st - 1);
+                };
+                -> as_directive(a, line + i, n - i);
+            };
+            // name = expr
+            k = i;
+            while (k < n & (ia_issym(line[k]) | line[k] == '@')) { k++; };
+            st = as_skip_ws(line, k, n);
+            if (st < n & line[st] == '=' & k > i)
+            {
+                -> as_dir_set(a, line + i, k - i, line + st + 1, n - st - 1);
+            };
+            -> as_instruction(a, line + i);
+        };
+
+        // A line holds several statements separated by ; outside of quotes
+        as_line(Asm* a, byte* line) -> bool
+        {
+            int n = ia_strlen(line);
+            int i = 0;
+            int st = 0;
+            bool inq = false;
+            n = as_strip_comment(line, n);
+            line[n] = 0;
+            while (i < n)
+            {
+                if (line[i] == '"' & (i == 0 | line[i - 1] != 92)) { inq = !inq; };
+                if (line[i] == ';' & !inq)
+                {
+                    line[i] = 0;
+                    if (!as_line1(a, line + st)) { -> false; };
+                    st = i + 1;
+                };
+                i++;
+            };
+            -> as_line1(a, line + st);
+        };
+
+        // ===== LAYOUT AND RELAXATION =====
+
+        as_item_size(Item* it) -> int
+        {
+            if (it.kind == IA_IT_BRANCH)
+            {
+                if (it.c == 0) { -> 2; };
+                if (it.a == 1) { -> 5; };
+                -> 6;
+            };
+            -> it.len;
+        };
+
+        as_layout(Asm* a) -> void
+        {
+            int si = 0;
+            int i = 0;
+            Sect* s;
+            Item* it;
+            i64 pos, pad, al;
+            while (si < a.nsec)
+            {
+                s = @a.secs[si];
+                pos = 0;
+                i = 0;
+                while (i < s.nitems)
+                {
+                    it = @s.items[i];
+                    it.pos = pos;
+                    if (it.kind == IA_IT_ALIGN)
+                    {
+                        al = it.a;
+                        pad = (al - (pos % al)) % al;
+                        if (it.c >= 0 & pad > it.c) { pad = 0; };
+                        it.len = pad;
+                    };
+                    pos = pos + as_item_size(it);
+                    i++;
+                };
+                s.size = pos;
+                si++;
+            };
+            ->;
+        };
+
+        // True when a PC relative reference to symbol si from section sec resolves without a relocation
+        as_resolvable(Asm* a, int si, int sec) -> bool
+        {
+            ISym* s = @a.syms[si];
+            if (!s.defined) { -> false; };
+            if (s.kind != IA_SK_NORMAL) { -> false; };
+            if (s.sec != sec) { -> false; };
+            // ELF references a global symbol through a relocation, COFF resolves it in place
+            if (a.fmt == IA_FMT_COFF)
+            {
+                // a symbol declared as a function (.type 32) always keeps its relocation
+                if (s.ctype == 32) { -> false; };
+                -> true;
+            };
+            if (s.bind != IA_SB_LOCAL) { -> false; };
+            -> true;
+        };
+
+        // Branch relaxation: every pass judges all branches against one layout, a branch
+        // that does not fit its short form becomes the long form, and the passes repeat
+        // until nothing changes.
+        as_relax(Asm* a) -> void
+        {
+            bool changed = true;
+            int si = 0;
+            int i = 0;
+            Sect* s;
+            Item* it;
+            i64 disp;
+            while (changed)
+            {
+                changed = false;
+                as_layout(a);
+                si = 0;
+                while (si < a.nsec)
+                {
+                    s = @a.secs[si];
+                    i = 0;
+                    while (i < s.nitems)
+                    {
+                        it = @s.items[i];
+                        if (it.kind == IA_IT_BRANCH & it.c == 0)
+                        {
+                            if (!as_resolvable(a, it.sym, si))
+                            {
+                                it.c = 1;
+                                changed = true;
+                            }
+                            else
+                            {
+                                disp = as_sym_pos(a, it.sym) + it.add - (it.pos + 2);
+                                if (disp < -128 | disp > 127)
+                                {
+                                    it.c = 1;
+                                    changed = true;
+                                };
+                            };
+                        };
+                        i++;
+                    };
+                    si++;
+                };
+            };
+            ->;
+        };
+
+        // ===== FIXUPS AND RELOCATIONS =====
+
+        // The ELF symbol a relocation refers to: a symbol index, or -1 - section for a section symbol.
+        // *add grows by the symbol offset when the section symbol is used.
+        as_reloc_ref(Asm* a, int si, i64* add) -> int
+        {
+            ISym* s = @a.syms[si];
+            Sect* sc;
+            if (a.fmt == IA_FMT_COFF)
+            {
+                // temporary labels have no symbol table entry: use the section symbol
+                if (s.temp & s.defined & s.kind == IA_SK_NORMAL & s.sec >= 0)
+                {
+                    sc = @a.secs[s.sec];
+                    *add = *add + as_sym_pos(a, si);
+                    sc.secsym = 1;
+                    -> -1 - s.sec;
+                };
+                s.used = true;
+                -> si;
+            };
+            if (s.defined & s.kind == IA_SK_NORMAL & s.sec >= 0 & s.bind == IA_SB_LOCAL)
+            {
+                sc = @a.secs[s.sec];
+                // in a mergeable section the symbol itself is referenced when the fixup
+                // addend is not zero; with a zero addend the section symbol is used
+                if ((sc.flags `& IA_SHF_MERGE) == 0 | *add == 0)
+                {
+                    *add = *add + as_sym_pos(a, si);
+                    sc.secsym = 1;
+                    -> -1 - s.sec;
+                };
+            };
+            s.used = true;
+            -> si;
+        };
+
+        as_put_le(byte* d, i64 pos, i64 v, int size) -> void
+        {
+            int k = 0;
+            while (k < size)
+            {
+                d[pos + k] = ((v >> (8 * k)) `& 255);
+                k++;
+            };
+            ->;
+        };
+
+        // R_X86_64 relocation type of a fixup kind
+        as_reloc_type(int kind, int size) -> int
+        {
+            switch (kind)
+            {
+                case (IA_FX_PC32) { -> 2; }
+                case (IA_FX_PLT32) { -> 4; }
+                case (IA_FX_GOTPCREL) { -> 9; }
+                case (IA_FX_GOTPCRELX) { -> 41; }
+                case (IA_FX_REXGOTPCRELX) { -> 42; }
+                case (IA_FX_ABS64) { -> 1; }
+                case (IA_FX_ABS32) { -> 10; }
+                case (IA_FX_ABS32S) { -> 11; }
+                case (IA_FX_ABS16) { -> 12; }
+                case (IA_FX_ABS8) { -> 14; }
+                case (IA_FX_PCDATA) { if (size == 8) { -> 24; }; -> 2; }
+                default { -> 0; };
+            };
+        };
+
+        // IMAGE_REL_AMD64 type of a fixup kind, or -1
+        as_reloc_type_coff(int kind, int size) -> int
+        {
+            switch (kind)
+            {
+                case (IA_FX_PC32) { -> 4; }
+                case (IA_FX_PLT32) { -> 4; }
+                case (IA_FX_PCDATA) { if (size == 4) { -> 4; }; -> -1; }
+                case (IA_FX_IMGREL) { -> 3; }
+                case (IA_FX_SECREL) { -> 11; }
+                case (IA_FX_SECIDX) { -> 10; }
+                case (IA_FX_ABS64) { -> 1; }
+                case (IA_FX_ABS32) { -> 2; }
+                case (IA_FX_ABS32S) { -> 2; }
+                default { -> -1; };
+            };
+        };
+
+        // Records a relocation. ELF keeps the addend in the relocation, COFF keeps it in the
+        // section bytes and a REL32 is relative to the end of its field.
+        as_emit_reloc(Asm* a, Sect* s, i64 pos, int kind, int size, int ref, i64 add) -> bool
+        {
+            int type;
+            i64 dv;
+            if (a.fmt != IA_FMT_COFF)
+            {
+                type = as_reloc_type(kind, size);
+                if (type < 0) { a.err = g"relocation not supported for ELF\0"; -> false; };
+                as_rel_add(s, pos, type, ref, add);
+                -> true;
+            };
+            type = as_reloc_type_coff(kind, size);
+            if (type < 0) { a.err = g"relocation not supported for COFF\0"; -> false; };
+            dv = add;
+            if (kind == IA_FX_PC32 | kind == IA_FX_PLT32 | kind == IA_FX_PCDATA) { dv = dv + 4; };
+            as_put_le(s.out, pos, dv, size);
+            as_rel_add(s, pos, type, ref, 0);
+            -> true;
+        };
+
+        as_nop_fill(byte* d, i64 pos, int n) -> void
+        {
+            int k = 0;
+            int chunk;
+            byte[16] nb;
+            int j = 0;
+            while (k < n)
+            {
+                chunk = n - k;
+                if (chunk > 15) { chunk = 15; };
+                as_nop_bytes(chunk, (byte*)nb);
+                j = 0;
+                while (j < chunk) { d[pos + k + j] = nb[j]; j++; };
+                k = k + chunk;
+            };
+            ->;
+        };
+
+        // Stable sort of a section's relocations by offset (bottom-up merge sort)
+        as_sort_relocs(Sect* s) -> void
+        {
+            int n = s.nrel;
+            int width = 1;
+            int lo, mid, hi, l, r, k, w;
+            Reloc* tmp, src, dst, swap;
+            if (n < 2) { ->; };
+            tmp = (Reloc*)fmalloc(sizeof(Reloc) * n);
+            src = s.rel;
+            dst = tmp;
+            while (width < n)
+            {
+                lo = 0;
+                while (lo < n)
+                {
+                    mid = lo + width;
+                    if (mid > n) { mid = n; };
+                    hi = lo + 2 * width;
+                    if (hi > n) { hi = n; };
+                    l = lo;
+                    r = mid;
+                    k = lo;
+                    while (k < hi)
+                    {
+                        if (l < mid & (r >= hi | src[l].off <= src[r].off)) { w = l; l++; }
+                        else { w = r; r++; };
+                        dst[k].off = src[w].off;
+                        dst[k].type = src[w].type;
+                        dst[k].sym = src[w].sym;
+                        dst[k].add = src[w].add;
+                        k++;
+                    };
+                    lo = lo + 2 * width;
+                };
+                swap = src;
+                src = dst;
+                dst = swap;
+                width = width * 2;
+            };
+            // the sorted data is in src; keep it in s.rel
+            if (src != s.rel)
+            {
+                k = 0;
+                while (k < n)
+                {
+                    s.rel[k].off = src[k].off;
+                    s.rel[k].type = src[k].type;
+                    s.rel[k].sym = src[k].sym;
+                    s.rel[k].add = src[k].add;
+                    k++;
+                };
+            };
+            ffree((u64)tmp);
+            ->;
+        };
+
+        // Builds the final bytes of every section and its relocations
+        as_build(Asm* a) -> bool
+        {
+            int si = 0;
+            int i = 0;
+            int j = 0;
+            Sect* s;
+            Item* it;
+            FixRec* f;
+            i64 pos, v, add, tp;
+            int ref, sz, kind;
+            ISym* sy, sn;
+            while (si < a.nsec)
+            {
+                s = @a.secs[si];
+                if (s.stype != IA_SHT_NOBITS)
+                {
+                    s.out = (byte*)fmalloc(s.size + 8);
+                    j = 0;
+                    while (j < s.size) { s.out[j] = 0; j++; };
+                    i = 0;
+                    while (i < s.nitems)
+                    {
+                        it = @s.items[i];
+                        if (it.kind == IA_IT_BYTES)
+                        {
+                            j = 0;
+                            while (j < it.len) { s.out[it.pos + j] = s.d[it.off + j]; j++; };
+                        };
+                        if (it.kind == IA_IT_ALIGN)
+                        {
+                            if (it.sym == 1) { as_nop_fill(s.out, it.pos, it.len); }
+                            else
+                            {
+                                j = 0;
+                                while (j < it.len) { s.out[it.pos + j] = it.b; j++; };
+                            };
+                        };
+                        if (it.kind == IA_IT_BRANCH)
+                        {
+                            pos = it.pos;
+                            if (it.c == 0)
+                            {
+                                if (it.a == 1) { s.out[pos] = 0xEB; } else { s.out[pos] = (0x70 + it.b); };
+                                v = as_sym_pos(a, it.sym) + it.add - (pos + 2);
+                                s.out[pos + 1] = (v `& 255);
+                            }
+                            else
+                            {
+                                if (it.a == 1)
+                                {
+                                    s.out[pos] = 0xE9;
+                                    tp = pos + 1;
+                                    sz = 5;
+                                }
+                                else
+                                {
+                                    s.out[pos] = 0x0F;
+                                    s.out[pos + 1] = (0x80 + it.b);
+                                    tp = pos + 2;
+                                    sz = 6;
+                                };
+                                if (as_resolvable(a, it.sym, si))
+                                {
+                                    v = as_sym_pos(a, it.sym) + it.add - (pos + sz);
+                                    as_put_le(s.out, tp, v, 4);
+                                }
+                                else
+                                {
+                                    add = it.add - 4;
+                                    ref = as_reloc_ref(a, it.sym, @add);
+                                    if (!as_emit_reloc(a, s, tp, IA_FX_PLT32, 4, ref, add)) { -> false; };
+                                };
+                            };
+                        };
+                        i++;
+                    };
+                };
+                si++;
+            };
+            // fixups
+            si = 0;
+            while (si < a.nsec)
+            {
+                s = @a.secs[si];
+                i = 0;
+                while (i < s.nfx)
+                {
+                    f = @s.fx[i];
+                    pos = s.items[f.item].pos + f.delta;
+                    kind = f.kind;
+                    sy = @a.syms[f.sym];
+                    if (kind == IA_FX_DIFF)
+                    {
+                        // sym - sym2 + add
+                        sn = @a.syms[f.sym2];
+                        if (sn.defined & sn.sec == si & ((as_sym_pos(a, f.sym2) == pos & sn.name[0] == 0) | (a.fmt == IA_FMT_COFF & sy.defined & sy.sec != si) | (a.fmt != IA_FMT_COFF & (!sy.defined | sy.sec != si))))
+                        {
+                            // sym - . : a PC relative relocation, or resolved inside the section
+                            if (as_resolvable(a, f.sym, si))
+                            {
+                                v = as_sym_pos(a, f.sym) - as_sym_pos(a, f.sym2) + f.add;
+                                as_put_le(s.out, pos, v, f.size);
+                            }
+                            else
+                            {
+                                add = f.add + (pos - as_sym_pos(a, f.sym2));
+                                ref = as_reloc_ref(a, f.sym, @add);
+                                if (!as_emit_reloc(a, s, pos, IA_FX_PCDATA, f.size, ref, add)) { -> false; };
+                            };
+                        }
+                        else
+                        {
+                            if (sy.defined & sn.defined & sy.sec >= 0 & sn.sec >= 0 & (sy.sec == sn.sec | a.fmt == IA_FMT_COFF))
+                            {
+                                v = as_sym_pos(a, f.sym) - as_sym_pos(a, f.sym2) + f.add;
+                                as_put_le(s.out, pos, v, f.size);
+                            }
+                            else
+                            {
+                                a.err = g"unresolvable symbol difference\0";
+                                -> false;
+                            };
+                        };
+                    }
+                    else
+                    {
+                        if (kind == IA_FX_IMGREL | kind == IA_FX_SECREL | kind == IA_FX_SECIDX)
+                        {
+                            // image and section relative values are always left to the linker
+                            add = f.add;
+                            ref = as_reloc_ref(a, f.sym, @add);
+                            // a section index carries no offset
+                            if (kind == IA_FX_SECIDX) { add = 0; };
+                            if (!as_emit_reloc(a, s, pos, kind, f.size, ref, add)) { -> false; };
+                        }
+                        else
+                        if (kind == IA_FX_PC32 | kind == IA_FX_PLT32)
+                        {
+                            if (as_resolvable(a, f.sym, si))
+                            {
+                                v = as_sym_pos(a, f.sym) + f.add - pos;
+                                as_put_le(s.out, pos, v, 4);
+                            }
+                            else
+                            {
+                                add = f.add;
+                                ref = as_reloc_ref(a, f.sym, @add);
+                                if (!as_emit_reloc(a, s, pos, kind, 4, ref, add)) { -> false; };
+                            };
+                        }
+                        else
+                        {
+                            if (sy.kind == IA_SK_ABS & sy.defined)
+                            {
+                                as_put_le(s.out, pos, sy.val + f.add, f.size);
+                            }
+                            else
+                            {
+                                add = f.add;
+                                ref = as_reloc_ref(a, f.sym, @add);
+                                if (!as_emit_reloc(a, s, pos, kind, f.size, ref, add)) { -> false; };
+                            };
+                        };
+                    };
+                    i++;
+                };
+                si++;
+            };
+            si = 0;
+            while (si < a.nsec) { as_sort_relocs(@a.secs[si]); si++; };
+            -> true;
+        };
+
+        // ===== .eh_frame =====
+
+        cb_put8(Cbuf* b, int v) -> void
+        {
+            if (b.n + 1 > b.cap)
+            {
+                b.cap = b.cap * 2;
+                if (b.cap < 256) { b.cap = 256; };
+                b.d = ia_grow(b.d, b.cap);
+            };
+            b.d[b.n] = (v `& 255);
+            b.n++;
+            ->;
+        };
+
+        cb_put32(Cbuf* b, i64 v) -> void
+        {
+            int k = 0;
+            while (k < 4) { cb_put8(b, ((v >> (8 * k)) `& 255)); k++; };
+            ->;
+        };
+
+        cb_patch32(Cbuf* b, int at, i64 v) -> void
+        {
+            int k = 0;
+            while (k < 4) { b.d[at + k] = ((v >> (8 * k)) `& 255); k++; };
+            ->;
+        };
+
+        cb_uleb(Cbuf* b, i64 v) -> void
+        {
+            u64 u = v;
+            while (u >= 128)
+            {
+                cb_put8(b, (u `& 127) `| 128);
+                u = u >> 7;
+            };
+            cb_put8(b, u);
+            ->;
+        };
+
+        cb_sleb(Cbuf* b, i64 v) -> void
+        {
+            bool more = true;
+            int bt;
+            while (more)
+            {
+                bt = (v `& 127);
+                v = v >> 7;
+                if ((v == 0 & (bt `& 64) == 0) | (v == -1 & (bt `& 64) != 0)) { more = false; }
+                else { bt = bt `| 128; };
+                cb_put8(b, bt);
+            };
+            ->;
+        };
+
+        // Pads to a multiple of m with DW_CFA_nop
+        cb_pad(Cbuf* b, int m) -> void
+        {
+            while (b.n % m != 0) { cb_put8(b, 0); };
+            ->;
+        };
+
+        // The bytes of one call frame instruction
+        as_cfi_emit(Cbuf* b, CfiOp* op) -> void
+        {
+            i64 f;
+            if (op.kind == IA_CFI_DEF_CFA_OFFSET) { cb_put8(b, 0x0E); cb_uleb(b, op.val); ->; };
+            if (op.kind == IA_CFI_DEF_CFA_REGISTER) { cb_put8(b, 0x0D); cb_uleb(b, op.reg); ->; };
+            if (op.kind == IA_CFI_DEF_CFA) { cb_put8(b, 0x0C); cb_uleb(b, op.reg); cb_uleb(b, op.val); ->; };
+            if (op.kind == IA_CFI_REMEMBER) { cb_put8(b, 0x0A); ->; };
+            if (op.kind == IA_CFI_RESTORE_STATE) { cb_put8(b, 0x0B); ->; };
+            if (op.kind == IA_CFI_RESTORE)
+            {
+                if (op.reg < 64) { cb_put8(b, 0xC0 `| op.reg); }
+                else { cb_put8(b, 0x06); cb_uleb(b, op.reg); };
+                ->;
+            };
+            if (op.kind == IA_CFI_OFFSET)
+            {
+                f = op.val / -8;
+                if (f < 0)
+                {
+                    cb_put8(b, 0x11);
+                    cb_uleb(b, op.reg);
+                    cb_sleb(b, f);
+                    ->;
+                };
+                if (op.reg < 64) { cb_put8(b, 0x80 `| op.reg); }
+                else { cb_put8(b, 0x05); cb_uleb(b, op.reg); };
+                cb_uleb(b, f);
+            };
+            ->;
+        };
+
+        // Builds .eh_frame (one CIE, one FDE per procedure) and its relocations.
+        // Offsets are final, so this runs after relaxation.
+        as_build_eh_frame(Asm* a) -> bool
+        {
+            Cbuf cb;
+            int si;
+            Sect* s, fs;
+            int fi = 0;
+            int lenat, pcat, k;
+            i64 p0, p1, loc, pos, d;
+            CfiFrame* fr;
+            CfiOp* op;
+            int saved;
+            if (a.inframe) { a.err = g"unclosed .cfi_startproc\0"; -> false; };
+            if (a.nfr == 0) { -> true; };
+            cb.d = (byte*)0;
+            cb.n = 0;
+            cb.cap = 0;
+            // the CIE
+            lenat = cb.n;
+            cb_put32(@cb, 0);
+            cb_put32(@cb, 0);
+            cb_put8(@cb, 1);
+            cb_put8(@cb, 'z');
+            cb_put8(@cb, 'R');
+            cb_put8(@cb, 0);
+            cb_uleb(@cb, 1);
+            cb_sleb(@cb, -8);
+            cb_uleb(@cb, 16);
+            cb_uleb(@cb, 1);
+            cb_put8(@cb, 0x1B);
+            cb_put8(@cb, 0x0C);
+            cb_uleb(@cb, 7);
+            cb_uleb(@cb, 8);
+            cb_put8(@cb, 0x80 `| 16);
+            cb_uleb(@cb, 1);
+            cb_pad(@cb, 4);
+            cb_patch32(@cb, lenat, (cb.n - lenat - 4));
+            si = as_section(a, g".eh_frame\0", IA_SHT_X86_64_UNWIND, IA_SHF_ALLOC, 0, true);
+            if (si < 0) { a.err = g"too many sections\0"; -> false; };
+            s = @a.secs[si];
+            s.align = 8;
+            // the FDEs
+            while (fi < a.nfr)
+            {
+                fr = @a.frs[fi];
+                fs = @a.secs[fr.sec];
+                p0 = as_pos_of(fs, fr.sitem, fr.sdelta);
+                p1 = as_pos_of(fs, fr.eitem, fr.edelta);
+                lenat = cb.n;
+                cb_put32(@cb, 0);
+                cb_put32(@cb, (cb.n));
+                pcat = cb.n;
+                cb_put32(@cb, 0);
+                cb_put32(@cb, p1 - p0);
+                cb_uleb(@cb, 0);
+                loc = p0;
+                k = 0;
+                while (k < fr.count)
+                {
+                    op = @a.cops[fr.first + k];
+                    pos = as_pos_of(fs, op.item, op.delta);
+                    d = pos - loc;
+                    if (d > 0)
+                    {
+                        if (d < 64) { cb_put8(@cb, 0x40 `| d); }
+                        else
+                        {
+                            if (d < 256) { cb_put8(@cb, 0x02); cb_put8(@cb, d); }
+                            else
+                            {
+                                if (d < 65536)
+                                {
+                                    cb_put8(@cb, 0x03);
+                                    cb_put8(@cb, (d `& 255));
+                                    cb_put8(@cb, ((d >> 8) `& 255));
+                                }
+                                else { cb_put8(@cb, 0x04); cb_put32(@cb, d); };
+                            };
+                        };
+                        loc = pos;
+                    };
+                    as_cfi_emit(@cb, op);
+                    k++;
+                };
+                // each entry ends on a 4 byte boundary, the last one on the section alignment
+                if (fi == a.nfr - 1) { cb_pad(@cb, 8); } else { cb_pad(@cb, 4); };
+                cb_patch32(@cb, lenat, (cb.n - lenat - 4));
+                fs.secsym = 1;
+                as_rel_add(s, pcat, 2, -1 - fr.sec, p0);
+                fi++;
+            };
+            saved = a.cur;
+            a.cur = si;
+            if (!as_emit(a, cb.d, cb.n)) { a.cur = saved; -> false; };
+            a.cur = saved;
+            s.items[0].pos = 0;
+            s.size = cb.n;
+            ffree(cb.d);
+            -> true;
+        };
+
+        // Builds .xdata (one UNWIND_INFO per procedure) and .pdata (one RUNTIME_FUNCTION per
+        // procedure) from the .seh_* directives. Offsets are final, so this runs after relaxation.
+        as_build_seh(Asm* a) -> bool
+        {
+            Cbuf cb, cc, fb;
+            int pi2;
+            int nshared = 0;
+            Sect* xs, ps, fs;
+            SehFrame* fr;
+            SehOp* op;
+            int fi = 0;
+            int k, slots, pi, saved, framereg, frameoff;
+            i64 p0, poff, off, n;
+            int* xoffs;
+            if (a.inseh) { a.err = g"unclosed .seh_proc\0"; -> false; };
+            if (a.nsfr == 0) { -> true; };
+            cb.d = (byte*)0;
+            cb.n = 0;
+            cb.cap = 0;
+            xoffs = (int*)fmalloc(a.nsfr * 4 + 8);
+            while (fi < a.nsfr)
+            {
+                fr = @a.sfr[fi];
+                fs = @a.secs[fr.sec];
+                if (!fr.prolog) { a.err = g"missing .seh_endprologue\0"; -> false; };
+                p0 = as_pos_of(fs, fr.sitem, fr.sdelta);
+                poff = as_pos_of(fs, fr.pitem, fr.pdelta) - p0;
+                if (poff > 255) { a.err = g"prologue too large for unwind information\0"; -> false; };
+                cc.d = (byte*)0;
+                cc.n = 0;
+                cc.cap = 0;
+                framereg = 0;
+                frameoff = 0;
+                k = fr.count - 1;
+                while (k >= 0)
+                {
+                    op = @a.sop[fr.first + k];
+                    off = as_pos_of(fs, op.item, op.delta) - p0;
+                    if (off > 255) { a.err = g"unwind operation outside the prologue\0"; -> false; };
+                    if (op.kind == IA_SEH_PUSHREG)
+                    {
+                        cb_put8(@cc, off);
+                        cb_put8(@cc, op.reg << 4);
+                    };
+                    if (op.kind == IA_SEH_STACKALLOC)
+                    {
+                        n = op.val;
+                        if (((n `& 7) != 0) | (n < 8)) { a.err = g"bad stack allocation size\0"; -> false; };
+                        if (n <= 128)
+                        {
+                            cb_put8(@cc, off);
+                            cb_put8(@cc, (((n - 8) / 8) << 4) `| 2);
+                        }
+                        else
+                        {
+                            if (n <= 524280)
+                            {
+                                cb_put8(@cc, off);
+                                cb_put8(@cc, 1);
+                                cb_put8(@cc, ((n / 8) `& 255));
+                                cb_put8(@cc, (((n / 8) >> 8) `& 255));
+                            }
+                            else
+                            {
+                                cb_put8(@cc, off);
+                                cb_put8(@cc, (1 << 4) `| 1);
+                                cb_put32(@cc, n);
+                            };
+                        };
+                    };
+                    if (op.kind == IA_SEH_SETFRAME)
+                    {
+                        framereg = op.reg;
+                        frameoff = (op.val / 16);
+                        cb_put8(@cc, off);
+                        cb_put8(@cc, 3);
+                    };
+                    if (op.kind == IA_SEH_SAVEXMM)
+                    {
+                        n = op.val / 16;
+                        cb_put8(@cc, off);
+                        if (n > 65535)
+                        {
+                            cb_put8(@cc, (op.reg << 4) `| 9);
+                            cb_put32(@cc, op.val);
+                        }
+                        else
+                        {
+                            cb_put8(@cc, (op.reg << 4) `| 8);
+                            cb_put8(@cc, (n `& 255));
+                            cb_put8(@cc, ((n >> 8) `& 255));
+                        };
+                    };
+                    if (op.kind == IA_SEH_SAVEREG)
+                    {
+                        n = op.val / 8;
+                        if ((op.val `& 7) != 0) { a.err = g"register save offset is not a multiple of 8\0"; -> false; };
+                        cb_put8(@cc, off);
+                        if (n > 65535)
+                        {
+                            cb_put8(@cc, (op.reg << 4) `| 5);
+                            cb_put32(@cc, op.val);
+                        }
+                        else
+                        {
+                            cb_put8(@cc, (op.reg << 4) `| 4);
+                            cb_put8(@cc, (n `& 255));
+                            cb_put8(@cc, ((n >> 8) `& 255));
+                        };
+                    };
+                    if (op.kind == IA_SEH_PUSHFRAME)
+                    {
+                        cb_put8(@cc, off);
+                        cb_put8(@cc, (op.val << 4) `| 10);
+                    };
+                    k--;
+                };
+                slots = cc.n / 2;
+                if (slots > 255) { a.err = g"too many unwind codes\0"; -> false; };
+                fb.d = (byte*)0;
+                fb.n = 0;
+                fb.cap = 0;
+                cb_put8(@fb, 1);
+                cb_put8(@fb, poff);
+                cb_put8(@fb, slots);
+                cb_put8(@fb, framereg `| (frameoff << 4));
+                k = 0;
+                while (k < cc.n) { cb_put8(@fb, cc.d[k]); k++; };
+                if (slots % 2 != 0) { cb_put8(@fb, 0); cb_put8(@fb, 0); };
+                if (cc.d != 0) { ffree(cc.d); };
+                if (fr.xsec >= 0)
+                {
+                    // the function's own associative .xdata
+                    xoffs[fi] = 0;
+                    xs = @a.secs[fr.xsec];
+                    saved = a.cur;
+                    a.cur = fr.xsec;
+                    if (!as_emit(a, fb.d, fb.n)) { a.cur = saved; -> false; };
+                    a.cur = saved;
+                    xs.items[0].pos = 0;
+                    xs.size = fb.n;
+                }
+                else
+                {
+                    xoffs[fi] = cb.n;
+                    k = 0;
+                    while (k < fb.n) { cb_put8(@cb, fb.d[k]); k++; };
+                    nshared++;
+                };
+                ffree(fb.d);
+                fi++;
+            };
+            // .xdata
+            saved = a.cur;
+            if (nshared > 0)
+            {
+                xs = @a.secs[a.xdsec];
+                a.cur = a.xdsec;
+                if (!as_emit(a, cb.d, cb.n)) { a.cur = saved; -> false; };
+                xs.items[0].pos = 0;
+                xs.size = cb.n;
+            };
+            ffree(cb.d);
+            // .pdata: one associative section per COMDAT function, one shared section for the others;
+            // the sections are made in frame order
+            pi = -1;
+            pi2 = 0;
+            fi = 0;
+            while (fi < a.nsfr)
+            {
+                fr = @a.sfr[fi];
+                fs = @a.secs[fr.sec];
+                if (fr.xsec >= 0)
+                {
+                    k = as_coff_section_c(a, g".pdata\0", (IA_COFF_IDATA `| IA_COFF_READ `| IA_COFF_COMDAT), fs.cname, 5, fr.sec);
+                    if (k < 0) { a.cur = saved; a.err = g"too many sections\0"; -> false; };
+                    cb.d = (byte*)0;
+                    cb.n = 0;
+                    cb.cap = 0;
+                    cb_put32(@cb, as_pos_of(fs, fr.sitem, fr.sdelta));
+                    cb_put32(@cb, as_pos_of(fs, fr.eitem, fr.edelta));
+                    cb_put32(@cb, 0);
+                    ps = @a.secs[k];
+                    a.cur = k;
+                    if (!as_emit(a, cb.d, cb.n)) { a.cur = saved; -> false; };
+                    ps.items[0].pos = 0;
+                    ps.size = cb.n;
+                    ffree(cb.d);
+                    fs.secsym = 1;
+                    a.secs[fr.xsec].secsym = 1;
+                    as_rel_add(ps, 0, 3, -1 - fr.sec, 0);
+                    as_rel_add(ps, 4, 3, -1 - fr.sec, 0);
+                    as_rel_add(ps, 8, 3, -1 - fr.xsec, 0);
+                }
+                else
+                {
+                    if (pi < 0)
+                    {
+                        pi = as_coff_section(a, g".pdata\0", (IA_COFF_IDATA `| IA_COFF_READ));
+                        if (pi < 0) { a.cur = saved; a.err = g"too many sections\0"; -> false; };
+                    };
+                };
+                fi++;
+            };
+            if (nshared > 0)
+            {
+                cb.d = (byte*)0;
+                cb.n = 0;
+                cb.cap = 0;
+                fi = 0;
+                while (fi < a.nsfr)
+                {
+                    fr = @a.sfr[fi];
+                    fs = @a.secs[fr.sec];
+                    if (fr.xsec < 0)
+                    {
+                        cb_put32(@cb, as_pos_of(fs, fr.sitem, fr.sdelta));
+                        cb_put32(@cb, as_pos_of(fs, fr.eitem, fr.edelta));
+                        cb_put32(@cb, xoffs[fi]);
+                    };
+                    fi++;
+                };
+                ps = @a.secs[pi];
+                a.cur = pi;
+                if (!as_emit(a, cb.d, cb.n)) { a.cur = saved; -> false; };
+                ps.items[0].pos = 0;
+                ps.size = cb.n;
+                ffree(cb.d);
+                xs = @a.secs[a.xdsec];
+                fi = 0;
+                while (fi < a.nsfr)
+                {
+                    fr = @a.sfr[fi];
+                    fs = @a.secs[fr.sec];
+                    if (fr.xsec < 0)
+                    {
+                        fs.secsym = 1;
+                        as_rel_add(ps, (pi2 * 12), 3, -1 - fr.sec, 0);
+                        as_rel_add(ps, (pi2 * 12 + 4), 3, -1 - fr.sec, 0);
+                        xs.secsym = 1;
+                        as_rel_add(ps, (pi2 * 12 + 8), 3, -1 - a.xdsec, 0);
+                        pi2++;
+                    };
+                    fi++;
+                };
+            };
+            a.cur = saved;
+            ffree((byte*)xoffs);
+            -> true;
+        };
+
+        // Layout, branch relaxation, symbol sizes, final bytes and relocations
+        iasm_finish(Asm* a) -> bool
+        {
+            int i = 0;
+            ISym* s;
+            if (a.finished) { -> true; };
+            as_relax(a);
+            i = 0;
+            while (i < a.nsyms)
+            {
+                s = @a.syms[i];
+                if (s.has_se)
+                {
+                    s.size = as_sym_pos(a, s.se_a) + s.se_c;
+                    if (s.se_b >= 0) { s.size = s.size - as_sym_pos(a, s.se_b); };
+                };
+                i++;
+            };
+            if (!as_build_eh_frame(a)) { -> false; };
+            if (!as_build_seh(a)) { -> false; };
+            if (!as_build(a)) { -> false; };
+            a.finished = true;
+            -> true;
+        };
+
+        iasm_new_for(int fmt) -> Asm*
+        {
+            Asm* a = (Asm*)fmalloc(sizeof(Asm));
+            int i = 0;
+            a.cx = (IasmCtx*)fmalloc(sizeof(IasmCtx));
+            iasm_init(a.cx);
+            a.nsec = 0;
+            a.cur = 0;
+            a.syms = (ISym*)0;
+            a.nsyms = 0;
+            a.scap = 0;
+            i = 0;
+            while (i < 8192) { a.shash[i] = 0; i++; };
+            a.file = (byte*)0;
+            a.err = (byte*)0;
+            a.line = 0;
+            a.anon = 0;
+            a.finished = false;
+            a.fmt = fmt;
+            a.defsym = -1;
+            a.sfr = (SehFrame*)0;
+            a.nsfr = 0;
+            a.sfrcap = 0;
+            a.sop = (SehOp*)0;
+            a.nsop = 0;
+            a.sopcap = 0;
+            a.inseh = false;
+            a.xdsec = -1;
+            a.cops = (CfiOp*)0;
+            a.ncop = 0;
+            a.copcap = 0;
+            a.frs = (CfiFrame*)0;
+            a.nfr = 0;
+            a.frcap = 0;
+            a.inframe = false;
+            a.cfa = 0;
+            a.csp = 0;
+            // the default sections
+            if (fmt == IA_FMT_COFF)
+            {
+                as_coff_section(a, g".text\0", (IA_COFF_CODE `| IA_COFF_EXEC `| IA_COFF_READ));
+                as_coff_section(a, g".data\0", (IA_COFF_IDATA `| IA_COFF_READ `| IA_COFF_WRITE));
+                as_coff_section(a, g".bss\0", (IA_COFF_UDATA `| IA_COFF_READ `| IA_COFF_WRITE));
+                a.cur = 0;
+                -> a;
+            };
+            a.cur = as_std_section(a, g".text\0");
+            -> a;
+        };
+
+        iasm_new() -> Asm*
+        {
+            -> iasm_new_for(IA_FMT_ELF);
+        };
+
+        // Assembles the whole text. Returns false on the first error (a.err, a.line).
+        iasm_assemble(Asm* a, byte* text, int len) -> bool
+        {
+            int i = 0;
+            int st = 0;
+            byte* ln;
+            while (i < len)
+            {
+                st = i;
+                while (i < len & text[i] != 10) { i++; };
+                ln = ia_dup(text + st, i - st);
+                a.line = a.line + 1;
+                if (!as_line(a, ln))
+                {
+                    ffree(ln);
+                    -> false;
+                };
+                ffree(ln);
+                i++;
+            };
+            -> true;
+        };
+    };
+};
+
+#endif;

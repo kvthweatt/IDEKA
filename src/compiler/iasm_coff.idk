@@ -1,0 +1,551 @@
+// Author: Karac V. Thweatt
+//
+// iasm_coff.idk - COFF (PE object) writer for the IDEKA assembler (x86-64 Windows)
+//
+// Library, no main. Works on the result of iasm_finish for an assembler created with
+// iasm_new_for(IA_FMT_COFF).
+//
+// Usage:
+//
+//     Asm* a = iasm_new_for(IA_FMT_COFF);
+//     iasm_assemble(a, text, len);
+//     iasm_finish(a);
+//     iasm_write_coff(a, "out.obj");     // returns false on error
+//
+// Layout follows llvm-mc: file header, section headers, then for each section its raw data
+// followed by its relocations, the symbol table (a section symbol with an aux record for
+// every section, then the other symbols in first-mention order, then .file), and the string table.
+
+#ifndef IDEKA_IASM_CORE
+#import "src/compiler/iasm_core.idk";
+#endif;
+
+#ifndef IDEKA_IASM_BUF
+#import "src/compiler/iasm_buf.idk";
+#endif;
+
+#ifndef IDEKA_IASM_COFF
+#def IDEKA_IASM_COFF 1;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        // CRC-32 with the JAM variant used for section checksums (initial value 0, no final xor)
+        cf_jamcrc(byte* p, int n) -> i64
+        {
+            i64 crc = 0;
+            i64 c;
+            int i = 0;
+            int k;
+            while (i < n)
+            {
+                c = (crc `^| (p[i] `& 255)) `& 255;
+                k = 0;
+                while (k < 8)
+                {
+                    if ((c `& 1) != 0) { c = (c >> 1) `^| 0xEDB88320; }
+                    else { c = c >> 1; };
+                    k++;
+                };
+                crc = (crc >> 8) `^| c;
+                i++;
+            };
+            -> crc `& 0xFFFFFFFF;
+        };
+
+        // Does symbol si belong to the COFF symbol table?
+        cf_in_symtab(Asm* a, int si) -> bool
+        {
+            ISym* s = @a.syms[si];
+            if (s.name[0] == 0) { -> false; };
+            if (s.defined)
+            {
+                if (s.temp) { -> false; };
+                -> true;
+            };
+            if (s.used | s.declared) { -> true; };
+            -> false;
+        };
+
+        // A name field: up to 8 bytes inline, else zero and a string table offset
+        cf_put_name(ElfBuf* o, byte* name, int off) -> void
+        {
+            int n = ia_strlen(name);
+            int i = 0;
+            if (n <= 8)
+            {
+                while (i < 8)
+                {
+                    if (i < n) { eb_put8(o, name[i]); } else { eb_put8(o, 0); };
+                    i++;
+                };
+            }
+            else
+            {
+                eb_put32(o, 0);
+                eb_put32(o, off);
+            };
+        };
+
+        // The name of the alias llvm gives a weak symbol: .weak.<name>.default[.<first external>]
+        cf_alias_name(byte* name, byte* suffix) -> byte*
+        {
+            int n1 = ia_strlen(name);
+            int n2 = 0;
+            int tot = 0;
+            int k = 0;
+            byte* r;
+            byte* pre = g".weak.\0";
+            byte* mid = g".default\0";
+            if (suffix != 0) { n2 = ia_strlen(suffix) + 1; };
+            tot = 6 + n1 + 8 + n2;
+            r = (byte*)fmalloc(tot + 1);
+            k = 0;
+            while (k < 6) { r[k] = pre[k]; k++; };
+            k = 0;
+            while (k < n1) { r[6 + k] = name[k]; k++; };
+            k = 0;
+            while (k < 8) { r[6 + n1 + k] = mid[k]; k++; };
+            if (suffix != 0)
+            {
+                r[6 + n1 + 8] = '.';
+                k = 0;
+                while (k < n2 - 1) { r[6 + n1 + 9 + k] = suffix[k]; k++; };
+            };
+            r[tot] = 0;
+            -> r;
+        };
+
+        // One regular symbol table entry for symbol si. A weak symbol is an undefined weak
+        // external that points at its alias, which holds the real definition.
+        cf_put_sym(Asm* a, ElfBuf* symtab, int si, int* symname, int* noff, int* num, int* aliasidx, byte** alname, int* anm) -> void
+        {
+            ISym* sy = @a.syms[si];
+            int k = 0;
+            int sec = 0;
+            int stor = 0;
+            int ctype = 0;
+            i64 v = 0;
+            if (symname[si] >= 0) { k = noff[symname[si]]; };
+            cf_put_name(symtab, sy.name, k);
+            if (sy.bind == IA_SB_WEAK & sy.kind != IA_SK_COMMON)
+            {
+                eb_put32(symtab, 0);
+                eb_put16(symtab, 0);
+                eb_put16(symtab, 0);
+                eb_put8(symtab, 0x69);
+                eb_put8(symtab, 1);
+                eb_put32(symtab, aliasidx[si]);
+                eb_put32(symtab, 3);
+                k = 0;
+                while (k < 10) { eb_put8(symtab, 0); k++; };
+                k = 0;
+                if (anm[si] >= 0) { k = noff[anm[si]]; };
+                cf_put_name(symtab, alname[si], k);
+                sec = -1;
+                v = 0;
+                if (sy.kind != IA_SK_ABS & sy.defined)
+                {
+                    sec = num[sy.sec];
+                    v = as_sym_pos(a, si);
+                };
+                if (sy.kind == IA_SK_ABS & sy.defined) { v = sy.val; };
+                if (sy.ctype >= 0) { ctype = sy.ctype; };
+                eb_put32(symtab, v);
+                eb_put16(symtab, sec);
+                eb_put16(symtab, ctype);
+                eb_put8(symtab, 2);
+                eb_put8(symtab, 0);
+                ->;
+            };
+            if (sy.kind == IA_SK_ABS) { sec = -1; v = sy.val; }
+            else
+            {
+                if (sy.kind == IA_SK_COMMON) { v = sy.size; }
+                else
+                {
+                    if (sy.defined)
+                    {
+                        sec = num[sy.sec];
+                        v = as_sym_pos(a, si);
+                    };
+                };
+            };
+            stor = 3;
+            if (sy.cscl >= 0) { stor = sy.cscl; }
+            else
+            {
+                if (!sy.defined | sy.bind != IA_SB_LOCAL) { stor = 2; };
+            };
+            if (sy.ctype >= 0) { ctype = sy.ctype; };
+            eb_put32(symtab, v);
+            eb_put16(symtab, sec);
+            eb_put16(symtab, ctype);
+            eb_put8(symtab, stor);
+            eb_put8(symtab, 0);
+            ->;
+        };
+
+        iasm_coff_image(Asm* a, ElfBuf* o) -> bool
+        {
+            ElfBuf strtab, symtab;
+            Sect* s;
+            ISym* sy;
+            int i = 0;
+            int j = 0;
+            int n = 0;
+            int nsyms = 0;
+            int cur = 0;
+            int nsec = a.nsec;
+            int* rawoff, reloff, shnameoff, num, secidx, ord;
+            int firstother = 0;
+            int* aliasidx, anm;
+            byte** alname;
+            byte* suffix = (byte*)0;
+            int symtab_off = 0;
+            int off = 0;
+            int ref = 0;
+            int sec = 0;
+            int stor = 0;
+            int ctype = 0;
+            int al = 0;
+            int lg = 0;
+            int nfile = 0;
+            byte** cnames;
+            int cn = 0;
+            int* symname, noff;
+            int fl = 0;
+            int k = 0;
+            i64 chars = 0;
+            i64 v = 0;
+            if (!a.finished) { a.err = g"assembly is not finished\0"; -> false; };
+            if (nsec > 65000) { a.err = g"too many sections\0"; -> false; };
+            aliasidx = (int*)fmalloc(4 * (a.nsyms + 1));
+            anm = (int*)fmalloc(4 * (a.nsyms + 1));
+            alname = (byte**)fmalloc(8 * (a.nsyms + 1));
+            rawoff = (int*)fmalloc(4 * (nsec + 1));
+            reloff = (int*)fmalloc(4 * (nsec + 1));
+            shnameoff = (int*)fmalloc(4 * (nsec + 1));
+            num = (int*)fmalloc(4 * (nsec + 1));
+            secidx = (int*)fmalloc(4 * (nsec + 1));
+            ord = (int*)fmalloc(4 * (nsec + 1));
+            eb_init(@strtab);
+            eb_init(@symtab);
+            eb_init(o);
+            eb_put32(@strtab, 0);
+            // section numbers: associative sections come after all the others, as in llvm
+            k = 0;
+            i = 0;
+            while (i < nsec)
+            {
+                if (a.secs[i].sel != 5)
+                {
+                    num[i] = k + 1;
+                    ord[k] = i;
+                    k++;
+                };
+                i++;
+            };
+            i = 0;
+            while (i < nsec)
+            {
+                if (a.secs[i].sel == 5)
+                {
+                    num[i] = k + 1;
+                    ord[k] = i;
+                    k++;
+                };
+                i++;
+            };
+            // symbol indices: each section symbol with its aux record and then its COMDAT leader,
+            // then the other symbols
+            i = 0;
+            while (i < a.nsyms)
+            {
+                a.syms[i].outidx = -1;
+                aliasidx[i] = -1;
+                anm[i] = -1;
+                alname[i] = (byte*)0;
+                if (suffix == 0 & a.syms[i].bind == IA_SB_GLOBAL & a.syms[i].defined & a.syms[i].kind != IA_SK_COMMON & !a.syms[i].temp & a.syms[i].name[0] != 0)
+                {
+                    // the first symbol that ends up with external storage
+                    if (a.syms[i].cscl < 0 | a.syms[i].cscl == 2) { suffix = a.syms[i].name; };
+                };
+                i++;
+            };
+            cur = 0;
+            i = 0;
+            while (i < nsec)
+            {
+                secidx[i] = cur;
+                cur = cur + 2;
+                j = a.secs[i].lsym;
+                if (j >= 0)
+                {
+                    if (cf_in_symtab(a, j) & a.syms[j].outidx < 0)
+                    {
+                        a.syms[j].outidx = cur;
+                        cur++;
+                    };
+                };
+                i++;
+            };
+            firstother = cur;
+            i = 0;
+            while (i < a.nsyms)
+            {
+                if (a.syms[i].outidx < 0 & cf_in_symtab(a, i))
+                {
+                    a.syms[i].outidx = cur;
+                    cur++;
+                    if (a.syms[i].bind == IA_SB_WEAK & a.syms[i].kind != IA_SK_COMMON)
+                    {
+                        // the weak external record has an aux record, and its alias follows
+                        cur++;
+                        aliasidx[i] = cur;
+                        cur++;
+                        alname[i] = cf_alias_name(a.syms[i].name, suffix);
+                    };
+                };
+                i++;
+            };
+            nsyms = cur;
+            // names longer than 8 bytes live in the string table
+            cnames = (byte**)fmalloc(8 * (2 * a.nsyms + nsec + 2));
+            cn = 0;
+            symname = (int*)fmalloc(4 * (a.nsyms + 2));
+            noff = (int*)fmalloc(4 * (2 * a.nsyms + nsec + 2));
+            i = 0;
+            while (i < nsec)
+            {
+                shnameoff[i] = -1;
+                if (ia_strlen(a.secs[i].name) > 8)
+                {
+                    shnameoff[i] = cn;
+                    cnames[cn] = a.secs[i].name;
+                    cn++;
+                };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsyms)
+            {
+                symname[i] = -1;
+                if (a.syms[i].outidx >= 0 & ia_strlen(a.syms[i].name) > 8)
+                {
+                    symname[i] = cn;
+                    cnames[cn] = a.syms[i].name;
+                    cn++;
+                };
+                if (alname[i] != 0)
+                {
+                    if (ia_strlen(alname[i]) > 8)
+                    {
+                        anm[i] = cn;
+                        cnames[cn] = alname[i];
+                        cn++;
+                    };
+                };
+                i++;
+            };
+            eb_build_strtab(@strtab, cnames, noff, cn);
+            // file layout: header, section headers, then data and relocations per section
+            off = 20 + 40 * nsec;
+            i = 0;
+            while (i < nsec)
+            {
+                s = @a.secs[i];
+                rawoff[i] = 0;
+                reloff[i] = 0;
+                if (s.stype != IA_SHT_NOBITS)
+                {
+                    rawoff[i] = off;
+                    off = off + s.size;
+                    if (s.nrel > 0)
+                    {
+                        reloff[i] = off;
+                        off = off + s.nrel * 10;
+                        // more than 65535 relocations: an extra leading record holds the count
+                        if (s.nrel >= 65535) { off = off + 10; };
+                    };
+                };
+                i++;
+            };
+            symtab_off = off;
+            // the symbol table
+            i = 0;
+            while (i < nsec)
+            {
+                s = @a.secs[i];
+                k = 0;
+                if (shnameoff[i] >= 0) { k = noff[shnameoff[i]]; };
+                cf_put_name(@symtab, s.name, k);
+                eb_put32(@symtab, 0);
+                eb_put16(@symtab, num[i]);
+                eb_put16(@symtab, 0);
+                eb_put8(@symtab, 3);
+                eb_put8(@symtab, 1);
+                eb_put32(@symtab, s.size);
+                if (s.nrel >= 65535) { eb_put16(@symtab, 65535); } else { eb_put16(@symtab, s.nrel); };
+                eb_put16(@symtab, 0);
+                v = 0;
+                if (s.stype != IA_SHT_NOBITS) { v = cf_jamcrc(s.out, s.size); };
+                eb_put32(@symtab, v);
+                if (s.sel == 5 & s.assoc >= 0) { eb_put16(@symtab, num[s.assoc]); }
+                else { eb_put16(@symtab, num[i]); };
+                eb_put8(@symtab, s.sel);
+                eb_put8(@symtab, 0);
+                eb_put8(@symtab, 0);
+                eb_put8(@symtab, 0);
+                j = s.lsym;
+                if (j >= 0)
+                {
+                    if (a.syms[j].outidx == secidx[i] + 2) { cf_put_sym(a, @symtab, j, symname, noff, num, aliasidx, alname, anm); };
+                };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsyms)
+            {
+                if (a.syms[i].outidx >= firstother)
+                {
+                    cf_put_sym(a, @symtab, i, symname, noff, num, aliasidx, alname, anm);
+                };
+                i++;
+            };
+            if (a.file != 0)
+            {
+                eb_put_n(@symtab, g".file\0\0\0", 8);
+                eb_put32(@symtab, 0);
+                eb_put16(@symtab, 0xFFFE);
+                eb_put16(@symtab, 0);
+                eb_put8(@symtab, 0x67);
+                fl = ia_strlen(a.file);
+                nfile = (fl + 17) / 18;
+                if (nfile < 1) { nfile = 1; };
+                eb_put8(@symtab, nfile);
+                k = 0;
+                while (k < nfile * 18)
+                {
+                    if (k < fl) { eb_put8(@symtab, a.file[k]); } else { eb_put8(@symtab, 0); };
+                    k++;
+                };
+                nsyms = nsyms + 1 + nfile;
+            };
+            eb_patch(@strtab, 0, strtab.len, 4);
+            // file header
+            eb_put16(o, 0x8664);
+            eb_put16(o, nsec);
+            eb_put32(o, 0);
+            eb_put32(o, symtab_off);
+            eb_put32(o, nsyms);
+            eb_put16(o, 0);
+            eb_put16(o, 0);
+            // section headers
+            k = 0;
+            while (k < nsec)
+            {
+                i = ord[k];
+                s = @a.secs[i];
+                if (shnameoff[i] >= 0)
+                {
+                    eb_put8(o, '/');
+                    // decimal offset, padded with zeros to 8 bytes
+                    j = noff[shnameoff[i]];
+                    k = 1;
+                    {
+                        int dg = 1;
+                        int t = j;
+                        while (t >= 10) { dg++; t = t / 10; };
+                        int[8] digs;
+                        t = j;
+                        int q = dg - 1;
+                        while (q >= 0) { digs[q] = t % 10; t = t / 10; q--; };
+                        q = 0;
+                        while (q < dg) { eb_put8(o, 48 + digs[q]); q++; };
+                        k = 1 + dg;
+                    };
+                    while (k < 8) { eb_put8(o, 0); k++; };
+                }
+                else { cf_put_name(o, s.name, 0); };
+                eb_put32(o, 0);
+                eb_put32(o, 0);
+                eb_put32(o, s.size);
+                eb_put32(o, rawoff[i]);
+                eb_put32(o, reloff[i]);
+                eb_put32(o, 0);
+                if (s.nrel >= 65535) { eb_put16(o, 65535); } else { eb_put16(o, s.nrel); };
+                eb_put16(o, 0);
+                al = s.align;
+                lg = 0;
+                while (al > 1) { al = al / 2; lg++; };
+                chars = (s.flags `& 0xFF0FFFFF) `| ((lg + 1) << 20);
+                if (s.nrel >= 65535) { chars = chars `| 0x01000000; };
+                eb_put32(o, chars);
+                k++;
+            };
+            // section data and relocations
+            i = 0;
+            while (i < nsec)
+            {
+                s = @a.secs[i];
+                if (s.stype != IA_SHT_NOBITS)
+                {
+                    eb_put_n(o, s.out, s.size);
+                    if (s.nrel >= 65535)
+                    {
+                        eb_put32(o, (s.nrel + 1));
+                        eb_put32(o, 0);
+                        eb_put16(o, 0);
+                    };
+                    j = 0;
+                    while (j < s.nrel)
+                    {
+                        ref = s.rel[j].sym;
+                        if (ref < 0) { ref = secidx[0 - 1 - ref]; }
+                        else { ref = a.syms[ref].outidx; };
+                        eb_put32(o, s.rel[j].off);
+                        eb_put32(o, ref);
+                        eb_put16(o, s.rel[j].type);
+                        j++;
+                    };
+                };
+                i++;
+            };
+            eb_put_n(o, symtab.m, symtab.len);
+            eb_put_n(o, strtab.m, strtab.len);
+            ffree((byte*)cnames);
+            ffree((byte*)symname);
+            ffree((byte*)noff);
+            ffree((byte*)rawoff);
+            ffree((byte*)reloff);
+            ffree((byte*)shnameoff);
+            ffree((byte*)num);
+            ffree((byte*)secidx);
+            ffree((byte*)ord);
+            i = 0;
+            while (i < a.nsyms) { if (alname[i] != 0) { ffree(alname[i]); }; i++; };
+            ffree((byte*)alname);
+            ffree((byte*)aliasidx);
+            ffree((byte*)anm);
+            -> o.ok;
+        };
+
+        iasm_write_coff(Asm* a, byte* path) -> bool
+        {
+            ElfBuf o;
+            void* f;
+            int wrote;
+            if (!iasm_coff_image(a, @o)) { -> false; };
+            f = fopen(path, g"wb\0");
+            if (f == (void*)0) { a.err = g"cannot open the output file\0"; -> false; };
+            wrote = fwrite(o.m, 1, o.len, f);
+            fclose(f);
+            if (wrote != o.len) { a.err = g"short write\0"; -> false; };
+            -> true;
+        };
+    };
+};
+
+#endif;

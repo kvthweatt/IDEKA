@@ -1,0 +1,108 @@
+// Author: Karac V. Thweatt
+//
+// ilink_main.idk - IDEKA linker, stand alone entry point
+//
+// Usage:
+//     ilink [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] obj...
+//
+// Links ELF64 x86-64 objects into an executable (see ilink_elf.idk).
+
+module IDEKA_Linker_Entrypoint
+{
+    #import <standard.idk>;
+    #import <runtime/ffifio.idk>;
+    #import "src/compiler/ilink_elf.idk";
+    #import "src/compiler/ilink_pe.idk";
+
+    using standard::io::console;
+    using IDEKA::ilink;
+
+    ilink_usage() -> void
+    {
+        println("IDEKA linker (ELF64 and PE32+ x86-64)\0");
+        println("Usage: ilink [-t elf|pe] [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] [-subsystem n] [-stack bytes] obj...\0");
+        println("  ELF: -l libc.so.6 binds dynamically. PE: -l kernel32.lib (or a .dll) imports through the library.\0");
+        ->;
+    };
+
+    ilink_run(int argc, byte** argv) -> int
+    {
+        byte** objs = (byte**)fmalloc(8 * (argc + 1));
+        byte** libs = (byte**)fmalloc(8 * (argc + 1));
+        byte** dirs = (byte**)fmalloc(8 * (argc + 8));
+        int nobj = 0;
+        int nlib = 0;
+        int ndir = 0;
+        byte* out = "a.out\0";
+        byte* entry = "_start\0";
+        byte* interp = "/lib64/ld-linux-x86-64.so.2\0";
+        byte* err;
+        int i = 1;
+        int pe = -1;
+        int subsystem = 3;
+        i64 stack_size = 67108864;
+        bool entry_set = false;
+        byte* tv;
+        int sv, di;
+        while (i < argc)
+        {
+            if (lk_streq(argv[i], "-o\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; out = argv[i]; }
+            else if (lk_streq(argv[i], "-e\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; entry = argv[i]; entry_set = true; }
+            else if (lk_streq(argv[i], "-t\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; if (lk_streq(argv[i], "pe\0")) { pe = 1; } else { pe = 0; }; }
+            else if (lk_streq(argv[i], "-subsystem\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; subsystem = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { subsystem = subsystem * 10 + (tv[di] - 48); di++; }; }
+            else if (lk_streq(argv[i], "-stack\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; stack_size = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { stack_size = stack_size * 10 + (tv[di] - 48); di++; }; }
+            else if (lk_streq(argv[i], "-I\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; interp = argv[i]; }
+            else if (lk_streq(argv[i], "-l\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; libs[nlib] = argv[i]; nlib++; }
+            else if (lk_streq(argv[i], "-L\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; dirs[ndir] = argv[i]; ndir++; }
+            else { objs[nobj] = argv[i]; nobj++; };
+            i++;
+        };
+        if (nobj == 0) { ilink_usage(); -> 1; };
+        if (pe < 0)
+        {
+            // the first object tells the target: COFF objects start with the machine type 0x8664
+            sv = 0;
+            tv = lk_read_file(objs[0], @sv);
+            pe = 0;
+            if (tv != (byte*)0 & sv > 2 & lk_r16(tv, 0) == 34404) { pe = 1; };
+        };
+        if (pe == 1)
+        {
+            if (!entry_set) { entry = "FRTStartup\0"; };
+            err = lk_pe_link(objs, nobj, libs, nlib, dirs, ndir, entry, subsystem, stack_size, out);
+            if (err != (byte*)0)
+            {
+                print("ilink: \0");
+                println(err);
+                -> 1;
+            };
+            -> 0;
+        };
+        dirs[ndir] = "/lib/x86_64-linux-gnu\0"; ndir++;
+        dirs[ndir] = "/usr/lib/x86_64-linux-gnu\0"; ndir++;
+        dirs[ndir] = "/lib64\0"; ndir++;
+        dirs[ndir] = "/usr/lib\0"; ndir++;
+        err = lk_elf_link(objs, nobj, libs, nlib, dirs, ndir, entry, interp, out);
+        if (err != (byte*)0)
+        {
+            print("ilink: \0");
+            println(err);
+            -> 1;
+        };
+        -> 0;
+    };
+
+    main() -> int
+    {
+        -> ilink_run(1, (byte**)0);
+    };
+
+    main(int argc, byte** argv) -> int
+    {
+        -> ilink_run(argc, argv);
+    };
+}
+#build
+{
+    #[name] = "ilink"
+};

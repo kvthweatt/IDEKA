@@ -1,0 +1,28 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+IDKC_SYMTABLE st;
+
+comptime
+{
+    st = compiler.symbol_table;
+
+    compiler.io.console.println(st.entries);
+};
+
+enum Colors
+{
+	Red,
+	Green,
+	Blue
+};
+
+main() -> int
+{
+    println(st.entries);
+
+    println($Colors.RED);
+    println(~$Colors.RED);
+    return 0;
+};

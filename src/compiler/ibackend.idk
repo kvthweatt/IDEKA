@@ -1,0 +1,489 @@
+// Author: Karac V. Thweatt
+//
+// ibackend.idk - code generator backend selector
+//
+// CodeGen (icodegen.idk) builds code through this object only. Each builder call is
+// forwarded to the selected backend: i_llvmir.idk (LLVM IR text) or ix64.idk (x86_64
+// assembly). The backends share the code model in imodel.idk, so types and values made by
+// one call can be passed to any other. A new target adds its module, one kind in BK and one
+// forwarding line per builder method.
+//
+#ifndef IDEKA_STANDARD
+#import <standard.idk>;
+#endif;
+
+#ifndef IDEKA_AST
+#import "iast.idk";
+#endif;
+
+#ifndef IDEKA_TYPES
+#import "itypesys.idk";
+#endif;
+
+#ifndef IDEKA_MODEL
+#import "imodel.idk";
+#endif;
+
+#ifndef IDEKA_LLVMIR
+#import "i_llvmir.idk";
+#endif;
+
+#ifndef IDEKA_X64
+#import "ix64.idk";
+#endif;
+
+#ifndef IDEKA_BACKEND
+#def IDEKA_BACKEND 1;
+
+using IDEKA::ast;
+using IDEKA::preprocessor;
+using IDEKA::types;
+using IDEKA::ir;
+using IDEKA::x64;
+
+namespace IDEKA
+{
+    namespace backend
+    {
+        enum BK
+        {
+            LLVM,
+            X64
+        };
+
+        // Backend used by the next CodeBackend that is created
+        int target_kind = 0;
+
+        set_target(int k) -> void
+        {
+            target_kind = k;
+            ->;
+        };
+
+        // Calling convention of the x64 backend: 0 System V, 1 Win64
+        int target_abi = 0;
+
+        set_abi(int a) -> void
+        {
+            target_abi = a;
+            ->;
+        };
+
+        object CodeBackend
+        {
+            int kind;
+            IRModule* ll;
+            X64Module* xm;
+            IRValue** ia;       // small operand scratch for the code generator
+            bool must_tail;     // the next call is a tail call
+            PtrVec* funcs;      // IRFunc* in creation order
+            PtrVec* globals;    // IRGlobal* in creation order
+            PtrVec* named;      // identified struct types in creation order
+
+            __init(byte* name) -> this
+            {
+                this.kind = target_kind;
+                this.must_tail = false;
+                this.ll = (IRModule*)0;
+                this.xm = (X64Module*)0;
+                this.ia = (IRValue**)fmalloc((u64)8 * (u64)((sizeof(IRValue*) + 7) / 8));
+                if (this.kind == BK.X64)
+                {
+                    // sizeof is the packed size in bits, the aligned layout can be larger
+                    this.xm = (X64Module*)fmalloc((u64)(((sizeof(X64Module) + 7) / 8) * 2));
+                    this.xm.__init(name);
+                    this.xm.abi = target_abi;
+                    this.funcs = this.xm.funcs;
+                    this.globals = this.xm.globals;
+                    this.named = this.xm.named;
+                    -> this;
+                };
+                this.ll = (IRModule*)fmalloc((u64)((sizeof(IRModule) + 7) / 8));
+                this.ll.__init(name);
+                this.funcs = this.ll.funcs;
+                this.globals = this.ll.globals;
+                this.named = this.ll.named;
+                -> this;
+            };
+
+            __expr() -> CodeBackend* -> this;
+
+            __exit() -> void
+            {
+                if (this.kind == BK.X64) { this.xm.__exit(); ffree((byte*)this.xm); };
+                if (this.kind == BK.LLVM) { this.ll.__exit(); ffree((byte*)this.ll); };
+                -> ffree((byte*)this.ia);
+            };
+
+            // Hands the pending tail call flag to the active backend
+            sync_tail() -> void
+            {
+                if (this.kind == BK.X64) { this.xm.must_tail = this.must_tail; };
+                if (this.kind == BK.LLVM) { this.ll.must_tail = this.must_tail; };
+                this.must_tail = false;
+                ->;
+            };
+
+            cur_block() -> IRBlock*
+            {
+                if (this.kind == BK.X64) { -> this.xm.cb; };
+                -> this.ll.cb;
+            };
+
+            // Number of constructs the backend could not translate, always 0 for LLVM IR
+            unsupported() -> int
+            {
+                if (this.kind == BK.X64) { -> this.xm.nunsup; };
+                -> 0;
+            };
+
+            emit(Buf* out) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.emit(out); ->; };
+                this.ll.emit(out);
+                ->;
+            };
+
+            cast(byte* op, IRValue* v, IRType* to, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.cast(op, v, to, hint); };
+                -> this.ll.cast(op, v, to, hint);
+            };
+
+            store(IRValue* v, IRValue* p) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.store(v, p); ->; };
+                this.ll.store(v, p);
+                ->;
+            };
+
+            load(IRValue* p, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.load(p, hint); };
+                -> this.ll.load(p, hint);
+            };
+
+            position(IRFunc* f, IRBlock* b) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.position(f, b); ->; };
+                this.ll.position(f, b);
+                ->;
+            };
+
+            append_block(IRFunc* f, byte* name) -> IRBlock*
+            {
+                if (this.kind == BK.X64) { -> this.xm.append_block(f, name); };
+                -> this.ll.append_block(f, name);
+            };
+
+            binop(byte* op, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.binop(op, a, b, hint); };
+                -> this.ll.binop(op, a, b, hint);
+            };
+
+            c_int(IRType* ty, i64 val) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_int(ty, val); };
+                -> this.ll.c_int(ty, val);
+            };
+
+            gep(IRValue* p, IRValue** idx, int n, bool inbounds, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.gep(p, idx, n, inbounds, hint); };
+                -> this.ll.gep(p, idx, n, inbounds, hint);
+            };
+
+            br(IRBlock* target) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.br(target); ->; };
+                this.ll.br(target);
+                ->;
+            };
+
+            own(byte* s) -> byte*
+            {
+                if (this.kind == BK.X64) { -> this.xm.own(s); };
+                -> this.ll.own(s);
+            };
+
+            alloca_here(IRType* ty, byte* name) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.alloca_here(ty, name); };
+                -> this.ll.alloca_here(ty, name);
+            };
+
+            c_null(IRType* ty) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_null(ty); };
+                -> this.ll.c_null(ty);
+            };
+
+            icmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.icmp(pred, a, b, hint); };
+                -> this.ll.icmp(pred, a, b, hint);
+            };
+
+            cbr(IRValue* c, IRBlock* t, IRBlock* f) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.cbr(c, t, f); ->; };
+                this.ll.cbr(c, t, f);
+                ->;
+            };
+
+            t_array(IRType* elem, int count) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_array(elem, count); };
+                -> this.ll.t_array(elem, count);
+            };
+
+            find_function(byte* name) -> IRFunc*
+            {
+                if (this.kind == BK.X64) { -> this.xm.find_function(name); };
+                -> this.ll.find_function(name);
+            };
+
+            is_terminated() -> bool
+            {
+                if (this.kind == BK.X64) { -> this.xm.is_terminated(); };
+                -> this.ll.is_terminated();
+            };
+
+            t_ptr(IRType* elem) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_ptr(elem); };
+                -> this.ll.t_ptr(elem);
+            };
+
+            call(IRValue* callee, IRValue** args, int n, byte* hint) -> IRValue*
+            {
+                this.sync_tail();
+                if (this.kind == BK.X64) { -> this.xm.call(callee, args, n, hint); };
+                -> this.ll.call(callee, args, n, hint);
+            };
+
+            t_func(IRType* ret, IRType** params, int n, bool vararg) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_func(ret, params, n, vararg); };
+                -> this.ll.t_func(ret, params, n, vararg);
+            };
+
+            gep_ptr(IRValue* p, IRValue* i, bool inbounds, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.gep_ptr(p, i, inbounds, hint); };
+                -> this.ll.gep_ptr(p, i, inbounds, hint);
+            };
+
+            t_int(int width) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_int(width); };
+                -> this.ll.t_int(width);
+            };
+
+            find_global(byte* name) -> IRGlobal*
+            {
+                if (this.kind == BK.X64) { -> this.xm.find_global(name); };
+                -> this.ll.find_global(name);
+            };
+
+            add_global(IRType* ty, byte* name, byte* init) -> IRGlobal*
+            {
+                if (this.kind == BK.X64) { -> this.xm.add_global(ty, name, init); };
+                -> this.ll.add_global(ty, name, init);
+            };
+
+            new_value(IRType* ty, byte* text) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.new_value(ty, text); };
+                -> this.ll.new_value(ty, text);
+            };
+
+            c_fp(IRType* ty, double d) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_fp(ty, d); };
+                -> this.ll.c_fp(ty, d);
+            };
+
+            add_function(IRType* ftype, byte* name) -> IRFunc*
+            {
+                if (this.kind == BK.X64) { -> this.xm.add_function(ftype, name); };
+                -> this.ll.add_function(ftype, name);
+            };
+
+            alloca(IRType* ty, byte* name) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.alloca(ty, name); };
+                -> this.ll.alloca(ty, name);
+            };
+
+            t_struct(IRType** items, int n) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_struct(items, n); };
+                -> this.ll.t_struct(items, n);
+            };
+
+            call_ex(IRValue* callee, IRValue** args, int n, byte* hint, byte* cconv, bool tail) -> IRValue*
+            {
+                this.sync_tail();
+                if (this.kind == BK.X64) { -> this.xm.call_ex(callee, args, n, hint, cconv, tail); };
+                -> this.ll.call_ex(callee, args, n, hint, cconv, tail);
+            };
+
+            ret(IRValue* v) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.ret(v); ->; };
+                this.ll.ret(v);
+                ->;
+            };
+
+            phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.phi(ty, vals, blocks, n, hint); };
+                -> this.ll.phi(ty, vals, blocks, n, hint);
+            };
+
+            ret_void() -> void
+            {
+                if (this.kind == BK.X64) { this.xm.ret_void(); ->; };
+                this.ll.ret_void();
+                ->;
+            };
+
+            rename_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.rename_arg(f, i, name); ->; };
+                this.ll.rename_arg(f, i, name);
+                ->;
+            };
+
+            c_u64(IRType* ty, u64 val) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_u64(ty, val); };
+                -> this.ll.c_u64(ty, val);
+            };
+
+            c_bytes(IRType* ty, byte* bytes_in, int n) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_bytes(ty, bytes_in, n); };
+                -> this.ll.c_bytes(ty, bytes_in, n);
+            };
+
+            unreachable() -> void
+            {
+                if (this.kind == BK.X64) { this.xm.unreachable(); ->; };
+                this.ll.unreachable();
+                ->;
+            };
+
+            t_named(byte* name) -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_named(name); };
+                -> this.ll.t_named(name);
+            };
+
+            gep_field(IRValue* p, int i, bool inbounds, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.gep_field(p, i, inbounds, hint); };
+                -> this.ll.gep_field(p, i, inbounds, hint);
+            };
+
+            set_entry(IRBlock* b) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.set_entry(b); ->; };
+                this.ll.set_entry(b);
+                ->;
+            };
+
+            set_body(IRType* t, IRType** items, int n) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.set_body(t, items, n); ->; };
+                this.ll.set_body(t, items, n);
+                ->;
+            };
+
+            fcmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.fcmp(pred, a, b, hint); };
+                -> this.ll.fcmp(pred, a, b, hint);
+            };
+
+            va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.va_arg(list, ty, hint); };
+                -> this.ll.va_arg(list, ty, hint);
+            };
+
+            switch_to(IRValue* v, IRBlock* dflt, IRValue** vals, IRBlock** blocks, int n) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.switch_to(v, dflt, vals, blocks, n); ->; };
+                this.ll.switch_to(v, dflt, vals, blocks, n);
+                ->;
+            };
+
+            name_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                if (this.kind == BK.X64) { this.xm.name_arg(f, i, name); ->; };
+                this.ll.name_arg(f, i, name);
+                ->;
+            };
+
+            c_undef(IRType* ty) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_undef(ty); };
+                -> this.ll.c_undef(ty);
+            };
+
+            type_str(IRType* t) -> byte*
+            {
+                if (this.kind == BK.X64) { -> this.xm.type_str(t); };
+                -> this.ll.type_str(t);
+            };
+
+            t_void() -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_void(); };
+                -> this.ll.t_void();
+            };
+
+            t_float() -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_float(); };
+                -> this.ll.t_float();
+            };
+
+            t_double() -> IRType*
+            {
+                if (this.kind == BK.X64) { -> this.xm.t_double(); };
+                -> this.ll.t_double();
+            };
+
+            insertvalue(IRValue* agg, IRValue* v, int i, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.insertvalue(agg, v, i, hint); };
+                -> this.ll.insertvalue(agg, v, i, hint);
+            };
+
+            extractvalue(IRValue* agg, int i, byte* hint) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.extractvalue(agg, i, hint); };
+                -> this.ll.extractvalue(agg, i, hint);
+            };
+
+            c_array(IRType* ty, IRValue** elems, int n) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.c_array(ty, elems, n); };
+                -> this.ll.c_array(ty, elems, n);
+            };
+
+            alloca_count(IRType* ty, IRValue* count, byte* name) -> IRValue*
+            {
+                if (this.kind == BK.X64) { -> this.xm.alloca_count(ty, count, name); };
+                -> this.ll.alloca_count(ty, count, name);
+            };
+
+        };
+    };
+};
+
+#endif;

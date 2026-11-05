@@ -1,0 +1,1267 @@
+// Author: Karac V. Thweatt
+//
+// ilink_elf.idk - ELF64 x86-64 executable linker for the IDEKA toolchain
+//
+// Library, no main. Links ELF64 relocatable objects (the iasm writer output) into a non-PIE executable
+// that binds its imports dynamically against shared libraries, the way `ld ... -lc` does, with no
+// dependency on a system linker.
+//
+// Usage:
+//
+//     byte* err = lk_elf_link(objs, nobjs, libs, nlibs, dirs, ndirs, "_start\0", "/lib64/ld-linux-x86-64.so.2\0", "out\0");
+//     // err is null on success, else it names the problem
+//
+// objs  object files
+// libs  shared library file names, such as "libc.so.6", looked up in dirs
+// A library that nothing imports from is left out of the output (as-needed).
+// Symbol versions are honored: an import binds to the default version the library exports.
+//
+// Output layout (identity mapped from 0x400000):
+//
+//   RX segment: headers, .interp, .hash, .dynsym, .dynstr, .gnu.version, .gnu.version_r, .rela.dyn, .plt, .text, .rodata
+//   RW segment: .dynamic, .got, .data, .bss
+//
+// Imports are bound at load (BIND_NOW). A function import gets a PLT stub that jumps through its GOT slot.
+// A data import referenced by address gets a copy relocation into .bss.
+
+#ifndef IDEKA_ILINK
+#import "ilink.idk";
+#endif;
+
+#ifndef IDEKA_ILINK_ELF
+#def IDEKA_ILINK_ELF 1;
+
+namespace IDEKA
+{
+    namespace ilink
+    {
+        struct ElfLink
+        {
+            byte* err;
+            int nobj, nsec, nsym;
+            // per object
+            byte** o_img;
+            int* o_size;
+            int* o_sec0;
+            int* o_nsec;
+            int* o_sym0;
+            int* o_nsym;
+            int* o_stroff;
+            // per section (all objects)
+            int* s_obj;
+            byte** s_name;
+            int* s_type;
+            i64* s_flags;
+            int* s_off;
+            int* s_size;
+            int* s_align;
+            int* s_grp;
+            i64* s_addr;
+            int* s_info;
+            int* s_foff;
+            // per symbol (all objects)
+            int* y_obj;
+            byte** y_name;
+            int* y_info;
+            int* y_shndx;
+            i64* y_val;
+            i64* y_size;
+            int* y_def;
+            int* y_imp;
+            int* y_got;
+            i64* y_addr;
+            // shared libraries
+            int nlib;
+            byte** l_name;
+            byte** l_img;
+            int* l_size;
+            int* l_dynsym;
+            int* l_ndyn;
+            int* l_dynstr;
+            int* l_versym;
+            int* l_verdef;
+            int* l_nverdef;
+            int* l_used;
+            // imports
+            int nimp;
+            byte** i_name;
+            int* i_lib;
+            int* i_type;
+            i64* i_size;
+            int* i_ver;
+            int* i_nver;
+            int* i_got;
+            int* i_plt;
+            int* i_copy;
+            i64* i_caddr;
+            i64* i_gotaddr;
+            i64* i_pltaddr;
+            int* i_nameoff;
+            // versions needed
+            int nver;
+            int* v_lib;
+            byte** v_name;
+            i64* v_hash;
+            int* v_lidx;
+            // got slots: kind 0 import, 1 local symbol
+            int ngot;
+            int* g_kind;
+            int* g_ref;
+            int nplt;
+            int* p_imp;
+            int ncopy;
+            LkMap defs;
+            LkMap imps;
+        };
+
+        // ===== reading the objects =====
+
+        le_fail(ElfLink* L, byte* msg) -> bool
+        {
+            if (L.err == (byte*)0) { L.err = msg; };
+            -> false;
+        };
+
+        // Index of the defining symbol for a symbol, or -1
+        le_eff(ElfLink* L, int g) -> int
+        {
+            -> L.y_def[g];
+        };
+
+        // Output group of a section: 0 text, 1 rodata, 2 data, 3 bss, -1 not loaded
+        le_group(i64 flags, int type) -> int
+        {
+            if ((flags `& 2) == 0) { -> -1; };
+            if ((flags `& 4) != 0) { -> 0; };
+            if (type == 8) { -> 3; };
+            if ((flags `& 1) != 0) { -> 2; };
+            -> 1;
+        };
+
+        le_count_obj(ElfLink* L, int k) -> bool
+        {
+            byte* m = L.o_img[k];
+            int n = L.o_size[k];
+            int shoff, shnum, i, ty;
+            if (n < 64) { -> le_fail(L, "object file too small\0"); };
+            if (m[0] != 127 | m[1] != 69 | m[2] != 76 | m[3] != 70) { -> le_fail(L, "input is not an ELF file\0"); };
+            if (m[4] != 2 | m[5] != 1) { -> le_fail(L, "input is not a little endian ELF64 file\0"); };
+            if (lk_r16(m, 16) != 1) { -> le_fail(L, "input is not a relocatable object\0"); };
+            if (lk_r16(m, 18) != 62) { -> le_fail(L, "input is not an x86-64 object\0"); };
+            shoff = (int)lk_r64(m, 40);
+            shnum = lk_r16(m, 60);
+            if (shoff <= 0 | shoff + shnum * 64 > n) { -> le_fail(L, "bad section header table\0"); };
+            L.o_nsec[k] = shnum;
+            L.o_nsym[k] = 0;
+            i = 0;
+            while (i < shnum)
+            {
+                ty = (int)lk_r32(m, shoff + i * 64 + 4);
+                if (ty == 2) { L.o_nsym[k] = (int)(lk_r64(m, shoff + i * 64 + 32) / 24); };
+                i++;
+            };
+            -> true;
+        };
+
+        le_load_obj(ElfLink* L, int k) -> bool
+        {
+            byte* m = L.o_img[k];
+            int shoff = (int)lk_r64(m, 40);
+            int shnum = L.o_nsec[k];
+            int shstr = lk_r16(m, 62);
+            int stroff = 0;
+            int i, gs, symsec, link, ns, sh, ty, nmoff, gy, j, soff, info;
+            if (shstr >= shnum) { -> le_fail(L, "bad section name table\0"); };
+            nmoff = (int)lk_r64(m, shoff + shstr * 64 + 24);
+            i = 0;
+            while (i < shnum)
+            {
+                sh = shoff + i * 64;
+                gs = L.o_sec0[k] + i;
+                L.s_obj[gs] = k;
+                L.s_name[gs] = m + nmoff + (int)lk_r32(m, sh);
+                ty = (int)lk_r32(m, sh + 4);
+                L.s_type[gs] = ty;
+                L.s_flags[gs] = lk_r64(m, sh + 8);
+                L.s_off[gs] = (int)lk_r64(m, sh + 24);
+                L.s_size[gs] = (int)lk_r64(m, sh + 32);
+                L.s_align[gs] = (int)lk_r64(m, sh + 48);
+                if (L.s_align[gs] < 1) { L.s_align[gs] = 1; };
+                L.s_info[gs] = (int)lk_r32(m, sh + 44);
+                L.s_grp[gs] = le_group(L.s_flags[gs], ty);
+                L.s_addr[gs] = 0;
+                L.s_foff[gs] = 0;
+                if ((L.s_flags[gs] `& 1024) != 0) { -> le_fail(L, "thread local storage is not supported\0"); };
+                if (ty != 8 & ty != 0 & L.s_off[gs] + L.s_size[gs] > L.o_size[k]) { -> le_fail(L, "section outside the file\0"); };
+                if (ty == 2)
+                {
+                    symsec = i;
+                    link = (int)lk_r32(m, sh + 40);
+                    L.o_stroff[k] = (int)lk_r64(m, shoff + link * 64 + 24);
+                    stroff = L.o_stroff[k];
+                    ns = L.s_size[gs] / 24;
+                    soff = L.s_off[gs];
+                    j = 0;
+                    while (j < ns)
+                    {
+                        gy = L.o_sym0[k] + j;
+                        L.y_obj[gy] = k;
+                        L.y_name[gy] = m + stroff + (int)lk_r32(m, soff + j * 24);
+                        info = lk_r8(m, soff + j * 24 + 4);
+                        L.y_info[gy] = info;
+                        L.y_shndx[gy] = lk_r16(m, soff + j * 24 + 6);
+                        L.y_val[gy] = lk_r64(m, soff + j * 24 + 8);
+                        L.y_size[gy] = lk_r64(m, soff + j * 24 + 16);
+                        L.y_def[gy] = -1;
+                        L.y_imp[gy] = -1;
+                        L.y_got[gy] = -1;
+                        L.y_addr[gy] = 0;
+                        j++;
+                    };
+                };
+                i++;
+            };
+            -> true;
+        };
+
+        // ===== shared libraries =====
+
+        // Opens a shared library found in one of the directories
+        le_open_lib(ElfLink* L, byte* name, byte** dirs, int ndirs) -> bool
+        {
+            int k = L.nlib;
+            byte* path;
+            byte* tmp;
+            byte* img = (byte*)0;
+            int sz = 0;
+            int i, shoff, shnum, ty, link, sh;
+            int dsym = -1;
+            int dstr = 0;
+            int vsym = -1;
+            int vdef = -1;
+            int nvdef = 0;
+            int nd = 0;
+            i = 0;
+            while (i < ndirs & img == (byte*)0)
+            {
+                tmp = lk_cat2(dirs[i], "/\0");
+                path = lk_cat2(tmp, name);
+                img = lk_read_file(path, @sz);
+                ffree(tmp);
+                ffree(path);
+                i++;
+            };
+            if (img == (byte*)0) { -> le_fail(L, "cannot find a shared library\0"); };
+            if (sz < 64 | img[0] != 127 | img[1] != 69 | img[2] != 76 | img[3] != 70 | lk_r16(img, 16) != 3) { -> le_fail(L, "library is not an ELF shared object\0"); };
+            shoff = (int)lk_r64(img, 40);
+            shnum = lk_r16(img, 60);
+            i = 0;
+            while (i < shnum)
+            {
+                sh = shoff + i * 64;
+                ty = (int)lk_r32(img, sh + 4);
+                if (ty == 11)
+                {
+                    dsym = (int)lk_r64(img, sh + 24);
+                    nd = (int)(lk_r64(img, sh + 32) / 24);
+                    link = (int)lk_r32(img, sh + 40);
+                    dstr = (int)lk_r64(img, shoff + link * 64 + 24);
+                };
+                if (ty == 1879048191) { vsym = (int)lk_r64(img, sh + 24); };
+                if (ty == 1879048189)
+                {
+                    vdef = (int)lk_r64(img, sh + 24);
+                    nvdef = (int)lk_r32(img, sh + 44);
+                };
+                i++;
+            };
+            if (dsym < 0) { -> le_fail(L, "library has no dynamic symbol table\0"); };
+            L.l_name[k] = name;
+            L.l_img[k] = img;
+            L.l_size[k] = sz;
+            L.l_dynsym[k] = dsym;
+            L.l_ndyn[k] = nd;
+            L.l_dynstr[k] = dstr;
+            L.l_versym[k] = vsym;
+            L.l_verdef[k] = vdef;
+            L.l_nverdef[k] = nvdef;
+            L.l_used[k] = 0;
+            L.nlib++;
+            -> true;
+        };
+
+        // Name and hash of version index idx of a library from its definitions. Returns null if absent.
+        le_verdef_name(ElfLink* L, int lib, int idx, i64* hash) -> byte*
+        {
+            byte* m = L.l_img[lib];
+            int off = L.l_verdef[lib];
+            int n = 0;
+            int ndx, aux, next;
+            if (off < 0) { -> (byte*)0; };
+            while (n < L.l_nverdef[lib] + 1)
+            {
+                ndx = lk_r16(m, off + 4);
+                aux = (int)lk_r32(m, off + 12);
+                next = (int)lk_r32(m, off + 16);
+                if (ndx == idx)
+                {
+                    *hash = lk_r32(m, off + 8);
+                    -> m + L.l_dynstr[lib] + (int)lk_r32(m, off + aux);
+                };
+                if (next == 0) { -> (byte*)0; };
+                off = off + next;
+                n++;
+            };
+            -> (byte*)0;
+        };
+
+        // Finds an import named name among the libraries. On success fills the import table and returns its index.
+        le_find_import(ElfLink* L, byte* name) -> int
+        {
+            int found = lm_get(@L.imps, name);
+            int lib, j, vs, info, bind, sym, nm, ni;
+            i64 hv;
+            byte* m;
+            byte* vn;
+            int best, bestver, k, vidx;
+            if (found >= 0) { -> found; };
+            lib = 0;
+            while (lib < L.nlib)
+            {
+                m = L.l_img[lib];
+                best = -1;
+                bestver = 0;
+                j = 1;
+                while (j < L.l_ndyn[lib])
+                {
+                    sym = L.l_dynsym[lib] + j * 24;
+                    nm = L.l_dynstr[lib] + (int)lk_r32(m, sym);
+                    info = lk_r8(m, sym + 4);
+                    bind = info >> 4;
+                    if (lk_r16(m, sym + 6) != 0 & (bind == 1 | bind == 2) & lk_streq(m + nm, name))
+                    {
+                        vs = 1;
+                        if (L.l_versym[lib] >= 0) { vs = lk_r16(m, L.l_versym[lib] + j * 2); };
+                        // the default version is the one that is not hidden
+                        if ((vs `& 32768) == 0 | best < 0)
+                        {
+                            best = j;
+                            bestver = vs `& 32767;
+                            if ((vs `& 32768) == 0) { break; };
+                        };
+                    };
+                    j++;
+                };
+                if (best >= 0)
+                {
+                    sym = L.l_dynsym[lib] + best * 24;
+                    info = lk_r8(m, sym + 4);
+                    ni = L.nimp;
+                    L.i_name[ni] = name;
+                    L.i_lib[ni] = lib;
+                    // functions and indirect functions are called through the PLT, the rest are data
+                    k = info `& 15;
+                    if (k == 2 | k == 10) { L.i_type[ni] = 2; }
+                    else { L.i_type[ni] = 1; };
+                    L.i_size[ni] = lk_r64(m, sym + 16);
+                    L.i_ver[ni] = bestver;
+                    L.i_nver[ni] = 1;
+                    L.i_got[ni] = -1;
+                    L.i_plt[ni] = -1;
+                    L.i_copy[ni] = 0;
+                    L.i_caddr[ni] = 0;
+                    L.i_gotaddr[ni] = 0;
+                    L.i_pltaddr[ni] = 0;
+                    L.l_used[lib] = 1;
+                    // a version beyond the base one needs a version requirement
+                    if (bestver >= 2)
+                    {
+                        vn = le_verdef_name(L, lib, bestver, @hv);
+                        if (vn != (byte*)0)
+                        {
+                            vidx = 0;
+                            k = 0;
+                            while (k < L.nver)
+                            {
+                                if (L.v_lib[k] == lib & L.v_lidx[k] == bestver) { vidx = k + 2; };
+                                k++;
+                            };
+                            if (vidx == 0)
+                            {
+                                L.v_lib[L.nver] = lib;
+                                L.v_name[L.nver] = vn;
+                                L.v_hash[L.nver] = hv;
+                                L.v_lidx[L.nver] = bestver;
+                                vidx = L.nver + 2;
+                                L.nver++;
+                            };
+                            L.i_nver[ni] = vidx;
+                        };
+                    };
+                    lm_put(@L.imps, name, ni);
+                    L.nimp++;
+                    -> ni;
+                };
+                lib++;
+            };
+            -> -1;
+        };
+
+        // ===== resolving =====
+
+        le_resolve_names(ElfLink* L) -> bool
+        {
+            int g, e;
+            int bind, sh;
+            lm_init(@L.defs, L.nsym);
+            // strong definitions
+            g = 0;
+            while (g < L.nsym)
+            {
+                bind = L.y_info[g] >> 4;
+                sh = L.y_shndx[g];
+                if (bind == 1 & sh != 0 & sh != 65522 & L.y_name[g][0] != 0)
+                {
+                    if (!lm_put(@L.defs, L.y_name[g], g)) { -> le_fail(L, "duplicate symbol definition\0"); };
+                };
+                g++;
+            };
+            // weak definitions
+            g = 0;
+            while (g < L.nsym)
+            {
+                bind = L.y_info[g] >> 4;
+                sh = L.y_shndx[g];
+                if (bind == 2 & sh != 0 & sh != 65522 & L.y_name[g][0] != 0) { lm_put(@L.defs, L.y_name[g], g); };
+                g++;
+            };
+            // common symbols: the first one wins and keeps the largest size
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_shndx[g] == 65522 & L.y_name[g][0] != 0)
+                {
+                    e = lm_get(@L.defs, L.y_name[g]);
+                    if (e < 0) { lm_put(@L.defs, L.y_name[g], g); }
+                    else if (L.y_shndx[e] == 65522 & L.y_size[g] > L.y_size[e]) { L.y_size[e] = L.y_size[g]; };
+                };
+                g++;
+            };
+            g = 0;
+            while (g < L.nsym)
+            {
+                bind = L.y_info[g] >> 4;
+                if (bind == 0 | L.y_name[g][0] == 0)
+                {
+                    // locals define themselves, the null symbol and unnamed symbols have no definition
+                    if (L.y_shndx[g] != 0) { L.y_def[g] = g; };
+                }
+                else
+                {
+                    e = lm_get(@L.defs, L.y_name[g]);
+                    L.y_def[g] = e;
+                };
+                g++;
+            };
+            -> true;
+        };
+
+        // Symbol the relocation names: its definition, or an import created on first use
+        le_use_symbol(ElfLink* L, int g) -> bool
+        {
+            int ni;
+            int bind;
+            if (L.y_def[g] >= 0 | L.y_imp[g] != -1) { -> true; };
+            bind = L.y_info[g] >> 4;
+            ni = le_find_import(L, L.y_name[g]);
+            if (ni >= 0)
+            {
+                L.y_imp[g] = ni;
+                -> true;
+            };
+            if (bind == 2)
+            {
+                L.y_imp[g] = -2;
+                -> true;
+            };
+            -> le_fail(L, L.y_name[g]);
+        };
+
+        // Marks what the relocations of every loaded section need: imports, GOT slots, PLT stubs, copies
+        le_scan_relocs(ElfLink* L) -> bool
+        {
+            int k, i, j, nrel, rsec, target, g, ty, e, ni, ro;
+            byte* m;
+            i64 info;
+            k = 0;
+            while (k < L.nobj)
+            {
+                m = L.o_img[k];
+                i = 0;
+                while (i < L.o_nsec[k])
+                {
+                    rsec = L.o_sec0[k] + i;
+                    if (L.s_type[rsec] == 4)
+                    {
+                        target = L.o_sec0[k] + L.s_info[rsec];
+                        if (L.s_grp[target] >= 0)
+                        {
+                            nrel = L.s_size[rsec] / 24;
+                            j = 0;
+                            while (j < nrel)
+                            {
+                                ro = L.s_off[rsec] + j * 24;
+                                info = lk_r64(m, ro + 8);
+                                g = L.o_sym0[k] + (int)(info >> 32);
+                                ty = (int)(info `& 4294967295);
+                                if (!le_use_symbol(L, g)) { -> false; };
+                                e = L.y_def[g];
+                                ni = L.y_imp[g];
+                                if (e < 0 & ni >= 0)
+                                {
+                                    if (ty == 9 | ty == 41 | ty == 42)
+                                    {
+                                        if (L.i_got[ni] < 0)
+                                        {
+                                            L.g_kind[L.ngot] = 0;
+                                            L.g_ref[L.ngot] = ni;
+                                            L.i_got[ni] = L.ngot;
+                                            L.ngot++;
+                                        };
+                                    }
+                                    else if (L.i_type[ni] == 2)
+                                    {
+                                        if (L.i_plt[ni] < 0)
+                                        {
+                                            L.i_plt[ni] = L.nplt;
+                                            L.p_imp[L.nplt] = ni;
+                                            L.nplt++;
+                                            if (L.i_got[ni] < 0)
+                                            {
+                                                L.g_kind[L.ngot] = 0;
+                                                L.g_ref[L.ngot] = ni;
+                                                L.i_got[ni] = L.ngot;
+                                                L.ngot++;
+                                            };
+                                        };
+                                    }
+                                    else
+                                    {
+                                        if (L.i_copy[ni] == 0)
+                                        {
+                                            L.i_copy[ni] = 1;
+                                            L.ncopy++;
+                                        };
+                                    };
+                                }
+                                else if (e >= 0 & (ty == 9 | ty == 41 | ty == 42))
+                                {
+                                    if (L.y_got[e] < 0)
+                                    {
+                                        L.g_kind[L.ngot] = 1;
+                                        L.g_ref[L.ngot] = e;
+                                        L.y_got[e] = L.ngot;
+                                        L.ngot++;
+                                    };
+                                };
+                                j++;
+                            };
+                        };
+                    };
+                    i++;
+                };
+                k++;
+            };
+            -> true;
+        };
+
+        // ===== writing =====
+
+        le_elfhash(byte* s) -> i64
+        {
+            i64 h = 0;
+            i64 g;
+            int i = 0;
+            while (s[i] != 0)
+            {
+                h = (h << 4) + (s[i] `& 255);
+                g = h `& 4026531840;
+                if (g != 0) { h = h `^| (g >> 24); };
+                h = h `& (4294967295 - g);
+                i++;
+            };
+            -> h;
+        };
+
+        // Address of a defined symbol, valid once the sections have addresses
+        le_symaddr(ElfLink* L, int e) -> i64
+        {
+            int sh = L.y_shndx[e];
+            int gs;
+            if (sh == 65521) { -> L.y_val[e]; };
+            if (sh == 65522) { -> L.y_addr[e]; };
+            gs = L.o_sec0[L.y_obj[e]] + sh;
+            -> L.s_addr[gs] + L.y_val[e];
+        };
+
+        // Size of the dynamic string table and the offsets of its names
+        le_link_all(ElfLink* L, byte* entry, byte* interp, byte* out) -> bool
+        {
+            LkBuf o;
+            LkBuf ds;
+            i64 base = 4194304;
+            i64 pos, bssaddr, entryaddr, a;
+            int[4] gsize;
+            int[4] galign;
+            int dynamic, nsymd, nb, interp_off, hash_off, sym_off, str_off, ver_off, vneed_off, rela_off, plt_off;
+            int dyn_off, got_off, rw_off, text_off, rodata_off, data_off, i, j, k, g, grp, gs, ni, nrela, ndyn_ent, nneeded;
+            int vneedsz, ty, nrel, ro, e, sym, off, kk, nxt, cnt, cb;
+            int* needed;
+            int* libver;
+            int* bucket;
+            int* chain;
+            int e_entry;
+            byte* m;
+            i64 info, S, A, P, val;
+            int imp;
+            // ---- the sections of each group get offsets within the group
+            grp = 0;
+            while (grp < 4)
+            {
+                gsize[grp] = 0;
+                galign[grp] = 16;
+                grp++;
+            };
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                grp = L.s_grp[gs];
+                if (grp >= 0 & L.s_size[gs] > 0)
+                {
+                    L.s_foff[gs] = (int)lk_align_up(gsize[grp], L.s_align[gs]);
+                    gsize[grp] = L.s_foff[gs] + L.s_size[gs];
+                    if (L.s_align[gs] > galign[grp]) { galign[grp] = L.s_align[gs]; };
+                };
+                gs++;
+            };
+            // common symbols live at the end of .bss
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_shndx[g] == 65522 & L.y_def[g] == g)
+                {
+                    a = L.y_val[g];
+                    if (a < 1) { a = 1; };
+                    L.y_addr[g] = lk_align_up(gsize[3], a);
+                    gsize[3] = (int)L.y_addr[g] + (int)L.y_size[g];
+                    if (a > galign[3]) { galign[3] = (int)a; };
+                };
+                g++;
+            };
+            // copy relocated data imports also live in .bss
+            i = 0;
+            while (i < L.nimp)
+            {
+                if (L.i_copy[i] != 0)
+                {
+                    a = 16;
+                    if (L.i_size[i] < 16) { a = 8; };
+                    L.i_caddr[i] = lk_align_up(gsize[3], a);
+                    gsize[3] = (int)L.i_caddr[i] + (int)L.i_size[i];
+                };
+                i++;
+            };
+            dynamic = 0;
+            if (L.nimp > 0) { dynamic = 1; };
+            // ---- the dynamic string table
+            lb_init(@ds);
+            lb_put8(@ds, 0);
+            needed = (int*)fmalloc(4 * (L.nlib + 2));
+            libver = (int*)fmalloc(4 * (L.nlib + 2));
+            nneeded = 0;
+            i = 0;
+            while (i < L.nlib)
+            {
+                needed[i] = -1;
+                if (L.l_used[i] != 0)
+                {
+                    needed[i] = lb_put_str(@ds, L.l_name[i]);
+                    nneeded++;
+                };
+                i++;
+            };
+            i = 0;
+            while (i < L.nimp)
+            {
+                L.i_nameoff[i] = lb_put_str(@ds, L.i_name[i]);
+                i++;
+            };
+            // names of the versions for the requirements
+            // each version gets its name offset stored in v_lidx's twin, kept locally
+            i = 0;
+            // ---- file offsets of the first segment
+            pos = 64 + 56 * 6;
+            interp_off = 0;
+            hash_off = 0;
+            sym_off = 0;
+            str_off = 0;
+            ver_off = 0;
+            vneed_off = 0;
+            rela_off = 0;
+            plt_off = 0;
+            nsymd = 1 + L.nimp;
+            nb = nsymd;
+            if (nb < 1) { nb = 1; };
+            nrela = L.ngot + L.ncopy;
+            // version requirements need their names in the string table first
+            int* vnoff = (int*)fmalloc(4 * (L.nver + 2));
+            i = 0;
+            while (i < L.nver)
+            {
+                vnoff[i] = lb_put_str(@ds, L.v_name[i]);
+                i++;
+            };
+            if (dynamic == 1)
+            {
+                interp_off = (int)pos;
+                pos = pos + lk_strlen(interp) + 1;
+                pos = lk_align_up(pos, 8);
+                hash_off = (int)pos;
+                pos = pos + 4 * (2 + nb + nsymd);
+                pos = lk_align_up(pos, 8);
+                sym_off = (int)pos;
+                pos = pos + 24 * nsymd;
+                str_off = (int)pos;
+                pos = pos + ds.len;
+                pos = lk_align_up(pos, 8);
+                ver_off = (int)pos;
+                pos = pos + 2 * nsymd;
+                pos = lk_align_up(pos, 8);
+                vneed_off = (int)pos;
+                vneedsz = 0;
+                i = 0;
+                while (i < L.nlib)
+                {
+                    cnt = 0;
+                    k = 0;
+                    while (k < L.nver)
+                    {
+                        if (L.v_lib[k] == i) { cnt++; };
+                        k++;
+                    };
+                    libver[i] = cnt;
+                    if (cnt > 0) { vneedsz = vneedsz + 16 + 16 * cnt; };
+                    i++;
+                };
+                pos = pos + vneedsz;
+                pos = lk_align_up(pos, 8);
+                rela_off = (int)pos;
+                pos = pos + 24 * nrela;
+                pos = lk_align_up(pos, 16);
+                plt_off = (int)pos;
+                pos = pos + 16 * L.nplt;
+            };
+            pos = lk_align_up(pos, galign[0]);
+            text_off = (int)pos;
+            pos = pos + gsize[0];
+            pos = lk_align_up(pos, galign[1]);
+            rodata_off = (int)pos;
+            pos = pos + gsize[1];
+            // ---- the second segment starts on a new page
+            pos = lk_align_up(pos, 4096);
+            rw_off = (int)pos;
+            ndyn_ent = 0;
+            dyn_off = (int)pos;
+            if (dynamic == 1)
+            {
+                // needed, hash, strtab, symtab, strsz, syment, debug, rela, relasz, relaent, flags, flags_1, versym, verneed, verneednum, null
+                ndyn_ent = nneeded + 16;
+                pos = pos + 16 * ndyn_ent;
+            };
+            pos = lk_align_up(pos, 8);
+            got_off = (int)pos;
+            pos = pos + 8 * L.ngot;
+            pos = lk_align_up(pos, galign[2]);
+            data_off = (int)pos;
+            pos = pos + gsize[2];
+            pos = lk_align_up(pos, galign[3]);
+            bssaddr = base + pos;
+            // ---- section and symbol addresses
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                grp = L.s_grp[gs];
+                if (grp >= 0)
+                {
+                    if (grp == 0) { L.s_addr[gs] = base + text_off + L.s_foff[gs]; L.s_foff[gs] = text_off + L.s_foff[gs]; }
+                    else if (grp == 1) { L.s_addr[gs] = base + rodata_off + L.s_foff[gs]; L.s_foff[gs] = rodata_off + L.s_foff[gs]; }
+                    else if (grp == 2) { L.s_addr[gs] = base + data_off + L.s_foff[gs]; L.s_foff[gs] = data_off + L.s_foff[gs]; }
+                    else { L.s_addr[gs] = bssaddr + L.s_foff[gs]; };
+                };
+                gs++;
+            };
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_shndx[g] == 65522 & L.y_def[g] == g) { L.y_addr[g] = bssaddr + L.y_addr[g]; };
+                g++;
+            };
+            i = 0;
+            while (i < L.nimp)
+            {
+                if (L.i_copy[i] != 0) { L.i_caddr[i] = bssaddr + L.i_caddr[i]; };
+                if (L.i_plt[i] >= 0) { L.i_pltaddr[i] = base + plt_off + 16 * L.i_plt[i]; };
+                if (L.i_got[i] >= 0) { L.i_gotaddr[i] = base + got_off + 8 * L.i_got[i]; };
+                i++;
+            };
+            // ---- entry point
+            e_entry = -1;
+            g = 0;
+            while (g < L.nsym & e_entry < 0)
+            {
+                if (L.y_def[g] == g & L.y_shndx[g] != 0 & lk_streq(L.y_name[g], entry)) { e_entry = g; };
+                g++;
+            };
+            if (e_entry < 0) { -> le_fail(L, "entry point symbol is not defined\0"); };
+            entryaddr = le_symaddr(L, e_entry);
+            // ---- the image: loaded section data first, then relocations are applied in place
+            lb_init(@o);
+            lb_pad_to(@o, (int)pos);
+            if (!o.ok) { -> le_fail(L, "out of memory\0"); };
+            lk_zero(o.m, (int)pos);
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                if (L.s_grp[gs] >= 0 & L.s_grp[gs] != 3 & L.s_size[gs] > 0 & L.s_type[gs] != 8)
+                {
+                    m = L.o_img[L.s_obj[gs]];
+                    i = 0;
+                    while (i < L.s_size[gs])
+                    {
+                        o.m[L.s_foff[gs] + i] = m[L.s_off[gs] + i];
+                        i++;
+                    };
+                };
+                gs++;
+            };
+            // got slots of local symbols hold their absolute addresses
+            i = 0;
+            while (i < L.ngot)
+            {
+                if (L.g_kind[i] == 1) { lk_w64(o.m, got_off + 8 * i, le_symaddr(L, L.g_ref[i])); };
+                i++;
+            };
+            // ---- relocations
+            k = 0;
+            while (k < L.nobj)
+            {
+                m = L.o_img[k];
+                i = 0;
+                while (i < L.o_nsec[k])
+                {
+                    gs = L.o_sec0[k] + i;
+                    if (L.s_type[gs] == 4 & L.s_grp[L.o_sec0[k] + L.s_info[gs]] >= 0)
+                    {
+                        kk = L.o_sec0[k] + L.s_info[gs];
+                        nrel = L.s_size[gs] / 24;
+                        j = 0;
+                        while (j < nrel)
+                        {
+                            ro = L.s_off[gs] + j * 24;
+                            info = lk_r64(m, ro + 8);
+                            g = L.o_sym0[k] + (int)(info >> 32);
+                            ty = (int)(info `& 4294967295);
+                            A = lk_r64(m, ro + 16);
+                            off = L.s_foff[kk] + (int)lk_r64(m, ro);
+                            P = L.s_addr[kk] + lk_r64(m, ro);
+                            e = L.y_def[g];
+                            imp = L.y_imp[g];
+                            S = 0;
+                            if (e >= 0) { S = le_symaddr(L, e); }
+                            else if (imp >= 0)
+                            {
+                                if (L.i_copy[imp] != 0) { S = L.i_caddr[imp]; }
+                                else if (L.i_plt[imp] >= 0) { S = L.i_pltaddr[imp]; };
+                            };
+                            // the address of a GOT slot for GOT relative types
+                            if (ty == 9 | ty == 41 | ty == 42)
+                            {
+                                if (e >= 0) { S = base + got_off + 8 * L.y_got[e]; }
+                                else if (imp >= 0) { S = L.i_gotaddr[imp]; }
+                                else { S = 0; };
+                            };
+                            switch (ty)
+                            {
+                                case (1) { lk_w64(o.m, off, S + A); }
+                                case (2) { val = S + A - P; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (4) { val = S + A - P; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (9) { val = S + A - P; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (41) { val = S + A - P; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (42) { val = S + A - P; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (10) { val = S + A; if (val < 0 | val > 4294967295) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (11) { val = S + A; if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (12) { lk_w16(o.m, off, S + A); }
+                                case (14) { lk_w8(o.m, off, S + A); }
+                                case (24) { lk_w64(o.m, off, S + A - P); }
+                                default { -> le_fail(L, "unsupported relocation type\0"); };
+                            };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
+                k++;
+            };
+            // ---- PLT stubs
+            i = 0;
+            while (i < L.nplt)
+            {
+                ni = L.p_imp[i];
+                off = plt_off + 16 * i;
+                o.m[off] = 255;
+                o.m[off + 1] = 37;
+                lk_w32(o.m, off + 2, L.i_gotaddr[ni] - (base + off + 6));
+                j = 6;
+                while (j < 16) { o.m[off + j] = 204; j++; };
+                i++;
+            };
+            // ---- dynamic tables
+            if (dynamic == 1)
+            {
+                k = 0;
+                while (interp[k] != 0) { o.m[interp_off + k] = interp[k]; k++; };
+                // dynsym
+                i = 0;
+                while (i < L.nimp)
+                {
+                    sym = sym_off + 24 * (i + 1);
+                    lk_w32(o.m, sym, L.i_nameoff[i]);
+                    if (L.i_copy[i] != 0)
+                    {
+                        o.m[sym + 4] = 17;
+                        lk_w16(o.m, sym + 6, 65521);
+                        lk_w64(o.m, sym + 8, L.i_caddr[i]);
+                        lk_w64(o.m, sym + 16, L.i_size[i]);
+                    }
+                    else
+                    {
+                        o.m[sym + 4] = 16 + L.i_type[i];
+                        lk_w16(o.m, sym + 6, 0);
+                    };
+                    lk_w16(o.m, ver_off + 2 * (i + 1), L.i_nver[i]);
+                    i++;
+                };
+                // string table
+                i = 0;
+                while (i < ds.len) { o.m[str_off + i] = ds.m[i]; i++; };
+                // hash
+                bucket = (int*)fmalloc(4 * (nb + 2));
+                chain = (int*)fmalloc(4 * (nsymd + 2));
+                lk_zero((byte*)bucket, 4 * (nb + 2));
+                lk_zero((byte*)chain, 4 * (nsymd + 2));
+                i = 1;
+                while (i < nsymd)
+                {
+                    cb = (int)(le_elfhash(L.i_name[i - 1]) % nb);
+                    chain[i] = bucket[cb];
+                    bucket[cb] = i;
+                    i++;
+                };
+                lk_w32(o.m, hash_off, nb);
+                lk_w32(o.m, hash_off + 4, nsymd);
+                i = 0;
+                while (i < nb) { lk_w32(o.m, hash_off + 8 + 4 * i, bucket[i]); i++; };
+                i = 0;
+                while (i < nsymd) { lk_w32(o.m, hash_off + 8 + 4 * nb + 4 * i, chain[i]); i++; };
+                // version requirements
+                off = vneed_off;
+                i = 0;
+                cnt = 0;
+                while (i < L.nlib)
+                {
+                    if (libver[i] > 0)
+                    {
+                        lk_w16(o.m, off, 1);
+                        lk_w16(o.m, off + 2, libver[i]);
+                        lk_w32(o.m, off + 4, needed[i]);
+                        lk_w32(o.m, off + 8, 16);
+                        cnt++;
+                        // the next requirement follows after the auxiliary entries
+                        nxt = 16 + 16 * libver[i];
+                        j = 0;
+                        k = 0;
+                        while (k < L.nver)
+                        {
+                            if (L.v_lib[k] == i)
+                            {
+                                lk_w32(o.m, off + 16 + 16 * j, L.v_hash[k]);
+                                lk_w16(o.m, off + 16 + 16 * j + 4, 0);
+                                lk_w16(o.m, off + 16 + 16 * j + 6, k + 2);
+                                lk_w32(o.m, off + 16 + 16 * j + 8, vnoff[k]);
+                                j++;
+                                if (j < libver[i]) { lk_w32(o.m, off + 16 + 16 * (j - 1) + 12, 16); };
+                            };
+                            k++;
+                        };
+                        off = off + nxt;
+                    };
+                    i++;
+                };
+                // chain the verneed entries
+                off = vneed_off;
+                i = 0;
+                j = 0;
+                while (i < L.nlib)
+                {
+                    if (libver[i] > 0)
+                    {
+                        j++;
+                        if (j < cnt) { lk_w32(o.m, off + 12, 16 + 16 * libver[i]); };
+                        off = off + 16 + 16 * libver[i];
+                    };
+                    i++;
+                };
+                // relocations of the GOT slots and copies
+                off = rela_off;
+                i = 0;
+                while (i < L.ngot)
+                {
+                    if (L.g_kind[i] == 0)
+                    {
+                        lk_w64(o.m, off, base + got_off + 8 * i);
+                        lk_w64(o.m, off + 8, ((i64)(L.g_ref[i] + 1) << 32) `| 6);
+                        lk_w64(o.m, off + 16, 0);
+                        off = off + 24;
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < L.nimp)
+                {
+                    if (L.i_copy[i] != 0)
+                    {
+                        lk_w64(o.m, off, L.i_caddr[i]);
+                        lk_w64(o.m, off + 8, ((i64)(i + 1) << 32) `| 5);
+                        lk_w64(o.m, off + 16, 0);
+                        off = off + 24;
+                    };
+                    i++;
+                };
+                nrela = (off - rela_off) / 24;
+                // dynamic section
+                off = dyn_off;
+                i = 0;
+                while (i < L.nlib)
+                {
+                    if (needed[i] >= 0)
+                    {
+                        lk_w64(o.m, off, 1);
+                        lk_w64(o.m, off + 8, needed[i]);
+                        off = off + 16;
+                    };
+                    i++;
+                };
+                lk_w64(o.m, off, 4); lk_w64(o.m, off + 8, base + hash_off); off = off + 16;
+                lk_w64(o.m, off, 5); lk_w64(o.m, off + 8, base + str_off); off = off + 16;
+                lk_w64(o.m, off, 6); lk_w64(o.m, off + 8, base + sym_off); off = off + 16;
+                lk_w64(o.m, off, 10); lk_w64(o.m, off + 8, ds.len); off = off + 16;
+                lk_w64(o.m, off, 11); lk_w64(o.m, off + 8, 24); off = off + 16;
+                lk_w64(o.m, off, 21); lk_w64(o.m, off + 8, 0); off = off + 16;
+                lk_w64(o.m, off, 7); lk_w64(o.m, off + 8, base + rela_off); off = off + 16;
+                lk_w64(o.m, off, 8); lk_w64(o.m, off + 8, 24 * nrela); off = off + 16;
+                lk_w64(o.m, off, 9); lk_w64(o.m, off + 8, 24); off = off + 16;
+                lk_w64(o.m, off, 30); lk_w64(o.m, off + 8, 8); off = off + 16;
+                lk_w64(o.m, off, 1879048187); lk_w64(o.m, off + 8, 1); off = off + 16;
+                lk_w64(o.m, off, 1879048176); lk_w64(o.m, off + 8, base + ver_off); off = off + 16;
+                lk_w64(o.m, off, 1879048190); lk_w64(o.m, off + 8, base + vneed_off); off = off + 16;
+                lk_w64(o.m, off, 1879048191); lk_w64(o.m, off + 8, cnt); off = off + 16;
+                lk_w64(o.m, off, 0); lk_w64(o.m, off + 8, 0);
+            };
+            // ---- ELF header and program headers
+            o.m[0] = 127; o.m[1] = 69; o.m[2] = 76; o.m[3] = 70;
+            o.m[4] = 2; o.m[5] = 1; o.m[6] = 1;
+            lk_w16(o.m, 16, 2);
+            lk_w16(o.m, 18, 62);
+            lk_w32(o.m, 20, 1);
+            lk_w64(o.m, 24, entryaddr);
+            lk_w64(o.m, 32, 64);
+            lk_w64(o.m, 40, 0);
+            lk_w32(o.m, 48, 0);
+            lk_w16(o.m, 52, 64);
+            lk_w16(o.m, 54, 56);
+            if (dynamic == 1) { lk_w16(o.m, 56, 6); } else { lk_w16(o.m, 56, 3); };
+            lk_w16(o.m, 58, 64);
+            lk_w16(o.m, 60, 0);
+            lk_w16(o.m, 62, 0);
+            off = 64;
+            if (dynamic == 1)
+            {
+                // PT_PHDR
+                lk_w32(o.m, off, 6); lk_w32(o.m, off + 4, 4);
+                lk_w64(o.m, off + 8, 64); lk_w64(o.m, off + 16, base + 64); lk_w64(o.m, off + 24, base + 64);
+                lk_w64(o.m, off + 32, 56 * 6); lk_w64(o.m, off + 40, 56 * 6); lk_w64(o.m, off + 48, 8);
+                off = off + 56;
+                // PT_INTERP
+                lk_w32(o.m, off, 3); lk_w32(o.m, off + 4, 4);
+                lk_w64(o.m, off + 8, interp_off); lk_w64(o.m, off + 16, base + interp_off); lk_w64(o.m, off + 24, base + interp_off);
+                lk_w64(o.m, off + 32, lk_strlen(interp) + 1); lk_w64(o.m, off + 40, lk_strlen(interp) + 1); lk_w64(o.m, off + 48, 1);
+                off = off + 56;
+            };
+            // PT_LOAD read and execute
+            lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 5);
+            lk_w64(o.m, off + 8, 0); lk_w64(o.m, off + 16, base); lk_w64(o.m, off + 24, base);
+            lk_w64(o.m, off + 32, rodata_off + gsize[1]); lk_w64(o.m, off + 40, rodata_off + gsize[1]); lk_w64(o.m, off + 48, 4096);
+            off = off + 56;
+            // PT_LOAD read and write
+            lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 6);
+            lk_w64(o.m, off + 8, rw_off); lk_w64(o.m, off + 16, base + rw_off); lk_w64(o.m, off + 24, base + rw_off);
+            lk_w64(o.m, off + 32, (data_off + gsize[2]) - rw_off);
+            lk_w64(o.m, off + 40, ((bssaddr - base) + gsize[3]) - rw_off);
+            lk_w64(o.m, off + 48, 4096);
+            off = off + 56;
+            if (dynamic == 1)
+            {
+                // PT_DYNAMIC
+                lk_w32(o.m, off, 2); lk_w32(o.m, off + 4, 6);
+                lk_w64(o.m, off + 8, dyn_off); lk_w64(o.m, off + 16, base + dyn_off); lk_w64(o.m, off + 24, base + dyn_off);
+                lk_w64(o.m, off + 32, 16 * ndyn_ent); lk_w64(o.m, off + 40, 16 * ndyn_ent); lk_w64(o.m, off + 48, 8);
+                off = off + 56;
+            };
+            // PT_GNU_STACK, not executable
+            lk_w32(o.m, off, 1685382481); lk_w32(o.m, off + 4, 6);
+            lk_w64(o.m, off + 8, 0); lk_w64(o.m, off + 16, 0); lk_w64(o.m, off + 24, 0);
+            lk_w64(o.m, off + 32, 0); lk_w64(o.m, off + 40, 0); lk_w64(o.m, off + 48, 16);
+            // the file ends after the initialized data
+            o.len = data_off + gsize[2];
+            if (o.len < got_off + 8 * L.ngot) { o.len = got_off + 8 * L.ngot; };
+            if (dynamic == 1 & o.len < dyn_off + 16 * ndyn_ent) { o.len = dyn_off + 16 * ndyn_ent; };
+            if (!lk_write_file(out, o.m, o.len)) { -> le_fail(L, "cannot write the output file\0"); };
+            lk_make_exec(out);
+            -> true;
+        };
+
+        // Links objs into an executable. Returns false with a message in *err on failure.
+        lk_elf_link(byte** objs, int nobjs, byte** libs, int nlibs, byte** dirs, int ndirs, byte* entry, byte* interp, byte* out) -> byte*
+        {
+            ElfLink L;
+            int k, i, sz, tot_sec, tot_sym, n;
+            bool ok = true;
+            L.err = (byte*)0;
+            L.nobj = nobjs;
+            L.nimp = 0;
+            L.nver = 0;
+            L.ngot = 0;
+            L.nplt = 0;
+            L.ncopy = 0;
+            L.nlib = 0;
+            L.o_img = (byte**)fmalloc(8 * (nobjs + 1));
+            L.o_size = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_sec0 = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_nsec = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_sym0 = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_nsym = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_stroff = (int*)fmalloc(4 * (nobjs + 1));
+            k = 0;
+            while (k < nobjs & ok)
+            {
+                sz = 0;
+                L.o_img[k] = lk_read_file(objs[k], @sz);
+                if (L.o_img[k] == (byte*)0) { ok = le_fail(@L, "cannot read an input object\0"); }
+                else
+                {
+                    L.o_size[k] = sz;
+                    ok = le_count_obj(@L, k);
+                };
+                k++;
+            };
+            if (!ok) { -> L.err; };
+            tot_sec = 0;
+            tot_sym = 0;
+            k = 0;
+            while (k < nobjs)
+            {
+                L.o_sec0[k] = tot_sec;
+                L.o_sym0[k] = tot_sym;
+                tot_sec = tot_sec + L.o_nsec[k];
+                tot_sym = tot_sym + L.o_nsym[k];
+                k++;
+            };
+            L.nsec = tot_sec;
+            L.nsym = tot_sym;
+            n = tot_sec + 1;
+            L.s_obj = (int*)fmalloc(4 * n);
+            L.s_name = (byte**)fmalloc(8 * n);
+            L.s_type = (int*)fmalloc(4 * n);
+            L.s_flags = (i64*)fmalloc(8 * n);
+            L.s_off = (int*)fmalloc(4 * n);
+            L.s_size = (int*)fmalloc(4 * n);
+            L.s_align = (int*)fmalloc(4 * n);
+            L.s_grp = (int*)fmalloc(4 * n);
+            L.s_addr = (i64*)fmalloc(8 * n);
+            L.s_info = (int*)fmalloc(4 * n);
+            L.s_foff = (int*)fmalloc(4 * n);
+            n = tot_sym + 1;
+            L.y_obj = (int*)fmalloc(4 * n);
+            L.y_name = (byte**)fmalloc(8 * n);
+            L.y_info = (int*)fmalloc(4 * n);
+            L.y_shndx = (int*)fmalloc(4 * n);
+            L.y_val = (i64*)fmalloc(8 * n);
+            L.y_size = (i64*)fmalloc(8 * n);
+            L.y_def = (int*)fmalloc(4 * n);
+            L.y_imp = (int*)fmalloc(4 * n);
+            L.y_got = (int*)fmalloc(4 * n);
+            L.y_addr = (i64*)fmalloc(8 * n);
+            // table sizes: every symbol could be an import, every relocation could need a slot
+            n = tot_sym + 2;
+            L.i_name = (byte**)fmalloc(8 * n);
+            L.i_lib = (int*)fmalloc(4 * n);
+            L.i_type = (int*)fmalloc(4 * n);
+            L.i_size = (i64*)fmalloc(8 * n);
+            L.i_ver = (int*)fmalloc(4 * n);
+            L.i_nver = (int*)fmalloc(4 * n);
+            L.i_got = (int*)fmalloc(4 * n);
+            L.i_plt = (int*)fmalloc(4 * n);
+            L.i_copy = (int*)fmalloc(4 * n);
+            L.i_caddr = (i64*)fmalloc(8 * n);
+            L.i_gotaddr = (i64*)fmalloc(8 * n);
+            L.i_pltaddr = (i64*)fmalloc(8 * n);
+            L.i_nameoff = (int*)fmalloc(4 * n);
+            L.v_lib = (int*)fmalloc(4 * n);
+            L.v_name = (byte**)fmalloc(8 * n);
+            L.v_hash = (i64*)fmalloc(8 * n);
+            L.v_lidx = (int*)fmalloc(4 * n);
+            L.g_kind = (int*)fmalloc(4 * (2 * n));
+            L.g_ref = (int*)fmalloc(4 * (2 * n));
+            L.p_imp = (int*)fmalloc(4 * n);
+            L.l_name = (byte**)fmalloc(8 * (nlibs + 1));
+            L.l_img = (byte**)fmalloc(8 * (nlibs + 1));
+            L.l_size = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_dynsym = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_ndyn = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_dynstr = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_versym = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_verdef = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_nverdef = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_used = (int*)fmalloc(4 * (nlibs + 1));
+            lm_init(@L.imps, tot_sym + 2);
+            k = 0;
+            while (k < nobjs & ok)
+            {
+                ok = le_load_obj(@L, k);
+                k++;
+            };
+            i = 0;
+            while (i < nlibs & ok)
+            {
+                ok = le_open_lib(@L, libs[i], dirs, ndirs);
+                i++;
+            };
+            if (ok) { ok = le_resolve_names(@L); };
+            if (ok) { ok = le_scan_relocs(@L); };
+            if (ok) { ok = le_link_all(@L, entry, interp, out); };
+            -> L.err;
+        };
+    };
+};
+
+#endif;

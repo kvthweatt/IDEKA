@@ -1,0 +1,205 @@
+// Author: Karac V. Thweatt
+//
+// iasm_buf.idk - growing byte buffer shared by the object writers of the IDEKA assembler
+
+#ifndef IDEKA_IASM
+#import "src/compiler/iasm.idk";
+#endif;
+
+#ifndef IDEKA_IASM_BUF
+#def IDEKA_IASM_BUF 1;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        struct ElfBuf
+        {
+            byte* m;
+            int len, cap;
+            bool ok = false;
+        };
+
+        eb_init(ElfBuf* b) -> void
+        {
+            b.m = (byte*)0;
+            b.len = 0;
+            b.cap = 0;
+            b.ok = true;
+            ->;
+        };
+
+        eb_reserve(ElfBuf* b, int extra) -> void
+        {
+            int nc;
+            if (b.len + extra <= b.cap) { ->; };
+            nc = b.cap * 2;
+            if (nc < 4096) { nc = 4096; };
+            while (nc < b.len + extra) { nc = nc * 2; };
+            b.m = ia_grow(b.m, nc);
+            if (b.m == 0) { b.ok = false; };
+            b.cap = nc;
+            ->;
+        };
+
+        eb_put8(ElfBuf* b, int v) -> void
+        {
+            eb_reserve(b, 1);
+            b.m[b.len] = v;
+            b.len++;
+            ->;
+        };
+
+        eb_put16(ElfBuf* b, i64 v) -> void
+        {
+            eb_put8(b, (v `& 255));
+            eb_put8(b, ((v >> 8) `& 255));
+            ->;
+        };
+
+        eb_put32(ElfBuf* b, i64 v) -> void
+        {
+            eb_put16(b, v);
+            eb_put16(b, v >> 16);
+            ->;
+        };
+
+        eb_put64(ElfBuf* b, i64 v) -> void
+        {
+            eb_put32(b, v);
+            eb_put32(b, v >> 32);
+            ->;
+        };
+
+        eb_put_n(ElfBuf* b, byte* p, int n) -> void
+        {
+            int i = 0;
+            eb_reserve(b, n);
+            while (i < n) { b.m[b.len + i] = p[i]; i++; };
+            b.len = b.len + n;
+            ->;
+        };
+
+        eb_put_str(ElfBuf* b, byte* s) -> int
+        {
+            int off = b.len;
+            int n = ia_strlen(s);
+            eb_put_n(b, s, n);
+            eb_put8(b, 0);
+            -> off;
+        };
+
+        eb_align(ElfBuf* b, int al) -> void
+        {
+            while (b.len % al != 0) { eb_put8(b, 0); };
+            ->;
+        };
+
+        // Overwrites bytes at an earlier position
+        eb_patch(ElfBuf* b, int pos, i64 v, int size) -> void
+        {
+            int k = 0;
+            while (k < size)
+            {
+                b.m[pos + k] = ((v >> (8 * k)) `& 255);
+                k++;
+            };
+            ->;
+        };
+
+
+        // Compares two strings from their last byte backwards, a longer one is greater when one
+        // is a tail of the other
+        eb_rcmp(byte* a, byte* b) -> int
+        {
+            int i = ia_strlen(a) - 1;
+            int j = ia_strlen(b) - 1;
+            int ca, cb;
+            while (i >= 0 & j >= 0)
+            {
+                ca = a[i] `& 255;
+                cb = b[j] `& 255;
+                if (ca != cb)
+                {
+                    if (ca < cb) { -> -1; };
+                    -> 1;
+                };
+                i--;
+                j--;
+            };
+            if (i >= 0) { -> 1; };
+            if (j >= 0) { -> -1; };
+            -> 0;
+        };
+
+        // Builds the string table the way llvm does: names are sorted from their ends, in
+        // descending order, and a name that is the tail of the previous stored one shares its bytes.
+        // names[k] receives the offset noff[k].
+        eb_build_strtab(ElfBuf* str, byte** names, int* noff, int cnt) -> void
+        {
+            int* idx = (int*)fmalloc(4 * (cnt + 2));
+            int* tmp = (int*)fmalloc(4 * (cnt + 2));
+            int i = 0;
+            int w = 1;
+            int lo, mid, hi, p, q, k;
+            int prev = -1;
+            int ls, lp, e;
+            int* t;
+            while (i < cnt) { idx[i] = i; i++; };
+            while (w < cnt)
+            {
+                lo = 0;
+                while (lo < cnt)
+                {
+                    mid = lo + w;
+                    hi = lo + 2 * w;
+                    if (mid > cnt) { mid = cnt; };
+                    if (hi > cnt) { hi = cnt; };
+                    p = lo;
+                    q = mid;
+                    k = lo;
+                    while (p < mid & q < hi)
+                    {
+                        if (eb_rcmp(names[idx[p]], names[idx[q]]) >= 0) { tmp[k] = idx[p]; p++; }
+                        else { tmp[k] = idx[q]; q++; };
+                        k++;
+                    };
+                    while (p < mid) { tmp[k] = idx[p]; p++; k++; };
+                    while (q < hi) { tmp[k] = idx[q]; q++; k++; };
+                    lo = lo + 2 * w;
+                };
+                t = idx; idx = tmp; tmp = t;
+                w = w * 2;
+            };
+            i = 0;
+            while (i < cnt)
+            {
+                k = idx[i];
+                ls = ia_strlen(names[k]);
+                if (prev >= 0)
+                {
+                    lp = ia_strlen(names[prev]);
+                    if (ls <= lp)
+                    {
+                        e = 0;
+                        while (e < ls & names[prev][lp - 1 - e] == names[k][ls - 1 - e]) { e++; };
+                        if (e == ls)
+                        {
+                            noff[k] = noff[prev] + lp - ls;
+                            i++;
+                            continue;
+                        };
+                    };
+                };
+                noff[k] = eb_put_str(str, names[k]);
+                prev = k;
+                i++;
+            };
+            ffree((byte*)idx);
+            ffree((byte*)tmp);
+        };
+
+    };
+};
+
+#endif;

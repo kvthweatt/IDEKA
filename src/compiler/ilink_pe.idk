@@ -1,0 +1,1496 @@
+// Author: Karac V. Thweatt
+//
+// ilink_pe.idk - PE32+ (Windows x86-64) executable linker for the IDEKA toolchain
+//
+// Library, no main. Links COFF objects (the iasm writer output) into a Windows executable with no
+// dependency on lld-link, link.exe or the Windows SDK import libraries.
+//
+// Usage:
+//
+//     byte* err = lk_pe_link(objs, nobjs, libs, nlibs, dirs, ndirs, "FRTStartup\0", 3, 67108864, "out.exe\0");
+//     // err is null on success, else it names the problem
+//
+// objs  object files (.obj / .o, COFF)
+// libs  .lib archives (import libraries or static libraries) or .dll files. A name that ends in .lib and is
+//       not found is looked up as the .dll of the same name, so kernel32.lib falls back to kernel32.dll in
+//       the directories given (System32 among them). A library that cannot be found is skipped, a symbol
+//       that no input defines is the error.
+// DLL inputs are read through their export tables, import library members through their short import
+// records. A reference to X reaches a thunk (jmp through the IAT slot), a reference to __imp_X reaches the
+// IAT slot itself.
+//
+// Output sections: .text .rdata .idata .data .pdata .bss .reloc. The image is based at 0x140000000 with
+// DYNAMIC_BASE, so the base relocation table lists every 64 bit absolute address.
+
+#ifndef IDEKA_ILINK
+#import "src/compiler/ilink.idk";
+#endif;
+
+#ifndef IDEKA_ILINK_PE
+#def IDEKA_ILINK_PE 1;
+
+namespace IDEKA
+{
+    namespace ilink
+    {
+        struct PeLink
+        {
+            byte* err;
+            // objects, including archive members pulled in
+            int nobj, ocap;
+            byte** o_img;
+            int* o_size;
+            int* o_nsec;
+            int* o_nsym;
+            int* o_sec0;
+            int* o_sym0;
+            int* o_symoff;
+            int* o_stroff;
+            int* o_secoff;
+            int nsec, nsym;
+            // sections of all objects
+            int* s_obj;
+            byte** s_name;
+            i64* s_chars;
+            int* s_rawsize;
+            int* s_rawptr;
+            int* s_relptr;
+            int* s_nrel;
+            int* s_align;
+            int* s_grp;
+            int* s_goff;
+            i64* s_rva;
+            // symbols of all objects (raw index, auxiliary entries included)
+            byte** y_name;
+            int* y_obj;
+            i64* y_val;
+            int* y_sec;
+            int* y_cls;
+            int* y_def;
+            int* y_imp;
+            int* y_kind;
+            i64* y_rva;
+            int* y_weak;
+            // libraries
+            int nlib;
+            byte** l_img;
+            int* l_size;
+            int* l_kind;
+            // symbols the libraries provide
+            int nent, ecap;
+            int* e_lib;
+            int* e_kind;
+            int* e_off;
+            byte** e_name;
+            byte** e_dll;
+            int* e_hint;
+            int* e_code;
+            LkMap libsyms;
+            LkMap defs;
+            // archive members already pulled in
+            int npull;
+            int* pl_lib;
+            int* pl_off;
+            // imports
+            int nimp;
+            byte** i_name;
+            byte** i_dll;
+            int* i_hint;
+            int* i_ord;
+            int* i_code;
+            int* i_thunk;
+            int* i_dllidx;
+            int* i_slot;
+            i64* i_iat;
+            i64* i_thunkrva;
+            LkMap imps;
+            // base relocations
+            int nbr, brcap;
+            int* br;
+        };
+
+        struct PeUnd
+        {
+            byte** m;
+            int n, cap;
+        };
+
+        pe_fail(PeLink* L, byte* msg) -> bool
+        {
+            if (L.err == (byte*)0) { L.err = msg; };
+            -> false;
+        };
+
+        pe_has_prefix(byte* s, byte* p) -> bool
+        {
+            int i = 0;
+            while (p[i] != 0)
+            {
+                if (s[i] != p[i]) { -> false; };
+                i++;
+            };
+            -> true;
+        };
+
+        // ===== inputs: objects, archives, DLLs =====
+
+        // Registers an object image. Returns its index.
+        pe_add_obj(PeLink* L, byte* img, int size) -> int
+        {
+            int k = L.nobj;
+            if (k >= L.ocap)
+            {
+                L.ocap = L.ocap * 2;
+                L.o_img = (byte**)lk_grow((byte*)L.o_img, 8 * L.ocap);
+                L.o_size = (int*)lk_grow((byte*)L.o_size, 4 * L.ocap);
+            };
+            L.o_img[k] = img;
+            L.o_size[k] = size;
+            L.nobj++;
+            -> k;
+        };
+
+        // Name of a symbol entry or a section header name field at off. strbase is the string table offset.
+        pe_name(byte* m, int off, int strbase) -> byte*
+        {
+            byte* p;
+            int i = 0;
+            if (lk_r32(m, off) == 0) { -> m + strbase + (int)lk_r32(m, off + 4); };
+            p = (byte*)fmalloc(9);
+            while (i < 8 & m[off + i] != 0) { p[i] = m[off + i]; i++; };
+            p[i] = 0;
+            -> p;
+        };
+
+        // Does the image start with a COFF object header for x86-64
+        pe_is_coff(byte* m, int n) -> bool
+        {
+            if (n < 20) { -> false; };
+            -> lk_r16(m, 0) == 34404;
+        };
+
+        // Adds a symbol the libraries provide
+        pe_add_ent(PeLink* L, byte* name, int lib, int kind, int off, byte* ename, byte* dll, int hint, int code) -> void
+        {
+            int k = L.nent;
+            if (k >= L.ecap)
+            {
+                L.ecap = L.ecap * 2;
+                L.e_lib = (int*)lk_grow((byte*)L.e_lib, 4 * L.ecap);
+                L.e_kind = (int*)lk_grow((byte*)L.e_kind, 4 * L.ecap);
+                L.e_off = (int*)lk_grow((byte*)L.e_off, 4 * L.ecap);
+                L.e_name = (byte**)lk_grow((byte*)L.e_name, 8 * L.ecap);
+                L.e_dll = (byte**)lk_grow((byte*)L.e_dll, 8 * L.ecap);
+                L.e_hint = (int*)lk_grow((byte*)L.e_hint, 4 * L.ecap);
+                L.e_code = (int*)lk_grow((byte*)L.e_code, 4 * L.ecap);
+            };
+            L.e_lib[k] = lib;
+            L.e_kind[k] = kind;
+            L.e_off[k] = off;
+            L.e_name[k] = ename;
+            L.e_dll[k] = dll;
+            L.e_hint[k] = hint;
+            L.e_code[k] = code;
+            // the first library in search order that provides a name wins
+            if (lm_put(@L.libsyms, name, k)) { L.nent++; };
+            ->;
+        };
+
+        // Decimal field of an archive member header
+        pe_dec(byte* m, int off, int len) -> int
+        {
+            int v = 0;
+            int i = 0;
+            while (i < len & m[off + i] >= 48 & m[off + i] <= 57)
+            {
+                v = v * 10 + (m[off + i] - 48);
+                i++;
+            };
+            -> v;
+        };
+
+        // Big endian 32 bit read
+        pe_rbe32(byte* m, int o) -> i64
+        {
+            i64 v = m[o] `& 255;
+            v = (v << 8) `| (m[o + 1] `& 255);
+            v = (v << 8) `| (m[o + 2] `& 255);
+            v = (v << 8) `| (m[o + 3] `& 255);
+            -> v;
+        };
+
+        // Indexes an archive through its first linker member
+        pe_open_archive(PeLink* L, int lib) -> bool
+        {
+            byte* m = L.l_img[lib];
+            int n = L.l_size[lib];
+            int sz, cnt, i, namep, offs, p, nl;
+            byte* nm;
+            // the first member starts after the 8 byte signature
+            if (n < 72 | m[66] != 96) { -> pe_fail(L, "library is not a COFF archive\0"); };
+            if (m[8] != 47 | m[9] != 32) { -> pe_fail(L, "archive has no symbol index\0"); };
+            sz = pe_dec(m, 8 + 48, 10);
+            cnt = (int)pe_rbe32(m, 68);
+            offs = 72;
+            namep = 72 + 4 * cnt;
+            if (namep > 68 + sz) { -> pe_fail(L, "bad archive symbol index\0"); };
+            i = 0;
+            p = namep;
+            while (i < cnt)
+            {
+                nm = m + p;
+                nl = lk_strlen(nm);
+                pe_add_ent(L, nm, lib, 0, (int)pe_rbe32(m, offs + 4 * i), (byte*)0, (byte*)0, 0, 0);
+                p = p + nl + 1;
+                i++;
+            };
+            -> true;
+        };
+
+        // Pointer into a PE image for an RVA
+        pe_rva_ptr(byte* m, int sh, int nsec, int rva) -> byte*
+        {
+            int i = 0;
+            int sva, svs, sraw;
+            while (i < nsec)
+            {
+                sva = (int)lk_r32(m, sh + i * 40 + 12);
+                svs = (int)lk_r32(m, sh + i * 40 + 8);
+                sraw = (int)lk_r32(m, sh + i * 40 + 20);
+                if (rva >= sva & rva < sva + svs) { -> m + sraw + (rva - sva); };
+                i++;
+            };
+            -> m;
+        };
+
+        // Indexes the named exports of a DLL
+        pe_open_dll(PeLink* L, int lib) -> bool
+        {
+            byte* m = L.l_img[lib];
+            int n = L.l_size[lib];
+            int pe, nsec, optsz, sh, i, k, exprva, expsize, expoff, nnames, nfun, namesrva, ordsrva, funsrva, namerva, ord, frva, code, dllnm;
+            byte* dllname;
+            byte* nm;
+            byte* imp;
+            int j, sva, svs, sraw, sch;
+            if (n < 64 | lk_r16(m, 0) != 23117) { -> pe_fail(L, "library is not a PE file\0"); };
+            pe = (int)lk_r32(m, 60);
+            if (pe + 24 > n | lk_r32(m, pe) != 17744) { -> pe_fail(L, "library is not a PE file\0"); };
+            if (lk_r16(m, pe + 4) != 34404) { -> pe_fail(L, "library is not an x86-64 PE file\0"); };
+            nsec = lk_r16(m, pe + 6);
+            optsz = lk_r16(m, pe + 20);
+            if (lk_r16(m, pe + 24) != 523) { -> pe_fail(L, "library is not a PE32+ file\0"); };
+            exprva = (int)lk_r32(m, pe + 24 + 112);
+            expsize = (int)lk_r32(m, pe + 24 + 116);
+            if (exprva == 0) { -> true; };
+            sh = pe + 24 + optsz;
+            // map RVAs to file offsets through the section table
+            expoff = -1;
+            i = 0;
+            while (i < nsec)
+            {
+                sva = (int)lk_r32(m, sh + i * 40 + 12);
+                svs = (int)lk_r32(m, sh + i * 40 + 8);
+                sraw = (int)lk_r32(m, sh + i * 40 + 20);
+                if (exprva >= sva & exprva < sva + svs) { expoff = sraw + (exprva - sva); };
+                i++;
+            };
+            if (expoff < 0) { -> pe_fail(L, "bad export table\0"); };
+            dllnm = (int)lk_r32(m, expoff + 12);
+            dllname = pe_rva_ptr(m, sh, nsec, dllnm);
+            nfun = (int)lk_r32(m, expoff + 20);
+            nnames = (int)lk_r32(m, expoff + 24);
+            funsrva = (int)lk_r32(m, expoff + 28);
+            namesrva = (int)lk_r32(m, expoff + 32);
+            ordsrva = (int)lk_r32(m, expoff + 36);
+            k = 0;
+            while (k < nnames)
+            {
+                namerva = (int)lk_r32(pe_rva_ptr(m, sh, nsec, namesrva), 4 * k);
+                nm = pe_rva_ptr(m, sh, nsec, namerva);
+                ord = lk_r16(pe_rva_ptr(m, sh, nsec, ordsrva), 2 * k);
+                frva = (int)lk_r32(pe_rva_ptr(m, sh, nsec, funsrva), 4 * ord);
+                // an export whose target lies in an executable section is code
+                code = 0;
+                j = 0;
+                while (j < nsec)
+                {
+                    sva = (int)lk_r32(m, sh + j * 40 + 12);
+                    svs = (int)lk_r32(m, sh + j * 40 + 8);
+                    sch = (int)lk_r32(m, sh + j * 40 + 36);
+                    if (frva >= sva & frva < sva + svs & (sch `& 536870912) != 0) { code = 1; };
+                    j++;
+                };
+                // forwarders point inside the export directory and are code
+                if (frva >= exprva & frva < exprva + expsize) { code = 1; };
+                imp = lk_cat2("__imp_\0", nm);
+                pe_add_ent(L, imp, lib, 1, 0, nm, dllname, k, code);
+                if (code == 1) { pe_add_ent(L, nm, lib, 1, 0, nm, dllname, k, code); };
+                k++;
+            };
+            -> true;
+        };
+
+        pe_ends_with(byte* s, byte* suf) -> bool
+        {
+            int ls = lk_strlen(s);
+            int lf = lk_strlen(suf);
+            int i = 0;
+            if (lf > ls) { -> false; };
+            while (i < lf)
+            {
+                if (s[ls - lf + i] != suf[i]) { -> false; };
+                i++;
+            };
+            -> true;
+        };
+
+        // The file name with .lib replaced by .dll
+        pe_dll_name(byte* name) -> byte*
+        {
+            int n = lk_strlen(name);
+            byte* p = (byte*)fmalloc(n + 2);
+            int i = 0;
+            while (i < n - 4) { p[i] = name[i]; i++; };
+            p[n - 4] = 46; p[n - 3] = 100; p[n - 2] = 108; p[n - 1] = 108; p[n] = 0;
+            -> p;
+        };
+
+        // Finds a file as given or in one of the directories
+        pe_find_file(byte* name, byte** dirs, int ndirs, int* size) -> byte*
+        {
+            byte* img = lk_read_file(name, size);
+            byte* tmp;
+            byte* path;
+            int i = 0;
+            while (img == (byte*)0 & i < ndirs)
+            {
+                tmp = lk_cat2(dirs[i], "/\0");
+                path = lk_cat2(tmp, name);
+                img = lk_read_file(path, size);
+                ffree(tmp);
+                ffree(path);
+                i++;
+            };
+            -> img;
+        };
+
+        pe_open_lib(PeLink* L, byte* name, byte** dirs, int ndirs) -> bool
+        {
+            int sz = 0;
+            byte* img = pe_find_file(name, dirs, ndirs, @sz);
+            int k = L.nlib;
+            byte* dn;
+            if (img == (byte*)0 & pe_ends_with(name, ".lib\0"))
+            {
+                dn = pe_dll_name(name);
+                img = pe_find_file(dn, dirs, ndirs, @sz);
+                // the universal CRT import library is the import library of ucrtbase.dll
+                if (img == (byte*)0 & lk_streq(name, "ucrt.lib\0")) { img = pe_find_file("ucrtbase.dll\0", dirs, ndirs, @sz); };
+            };
+            // a library that is not there is skipped, an unresolved symbol is the error
+            if (img == (byte*)0) { -> true; };
+            L.l_img[k] = img;
+            L.l_size[k] = sz;
+            if (sz >= 8 & img[0] == 33 & img[1] == 60 & img[2] == 97 & img[3] == 114)
+            {
+                L.l_kind[k] = 0;
+                L.nlib++;
+                -> pe_open_archive(L, k);
+            };
+            if (sz >= 2 & img[0] == 77 & img[1] == 90)
+            {
+                L.l_kind[k] = 1;
+                L.nlib++;
+                -> pe_open_dll(L, k);
+            };
+            -> pe_fail(L, "unrecognized library format\0");
+        };
+
+        // ===== archive members =====
+
+        // Is the member at off a short import record
+        pe_member_is_import(PeLink* L, int lib, int off) -> bool
+        {
+            byte* m = L.l_img[lib];
+            -> lk_r16(m, off + 60) == 0 & lk_r16(m, off + 62) == 65535;
+        };
+
+        struct PeImp
+        {
+            byte* name;
+            byte* dll;
+            int hint, ord, code;
+        };
+
+        // Fills the import description of a short import member as the entry of a symbol
+        pe_member_import(PeLink* L, int lib, int off, PeImp* r) -> void
+        {
+            byte* m = L.l_img[lib];
+            int h = off + 60;
+            int ty = lk_r16(m, h + 18);
+            int nt = (ty >> 2) `& 7;
+            byte* sym = m + h + 20;
+            int sl = lk_strlen(sym);
+            int skip = 0;
+            int cut;
+            byte* nn;
+            r.dll = m + h + 20 + sl + 1;
+            r.hint = lk_r16(m, h + 16);
+            r.code = 0;
+            if ((ty `& 3) == 0) { r.code = 1; };
+            r.ord = -1;
+            if (nt == 0) { r.ord = lk_r16(m, h + 16); r.name = sym; ->; };
+            // name types: 1 as is, 2 without a leading ? @ or _, 3 undecorated
+            if (nt >= 2 & (sym[0] == 63 | sym[0] == 64 | sym[0] == 95)) { skip = 1; };
+            nn = sym + skip;
+            if (nt == 3)
+            {
+                cut = 0;
+                while (nn[cut] != 0 & nn[cut] != 64) { cut++; };
+                if (nn[cut] == 64)
+                {
+                    nn = lk_dup(nn);
+                    nn[cut] = 0;
+                };
+            };
+            r.name = nn;
+            ->;
+        };
+
+        // Adds the symbol table of one object image to the definition map and the undefined list.
+        // Returns the number of undefined externals added to *und (a growing list of names).
+        pe_scan_obj(PeLink* L, byte* m, int n, PeUnd* u) -> bool
+        {
+            int symoff = (int)lk_r32(m, 8);
+            int nsyms = (int)lk_r32(m, 12);
+            int stroff = symoff + 18 * nsyms;
+            int i = 0;
+            int off, sec, cls, aux;
+            byte* nm;
+            i64 val;
+            if (symoff == 0 | stroff > n) { -> true; };
+            while (i < nsyms)
+            {
+                off = symoff + 18 * i;
+                aux = lk_r8(m, off + 17);
+                cls = lk_r8(m, off + 16);
+                sec = lk_r16(m, off + 12);
+                val = lk_r32(m, off + 8);
+                if (cls == 2 | cls == 105)
+                {
+                    nm = pe_name(m, off, stroff);
+                    if (sec != 0 | val != 0)
+                    {
+                        // defined, or a common symbol
+                        if (cls == 2) { lm_put(@L.defs, nm, 1); };
+                    }
+                    else
+                    {
+                        if (u.n >= u.cap)
+                        {
+                            u.cap = u.cap * 2;
+                            u.m = (byte**)lk_grow((byte*)u.m, 8 * u.cap);
+                        };
+                        u.m[u.n] = nm;
+                        u.n++;
+                    };
+                };
+                i = i + 1 + aux;
+            };
+            -> true;
+        };
+
+        // Pulls the archive members that define still undefined names, until nothing changes
+        pe_pull_members(PeLink* L) -> bool
+        {
+            PeUnd u;
+            int k, e, lib, off, j;
+            bool seen;
+            u.m = (byte**)fmalloc(8 * 256);
+            u.n = 0;
+            u.cap = 256;
+            byte* nm;
+            byte* m;
+            int sz, ni;
+            k = 0;
+            while (k < L.nobj)
+            {
+                pe_scan_obj(L, L.o_img[k], L.o_size[k], @u);
+                k++;
+            };
+            k = 0;
+            while (k < u.n)
+            {
+                nm = u.m[k];
+                k++;
+                if (lm_get(@L.defs, nm) >= 0) { continue; };
+                e = lm_get(@L.libsyms, nm);
+                if (e < 0) { continue; };
+                if (L.e_kind[e] != 0) { continue; };
+                lib = L.e_lib[e];
+                off = L.e_off[e];
+                if (pe_member_is_import(L, lib, off)) { continue; };
+                seen = false;
+                j = 0;
+                while (j < L.npull)
+                {
+                    if (L.pl_lib[j] == lib & L.pl_off[j] == off) { seen = true; };
+                    j++;
+                };
+                if (seen) { continue; };
+                L.pl_lib[L.npull] = lib;
+                L.pl_off[L.npull] = off;
+                L.npull++;
+                m = L.l_img[lib] + off + 60;
+                sz = pe_dec(L.l_img[lib], off + 48, 10);
+                if (!pe_is_coff(m, sz)) { -> pe_fail(L, "archive member is not a COFF object\0"); };
+                ni = pe_add_obj(L, m, sz);
+                pe_scan_obj(L, m, sz, @u);
+            };
+            -> true;
+        };
+
+        // ===== loading =====
+
+        // Output group of an object section: 0 text, 1 rdata, 2 data, 3 bss, 4 pdata, -1 dropped
+        pe_group(byte* name, i64 ch) -> int
+        {
+            // linker directives, removed and discardable sections are not loaded
+            if ((ch `& 512) != 0 | (ch `& 2048) != 0 | (ch `& 33554432) != 0) { -> -1; };
+            if (lk_streq(name, ".pdata\0")) { -> 4; };
+            if ((ch `& 536870912) != 0 | (ch `& 32) != 0) { -> 0; };
+            if ((ch `& 128) != 0) { -> 3; };
+            if ((ch `& 2147483648) != 0) { -> 2; };
+            -> 1;
+        };
+
+        pe_load_obj(PeLink* L, int k) -> bool
+        {
+            byte* m = L.o_img[k];
+            int n = L.o_size[k];
+            int nsec = lk_r16(m, 2);
+            int symoff = (int)lk_r32(m, 8);
+            int nsyms = (int)lk_r32(m, 12);
+            int optsz = lk_r16(m, 16);
+            int stroff = symoff + 18 * nsyms;
+            int secoff = 20 + optsz;
+            int i, gs, sh, off, aux, cls, gy, tag, lnm, ch;
+            byte* nm;
+            if (symoff == 0) { stroff = 0; };
+            i = 0;
+            while (i < nsec)
+            {
+                sh = secoff + i * 40;
+                gs = L.o_sec0[k] + i;
+                L.s_obj[gs] = k;
+                nm = pe_name(m, sh, stroff);
+                // long section names are /nnn offsets into the string table
+                if (nm[0] == 47 & nm[1] >= 48 & nm[1] <= 57)
+                {
+                    off = 0;
+                    lnm = 1;
+                    while (nm[lnm] >= 48 & nm[lnm] <= 57) { off = off * 10 + (nm[lnm] - 48); lnm++; };
+                    nm = m + stroff + off;
+                };
+                L.s_name[gs] = nm;
+                L.s_chars[gs] = lk_r32(m, sh + 36);
+                L.s_rawsize[gs] = (int)lk_r32(m, sh + 16);
+                L.s_rawptr[gs] = (int)lk_r32(m, sh + 20);
+                L.s_relptr[gs] = (int)lk_r32(m, sh + 24);
+                L.s_nrel[gs] = lk_r16(m, sh + 32);
+                ch = (int)((L.s_chars[gs] >> 20) `& 15);
+                if (ch == 0) { L.s_align[gs] = 16; }
+                else { L.s_align[gs] = 1 << (ch - 1); };
+                L.s_grp[gs] = pe_group(nm, L.s_chars[gs]);
+                L.s_goff[gs] = 0;
+                L.s_rva[gs] = 0;
+                if (L.s_grp[gs] >= 0 & L.s_grp[gs] != 5 & L.s_rawsize[gs] > 0 & L.s_rawptr[gs] + L.s_rawsize[gs] > n) { -> pe_fail(L, "section outside the file\0"); };
+                i++;
+            };
+            i = 0;
+            while (i < nsyms)
+            {
+                off = symoff + 18 * i;
+                gy = L.o_sym0[k] + i;
+                aux = lk_r8(m, off + 17);
+                cls = lk_r8(m, off + 16);
+                L.y_obj[gy] = k;
+                L.y_name[gy] = pe_name(m, off, stroff);
+                L.y_val[gy] = lk_r32(m, off + 8);
+                L.y_sec[gy] = lk_r16(m, off + 12);
+                if (L.y_sec[gy] >= 65280) { L.y_sec[gy] = L.y_sec[gy] - 65536; };
+                L.y_cls[gy] = cls;
+                L.y_def[gy] = -1;
+                L.y_imp[gy] = -1;
+                L.y_kind[gy] = 0;
+                L.y_rva[gy] = 0;
+                L.y_weak[gy] = -1;
+                if (cls == 105 & aux > 0) { L.y_weak[gy] = L.o_sym0[k] + (int)lk_r32(m, off + 18); };
+                // auxiliary entries are not symbols
+                tag = 1;
+                while (tag <= aux)
+                {
+                    L.y_obj[gy + tag] = k;
+                    L.y_name[gy + tag] = "\0";
+                    L.y_val[gy + tag] = 0;
+                    L.y_sec[gy + tag] = -2;
+                    L.y_cls[gy + tag] = -1;
+                    L.y_def[gy + tag] = -1;
+                    L.y_imp[gy + tag] = -1;
+                    L.y_kind[gy + tag] = 0;
+                    L.y_rva[gy + tag] = 0;
+                    L.y_weak[gy + tag] = -1;
+                    tag++;
+                };
+                i = i + 1 + aux;
+            };
+            -> true;
+        };
+
+        // ===== resolving =====
+
+        pe_resolve(PeLink* L) -> bool
+        {
+            int g, e;
+            int cls, sec;
+            lm_init(@L.defs, L.nsym);
+            g = 0;
+            while (g < L.nsym)
+            {
+                cls = L.y_cls[g];
+                sec = L.y_sec[g];
+                if (cls == 2 & (sec != 0 | L.y_val[g] != 0) & L.y_name[g][0] != 0)
+                {
+                    if (sec != 0)
+                    {
+                        if (!lm_put(@L.defs, L.y_name[g], g)) { -> pe_fail(L, "duplicate symbol definition\0"); };
+                    };
+                };
+                g++;
+            };
+            // common symbols, a defined one wins, else the first common keeps the largest size
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_cls[g] == 2 & L.y_sec[g] == 0 & L.y_val[g] != 0)
+                {
+                    e = lm_get(@L.defs, L.y_name[g]);
+                    if (e < 0) { lm_put(@L.defs, L.y_name[g], g); }
+                    else if (L.y_sec[e] == 0 & L.y_val[g] > L.y_val[e]) { L.y_val[e] = L.y_val[g]; };
+                };
+                g++;
+            };
+            g = 0;
+            while (g < L.nsym)
+            {
+                cls = L.y_cls[g];
+                if (cls == 3 | cls == 6)
+                {
+                    // statics and labels define themselves
+                    if (L.y_sec[g] != 0) { L.y_def[g] = g; };
+                }
+                else if (cls == 2)
+                {
+                    L.y_def[g] = lm_get(@L.defs, L.y_name[g]);
+                };
+                g++;
+            };
+            // weak externals without a definition follow their default symbol
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_cls[g] == 105)
+                {
+                    e = lm_get(@L.defs, L.y_name[g]);
+                    if (e >= 0) { L.y_def[g] = e; }
+                    else if (L.y_weak[g] >= 0) { L.y_def[g] = L.y_def[L.y_weak[g]]; };
+                };
+                g++;
+            };
+            -> true;
+        };
+
+        // The import for a symbol name the libraries provide, created on first use. Returns -1 if none.
+        pe_import_for(PeLink* L, byte* name) -> int
+        {
+            int e = lm_get(@L.libsyms, name);
+            int ni;
+            PeImp r;
+            byte* key;
+            byte* base;
+            int found;
+            if (e < 0) { -> -1; };
+            if (L.e_kind[e] == 0)
+            {
+                if (!pe_member_is_import(L, L.e_lib[e], L.e_off[e])) { -> -1; };
+                pe_member_import(L, L.e_lib[e], L.e_off[e], @r);
+            }
+            else
+            {
+                r.name = L.e_name[e];
+                r.dll = L.e_dll[e];
+                r.hint = L.e_hint[e];
+                r.ord = -1;
+                r.code = L.e_code[e];
+            };
+            // one import per DLL and name
+            base = lk_cat2(r.dll, "!\0");
+            key = lk_cat2(base, r.name);
+            found = lm_get(@L.imps, key);
+            if (found >= 0) { -> found; };
+            ni = L.nimp;
+            L.i_name[ni] = r.name;
+            L.i_dll[ni] = r.dll;
+            L.i_hint[ni] = r.hint;
+            L.i_ord[ni] = r.ord;
+            L.i_code[ni] = r.code;
+            L.i_thunk[ni] = 0;
+            L.i_iat[ni] = 0;
+            L.i_thunkrva[ni] = 0;
+            lm_put(@L.imps, key, ni);
+            L.nimp++;
+            -> ni;
+        };
+
+        // Resolves what a relocation names
+        pe_use_symbol(PeLink* L, int g) -> bool
+        {
+            byte* nm;
+            int ni;
+            if (L.y_def[g] >= 0 | L.y_imp[g] != -1) { -> true; };
+            nm = L.y_name[g];
+            if (lk_streq(nm, "__ImageBase\0")) { L.y_imp[g] = -3; -> true; };
+            if (pe_has_prefix(nm, "__imp_\0"))
+            {
+                ni = pe_import_for(L, nm);
+                if (ni >= 0) { L.y_imp[g] = ni; L.y_kind[g] = 1; -> true; };
+            }
+            else
+            {
+                ni = pe_import_for(L, nm);
+                if (ni >= 0)
+                {
+                    if (L.i_code[ni] == 0) { -> pe_fail(L, nm); };
+                    L.y_imp[g] = ni;
+                    L.y_kind[g] = 2;
+                    L.i_thunk[ni] = 1;
+                    -> true;
+                };
+            };
+            // name the symbol and how many libraries were actually opened, a missing library is skipped silently
+            if (L.nlib == 0) { -> pe_fail(L, lk_cat2("undefined symbol (no libraries could be opened, check LIB and SystemRoot): \0", nm)); };
+            -> pe_fail(L, lk_cat2("undefined symbol: \0", nm));
+        };
+
+        // Scans the relocations of every loaded section to learn the imports and the thunks
+        pe_scan_relocs(PeLink* L) -> bool
+        {
+            int k, i, j, gs, ro, g, nrel;
+            byte* m;
+            k = 0;
+            while (k < L.nobj)
+            {
+                m = L.o_img[k];
+                i = 0;
+                while (i < L.o_nsec[k])
+                {
+                    gs = L.o_sec0[k] + i;
+                    if (L.s_grp[gs] >= 0)
+                    {
+                        nrel = L.s_nrel[gs];
+                        j = 0;
+                        while (j < nrel)
+                        {
+                            ro = L.s_relptr[gs] + 10 * j;
+                            g = L.o_sym0[k] + (int)lk_r32(m, ro + 4);
+                            if (!pe_use_symbol(L, g)) { -> false; };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
+                k++;
+            };
+            -> true;
+        };
+
+        // ===== writing =====
+
+        pe_add_br(PeLink* L, int rva) -> void
+        {
+            if (L.nbr >= L.brcap)
+            {
+                L.brcap = L.brcap * 2;
+                L.br = (int*)lk_grow((byte*)L.br, 4 * L.brcap);
+            };
+            L.br[L.nbr] = rva;
+            L.nbr++;
+            ->;
+        };
+
+        // Shell sort of the base relocation addresses
+        pe_sort(int* a, int n) -> void
+        {
+            int gap = n / 2;
+            int i, j, t;
+            while (gap > 0)
+            {
+                i = gap;
+                while (i < n)
+                {
+                    t = a[i];
+                    j = i;
+                    while (j >= gap & a[j - gap] > t)
+                    {
+                        a[j] = a[j - gap];
+                        j = j - gap;
+                    };
+                    a[j] = t;
+                    i++;
+                };
+                gap = gap / 2;
+            };
+            ->;
+        };
+
+        // Address of a defined symbol as an RVA
+        pe_symrva(PeLink* L, int e) -> i64
+        {
+            int sec = L.y_sec[e];
+            int gs;
+            if (sec == -1) { -> L.y_val[e]; };
+            if (sec == 0) { -> L.y_rva[e]; };
+            gs = L.o_sec0[L.y_obj[e]] + sec - 1;
+            -> L.s_rva[gs] + L.y_val[e];
+        };
+
+        pe_link_all(PeLink* L, byte* entry, int subsystem, i64 stack_reserve, byte* out) -> bool
+        {
+            LkBuf o;
+            LkBuf rl;
+            i64 base = 5368709120;
+            int[8] g_size;
+            int[8] g_align;
+            int[8] g_rva;
+            int[8] g_foff;
+            int[8] g_rawsize;
+            int[8] g_present;
+            int[8] g_secno;
+            int gs, grp, i, j, k, n, d, e, g, ty, ro, nrel, off, mapgrp, nsecs, hdr, cur, fcur, ndll, idata_size, iat_total;
+            int text_end, thunk_base, iat_off, idt_size, p;
+            int e_entry;
+            i64 S, P, A, val;
+            byte* m;
+            int* dll_first;
+            int* dll_cnt;
+            int* dll_iat;
+            int* dll_ilt;
+            int* dll_name;
+            int* order;
+            byte** dll_names;
+            int* hnoff;
+            int cnt, page, blk;
+            int[8] gmap;
+            // output group of each object group: text, rdata, data, bss, pdata
+            grp = 0;
+            while (grp < 8)
+            {
+                g_size[grp] = 0;
+                g_align[grp] = 16;
+                g_present[grp] = 0;
+                grp++;
+            };
+            gmap[0] = 0; gmap[1] = 1; gmap[2] = 3; gmap[3] = 5; gmap[4] = 4;
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                grp = L.s_grp[gs];
+                if (grp >= 0)
+                {
+                    mapgrp = gmap[grp];
+                    L.s_goff[gs] = (int)lk_align_up(g_size[mapgrp], L.s_align[gs]);
+                    g_size[mapgrp] = L.s_goff[gs] + L.s_rawsize[gs];
+                    if (L.s_align[gs] > g_align[mapgrp]) { g_align[mapgrp] = L.s_align[gs]; };
+                };
+                gs++;
+            };
+            // common symbols take space at the end of .bss
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_cls[g] == 2 & L.y_sec[g] == 0 & L.y_val[g] != 0 & L.y_def[g] == g)
+                {
+                    L.y_rva[g] = lk_align_up(g_size[5], 16);
+                    g_size[5] = (int)L.y_rva[g] + (int)L.y_val[g];
+                };
+                g++;
+            };
+            // thunks go at the end of .text, 8 bytes each
+            text_end = (int)lk_align_up(g_size[0], 8);
+            thunk_base = text_end;
+            i = 0;
+            while (i < L.nimp)
+            {
+                if (L.i_thunk[i] != 0)
+                {
+                    L.i_thunkrva[i] = thunk_base;
+                    thunk_base = thunk_base + 8;
+                };
+                i++;
+            };
+            if (thunk_base > text_end) { g_size[0] = thunk_base; };
+            // ---- imports per DLL
+            dll_names = (byte**)fmalloc(8 * (L.nimp + 2));
+            dll_first = (int*)fmalloc(4 * (L.nimp + 2));
+            dll_cnt = (int*)fmalloc(4 * (L.nimp + 2));
+            dll_iat = (int*)fmalloc(4 * (L.nimp + 2));
+            dll_ilt = (int*)fmalloc(4 * (L.nimp + 2));
+            dll_name = (int*)fmalloc(4 * (L.nimp + 2));
+            order = (int*)fmalloc(4 * (L.nimp + 2));
+            hnoff = (int*)fmalloc(4 * (L.nimp + 2));
+            ndll = 0;
+            i = 0;
+            while (i < L.nimp)
+            {
+                d = 0;
+                while (d < ndll & !lk_streq(dll_names[d], L.i_dll[i])) { d++; };
+                if (d == ndll)
+                {
+                    dll_names[ndll] = L.i_dll[i];
+                    dll_cnt[ndll] = 0;
+                    ndll++;
+                };
+                dll_cnt[d]++;
+                i++;
+            };
+            // slots are numbered per DLL, in the DLL order
+            k = 0;
+            d = 0;
+            while (d < ndll)
+            {
+                dll_first[d] = k;
+                k = k + dll_cnt[d];
+                dll_cnt[d] = 0;
+                d++;
+            };
+            i = 0;
+            while (i < L.nimp)
+            {
+                d = 0;
+                while (!lk_streq(dll_names[d], L.i_dll[i])) { d++; };
+                L.i_dllidx[i] = d;
+                L.i_slot[i] = dll_first[d] + dll_cnt[d];
+                order[L.i_slot[i]] = i;
+                dll_cnt[d]++;
+                i++;
+            };
+            idata_size = 0;
+            if (L.nimp > 0)
+            {
+                idt_size = 20 * (ndll + 1);
+                off = idt_size;
+                d = 0;
+                while (d < ndll)
+                {
+                    dll_ilt[d] = off;
+                    off = off + 8 * (dll_cnt[d] + 1);
+                    d++;
+                };
+                iat_off = off;
+                d = 0;
+                while (d < ndll)
+                {
+                    dll_iat[d] = off;
+                    off = off + 8 * (dll_cnt[d] + 1);
+                    d++;
+                };
+                iat_total = off - iat_off;
+                // hint/name entries of the imports by name
+                i = 0;
+                while (i < L.nimp)
+                {
+                    hnoff[i] = -1;
+                    i++;
+                };
+                i = 0;
+                while (i < L.nimp)
+                {
+                    if (L.i_ord[order[i]] < 0)
+                    {
+                        hnoff[order[i]] = off;
+                        off = off + 2 + lk_strlen(L.i_name[order[i]]) + 1;
+                        if (off % 2 != 0) { off++; };
+                    };
+                    i++;
+                };
+                d = 0;
+                while (d < ndll)
+                {
+                    dll_name[d] = off;
+                    off = off + lk_strlen(dll_names[d]) + 1;
+                    d++;
+                };
+                idata_size = off;
+                g_size[2] = idata_size;
+                g_align[2] = 8;
+            };
+            // ---- headers and the layout of the sections
+            // groups: 0 text, 1 rdata, 2 idata, 3 data, 4 pdata, 5 bss, 6 reloc
+            nsecs = 0;
+            grp = 0;
+            while (grp < 6)
+            {
+                if (g_size[grp] > 0) { g_present[grp] = 1; nsecs++; };
+                grp++;
+            };
+            // a .reloc section always exists, it is last
+            nsecs++;
+            hdr = (int)lk_align_up(128 + 4 + 20 + 240 + 40 * nsecs, 512);
+            cur = (int)lk_align_up(hdr, 4096);
+            fcur = hdr;
+            k = 1;
+            grp = 0;
+            while (grp < 6)
+            {
+                if (g_present[grp] == 1)
+                {
+                    g_rva[grp] = cur;
+                    g_secno[grp] = k;
+                    k++;
+                    cur = (int)lk_align_up(cur + g_size[grp], 4096);
+                    if (grp == 5) { g_rawsize[grp] = 0; g_foff[grp] = 0; }
+                    else
+                    {
+                        g_rawsize[grp] = (int)lk_align_up(g_size[grp], 512);
+                        g_foff[grp] = fcur;
+                        fcur = fcur + g_rawsize[grp];
+                    };
+                };
+                grp++;
+            };
+            g_secno[6] = k;
+            // ---- addresses
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                grp = L.s_grp[gs];
+                if (grp >= 0)
+                {
+                    mapgrp = gmap[grp];
+                    L.s_rva[gs] = g_rva[mapgrp] + L.s_goff[gs];
+                };
+                gs++;
+            };
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_cls[g] == 2 & L.y_sec[g] == 0 & L.y_val[g] != 0 & L.y_def[g] == g) { L.y_rva[g] = g_rva[5] + L.y_rva[g]; };
+                g++;
+            };
+            i = 0;
+            while (i < L.nimp)
+            {
+                L.i_iat[i] = g_rva[2] + dll_iat[L.i_dllidx[i]] + 8 * (L.i_slot[i] - dll_first[L.i_dllidx[i]]);
+                if (L.i_thunk[i] != 0) { L.i_thunkrva[i] = g_rva[0] + L.i_thunkrva[i]; };
+                i++;
+            };
+            // ---- entry point
+            e_entry = -1;
+            g = 0;
+            while (g < L.nsym & e_entry < 0)
+            {
+                if (L.y_def[g] == g & L.y_cls[g] == 2 & lk_streq(L.y_name[g], entry)) { e_entry = g; };
+                g++;
+            };
+            if (e_entry < 0) { -> pe_fail(L, "entry point symbol is not defined\0"); };
+            // ---- the image
+            lb_init(@o);
+            lb_pad_to(@o, fcur);
+            if (!o.ok) { -> pe_fail(L, "out of memory\0"); };
+            lk_zero(o.m, fcur);
+            gs = 0;
+            while (gs < L.nsec)
+            {
+                grp = L.s_grp[gs];
+                if (grp >= 0 & grp != 3 & L.s_rawsize[gs] > 0 & L.s_rawptr[gs] > 0)
+                {
+                    m = L.o_img[L.s_obj[gs]];
+                    mapgrp = gmap[grp];
+                    i = 0;
+                    while (i < L.s_rawsize[gs])
+                    {
+                        o.m[g_foff[mapgrp] + L.s_goff[gs] + i] = m[L.s_rawptr[gs] + i];
+                        i++;
+                    };
+                };
+                gs++;
+            };
+            // ---- relocations
+            k = 0;
+            while (k < L.nobj)
+            {
+                m = L.o_img[k];
+                i = 0;
+                while (i < L.o_nsec[k])
+                {
+                    gs = L.o_sec0[k] + i;
+                    grp = L.s_grp[gs];
+                    if (grp >= 0 & grp != 3)
+                    {
+                        mapgrp = gmap[grp];
+                        nrel = L.s_nrel[gs];
+                        j = 0;
+                        while (j < nrel)
+                        {
+                            ro = L.s_relptr[gs] + 10 * j;
+                            g = L.o_sym0[k] + (int)lk_r32(m, ro + 4);
+                            ty = lk_r16(m, ro + 8);
+                            off = g_foff[mapgrp] + L.s_goff[gs] + (int)lk_r32(m, ro);
+                            P = L.s_rva[gs] + lk_r32(m, ro);
+                            e = L.y_def[g];
+                            S = 0;
+                            if (e >= 0) { S = pe_symrva(L, e); }
+                            else if (L.y_imp[g] >= 0)
+                            {
+                                if (L.y_kind[g] == 1) { S = L.i_iat[L.y_imp[g]]; }
+                                else { S = L.i_thunkrva[L.y_imp[g]]; };
+                            }
+                            else if (L.y_imp[g] == -3) { S = 0; };
+                            switch (ty)
+                            {
+                                case (1)
+                                {
+                                    A = lk_r64(o.m, off);
+                                    lk_w64(o.m, off, A + base + S);
+                                    pe_add_br(L, (int)P);
+                                }
+                                case (2) { -> pe_fail(L, "32 bit absolute relocation needs an image base below 4GB\0"); }
+                                case (3) { A = lk_r32s(o.m, off); lk_w32(o.m, off, A + S); }
+                                case (4) { A = lk_r32s(o.m, off); val = A + S - (P + 4); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (5) { A = lk_r32s(o.m, off); val = A + S - (P + 5); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (6) { A = lk_r32s(o.m, off); val = A + S - (P + 6); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (7) { A = lk_r32s(o.m, off); val = A + S - (P + 7); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (8) { A = lk_r32s(o.m, off); val = A + S - (P + 8); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (9) { A = lk_r32s(o.m, off); val = A + S - (P + 9); if (val < -2147483648 | val > 2147483647) { -> pe_fail(L, "relocation out of range\0"); }; lk_w32(o.m, off, val); }
+                                case (10)
+                                {
+                                    if (e >= 0 & L.y_sec[e] > 0) { lk_w16(o.m, off, g_secno[gmap[L.s_grp[L.o_sec0[L.y_obj[e]] + L.y_sec[e] - 1]]]); };
+                                }
+                                case (11)
+                                {
+                                    A = lk_r32s(o.m, off);
+                                    if (e >= 0 & L.y_sec[e] > 0) { lk_w32(o.m, off, A + S - g_rva[gmap[L.s_grp[L.o_sec0[L.y_obj[e]] + L.y_sec[e] - 1]]]); };
+                                }
+                                default { -> pe_fail(L, "unsupported relocation type\0"); };
+                            };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
+                k++;
+            };
+            // ---- thunks: jmp *slot(%rip)
+            i = 0;
+            while (i < L.nimp)
+            {
+                if (L.i_thunk[i] != 0)
+                {
+                    off = g_foff[0] + (int)(L.i_thunkrva[i] - g_rva[0]);
+                    o.m[off] = 255;
+                    o.m[off + 1] = 37;
+                    lk_w32(o.m, off + 2, L.i_iat[i] - (L.i_thunkrva[i] + 6));
+                    o.m[off + 6] = 204;
+                    o.m[off + 7] = 204;
+                };
+                i++;
+            };
+            // ---- the import tables
+            if (L.nimp > 0)
+            {
+                base = base;
+                d = 0;
+                while (d < ndll)
+                {
+                    off = g_foff[2] + 20 * d;
+                    lk_w32(o.m, off, g_rva[2] + dll_ilt[d]);
+                    lk_w32(o.m, off + 12, g_rva[2] + dll_name[d]);
+                    lk_w32(o.m, off + 16, g_rva[2] + dll_iat[d]);
+                    k = 0;
+                    while (dll_names[d][k] != 0) { o.m[g_foff[2] + dll_name[d] + k] = dll_names[d][k]; k++; };
+                    d++;
+                };
+                i = 0;
+                while (i < L.nimp)
+                {
+                    d = L.i_dllidx[i];
+                    k = L.i_slot[i] - dll_first[d];
+                    if (L.i_ord[i] >= 0) { val = (i64)L.i_ord[i] `| ((i64)1 << 63); }
+                    else
+                    {
+                        val = g_rva[2] + hnoff[i];
+                        off = g_foff[2] + hnoff[i];
+                        lk_w16(o.m, off, L.i_hint[i]);
+                        n = 0;
+                        while (L.i_name[i][n] != 0) { o.m[off + 2 + n] = L.i_name[i][n]; n++; };
+                    };
+                    lk_w64(o.m, g_foff[2] + dll_ilt[d] + 8 * k, val);
+                    lk_w64(o.m, g_foff[2] + dll_iat[d] + 8 * k, val);
+                    i++;
+                };
+            };
+            // ---- base relocations
+            pe_sort(L.br, L.nbr);
+            lb_init(@rl);
+            i = 0;
+            while (i < L.nbr)
+            {
+                page = L.br[i] - (L.br[i] % 4096);
+                j = i;
+                while (j < L.nbr & L.br[j] - (L.br[j] % 4096) == page) { j++; };
+                cnt = j - i;
+                blk = 8 + 2 * cnt;
+                if (cnt % 2 != 0) { blk = blk + 2; };
+                lb_put32(@rl, page);
+                lb_put32(@rl, blk);
+                k = i;
+                while (k < j)
+                {
+                    lb_put16(@rl, 40960 + (L.br[k] % 4096));
+                    k++;
+                };
+                if (cnt % 2 != 0) { lb_put16(@rl, 0); };
+                i = j;
+            };
+            if (rl.len == 0)
+            {
+                // an image that asks for a random base always carries a table, an empty block is enough
+                lb_put32(@rl, g_rva[0]);
+                lb_put32(@rl, 8);
+            };
+            g_rva[6] = cur;
+            g_size[6] = rl.len;
+            g_rawsize[6] = (int)lk_align_up(rl.len, 512);
+            g_foff[6] = fcur;
+            cur = (int)lk_align_up(cur + rl.len, 4096);
+            fcur = fcur + g_rawsize[6];
+            lb_pad_to(@o, fcur);
+            lk_zero(o.m + g_foff[6], g_rawsize[6]);
+            i = 0;
+            while (i < rl.len) { o.m[g_foff[6] + i] = rl.m[i]; i++; };
+            // ---- DOS header, PE signature, COFF header
+            o.m[0] = 77; o.m[1] = 90;
+            lk_w16(o.m, 2, 128);
+            lk_w16(o.m, 4, 1);
+            lk_w16(o.m, 8, 4);
+            lk_w16(o.m, 16, 184);
+            lk_w16(o.m, 24, 64);
+            lk_w32(o.m, 60, 128);
+            // a small DOS stub that prints the usual message
+            off = 64;
+            o.m[off] = 14; o.m[off + 1] = 31; o.m[off + 2] = 186; o.m[off + 3] = 14; o.m[off + 4] = 0; o.m[off + 5] = 180; o.m[off + 6] = 9;
+            o.m[off + 7] = 205; o.m[off + 8] = 33; o.m[off + 9] = 184; o.m[off + 10] = 1; o.m[off + 11] = 76; o.m[off + 12] = 205; o.m[off + 13] = 33;
+            m = "This program cannot be run in DOS mode.\0";
+            k = 0;
+            while (m[k] != 0) { o.m[off + 14 + k] = m[k]; k++; };
+            o.m[off + 14 + k] = 13; o.m[off + 15 + k] = 13; o.m[off + 16 + k] = 10; o.m[off + 17 + k] = 36;
+            off = 128;
+            o.m[off] = 80; o.m[off + 1] = 69;
+            lk_w16(o.m, off + 4, 34404);
+            lk_w16(o.m, off + 6, nsecs);
+            lk_w32(o.m, off + 8, 0);
+            lk_w16(o.m, off + 20, 240);
+            lk_w16(o.m, off + 22, 34);
+            off = off + 24;
+            // optional header
+            lk_w16(o.m, off, 523);
+            o.m[off + 2] = 14;
+            lk_w32(o.m, off + 4, g_size[0]);
+            lk_w32(o.m, off + 8, g_size[1] + g_size[2] + g_size[3] + g_size[4] + g_size[6]);
+            lk_w32(o.m, off + 12, g_size[5]);
+            lk_w32(o.m, off + 16, pe_symrva(L, e_entry));
+            lk_w32(o.m, off + 20, g_rva[0]);
+            lk_w64(o.m, off + 24, base);
+            lk_w32(o.m, off + 32, 4096);
+            lk_w32(o.m, off + 36, 512);
+            lk_w16(o.m, off + 40, 6);
+            lk_w16(o.m, off + 48, 6);
+            lk_w32(o.m, off + 56, cur);
+            lk_w32(o.m, off + 60, hdr);
+            lk_w16(o.m, off + 68, subsystem);
+            // high entropy VA, dynamic base, NX compatible, terminal server aware
+            lk_w16(o.m, off + 70, 33120);
+            lk_w64(o.m, off + 72, stack_reserve);
+            lk_w64(o.m, off + 80, 4096);
+            lk_w64(o.m, off + 88, 1048576);
+            lk_w64(o.m, off + 96, 4096);
+            lk_w32(o.m, off + 108, 16);
+            if (L.nimp > 0)
+            {
+                lk_w32(o.m, off + 112 + 8, g_rva[2]);
+                lk_w32(o.m, off + 112 + 12, idt_size);
+                lk_w32(o.m, off + 112 + 96, g_rva[2] + iat_off);
+                lk_w32(o.m, off + 112 + 100, iat_total);
+            };
+            if (g_present[4] == 1)
+            {
+                lk_w32(o.m, off + 112 + 24, g_rva[4]);
+                lk_w32(o.m, off + 112 + 28, g_size[4]);
+            };
+            lk_w32(o.m, off + 112 + 40, g_rva[6]);
+            lk_w32(o.m, off + 112 + 44, g_size[6]);
+            // section table
+            off = off + 240;
+            grp = 0;
+            while (grp < 7)
+            {
+                if (grp == 6 | g_present[grp] == 1)
+                {
+                    p = off;
+                    if (grp == 0) { m = ".text\0"; ty = 1610612768; }
+                    else if (grp == 1) { m = ".rdata\0"; ty = 1073741888; }
+                    else if (grp == 2) { m = ".idata\0"; ty = 3221225536; }
+                    else if (grp == 3) { m = ".data\0"; ty = 3221225536; }
+                    else if (grp == 4) { m = ".pdata\0"; ty = 1073741888; }
+                    else if (grp == 5) { m = ".bss\0"; ty = 3221225600; }
+                    else { m = ".reloc\0"; ty = 1107296320; };
+                    k = 0;
+                    while (m[k] != 0) { o.m[p + k] = m[k]; k++; };
+                    lk_w32(o.m, p + 8, g_size[grp]);
+                    lk_w32(o.m, p + 12, g_rva[grp]);
+                    lk_w32(o.m, p + 16, g_rawsize[grp]);
+                    lk_w32(o.m, p + 20, g_foff[grp]);
+                    lk_w32(o.m, p + 36, ty);
+                    off = off + 40;
+                };
+                grp++;
+            };
+            if (!lk_write_file(out, o.m, fcur)) { -> pe_fail(L, "cannot write the output file\0"); };
+            lk_make_exec(out);
+            -> true;
+        };
+
+        // Links objs into a PE executable. Returns false with a message in *err on failure.
+        lk_pe_link(byte** objs, int nobjs, byte** libs, int nlibs, byte** dirs, int ndirs, byte* entry, int subsystem, i64 stack_reserve, byte* out) -> byte*
+        {
+            PeLink L;
+            int k, i, sz, tot_sec, tot_sym, n;
+            bool ok = true;
+            byte* img;
+            L.err = (byte*)0;
+            L.nobj = 0;
+            L.ocap = nobjs + 64;
+            L.nlib = 0;
+            L.nent = 0;
+            L.ecap = 1024;
+            L.npull = 0;
+            L.nimp = 0;
+            L.nbr = 0;
+            L.brcap = 1024;
+            L.o_img = (byte**)fmalloc(8 * L.ocap);
+            L.o_size = (int*)fmalloc(4 * L.ocap);
+            L.br = (int*)fmalloc(4 * L.brcap);
+            L.l_img = (byte**)fmalloc(8 * (nlibs + 1));
+            L.l_size = (int*)fmalloc(4 * (nlibs + 1));
+            L.l_kind = (int*)fmalloc(4 * (nlibs + 1));
+            L.e_lib = (int*)fmalloc(4 * L.ecap);
+            L.e_kind = (int*)fmalloc(4 * L.ecap);
+            L.e_off = (int*)fmalloc(4 * L.ecap);
+            L.e_name = (byte**)fmalloc(8 * L.ecap);
+            L.e_dll = (byte**)fmalloc(8 * L.ecap);
+            L.e_hint = (int*)fmalloc(4 * L.ecap);
+            L.e_code = (int*)fmalloc(4 * L.ecap);
+            lm_init(@L.libsyms, 4096);
+            k = 0;
+            while (k < nobjs & ok)
+            {
+                sz = 0;
+                img = lk_read_file(objs[k], @sz);
+                if (img == (byte*)0) { ok = pe_fail(@L, "cannot read an input object\0"); }
+                else if (!pe_is_coff(img, sz)) { ok = pe_fail(@L, "input is not an x86-64 COFF object\0"); }
+                else { pe_add_obj(@L, img, sz); };
+                k++;
+            };
+            i = 0;
+            while (i < nlibs & ok)
+            {
+                ok = pe_open_lib(@L, libs[i], dirs, ndirs);
+                i++;
+            };
+            if (!ok) { -> L.err; };
+            // archive members that define names the objects need
+            lm_init(@L.defs, 4096);
+            L.pl_lib = (int*)fmalloc(4 * (L.nent + 8));
+            L.pl_off = (int*)fmalloc(4 * (L.nent + 8));
+            ok = pe_pull_members(@L);
+            if (!ok) { -> L.err; };
+            L.o_sec0 = (int*)fmalloc(4 * (L.nobj + 1));
+            L.o_nsec = (int*)fmalloc(4 * (L.nobj + 1));
+            L.o_sym0 = (int*)fmalloc(4 * (L.nobj + 1));
+            L.o_nsym = (int*)fmalloc(4 * (L.nobj + 1));
+            tot_sec = 0;
+            tot_sym = 0;
+            k = 0;
+            while (k < L.nobj)
+            {
+                L.o_nsec[k] = lk_r16(L.o_img[k], 2);
+                L.o_nsym[k] = (int)lk_r32(L.o_img[k], 12);
+                L.o_sec0[k] = tot_sec;
+                L.o_sym0[k] = tot_sym;
+                tot_sec = tot_sec + L.o_nsec[k];
+                tot_sym = tot_sym + L.o_nsym[k];
+                k++;
+            };
+            L.nsec = tot_sec;
+            L.nsym = tot_sym;
+            n = tot_sec + 1;
+            L.s_obj = (int*)fmalloc(4 * n);
+            L.s_name = (byte**)fmalloc(8 * n);
+            L.s_chars = (i64*)fmalloc(8 * n);
+            L.s_rawsize = (int*)fmalloc(4 * n);
+            L.s_rawptr = (int*)fmalloc(4 * n);
+            L.s_relptr = (int*)fmalloc(4 * n);
+            L.s_nrel = (int*)fmalloc(4 * n);
+            L.s_align = (int*)fmalloc(4 * n);
+            L.s_grp = (int*)fmalloc(4 * n);
+            L.s_goff = (int*)fmalloc(4 * n);
+            L.s_rva = (i64*)fmalloc(8 * n);
+            n = tot_sym + 1;
+            L.y_name = (byte**)fmalloc(8 * n);
+            L.y_obj = (int*)fmalloc(4 * n);
+            L.y_val = (i64*)fmalloc(8 * n);
+            L.y_sec = (int*)fmalloc(4 * n);
+            L.y_cls = (int*)fmalloc(4 * n);
+            L.y_def = (int*)fmalloc(4 * n);
+            L.y_imp = (int*)fmalloc(4 * n);
+            L.y_kind = (int*)fmalloc(4 * n);
+            L.y_rva = (i64*)fmalloc(8 * n);
+            L.y_weak = (int*)fmalloc(4 * n);
+            n = tot_sym + 4;
+            L.i_name = (byte**)fmalloc(8 * n);
+            L.i_dll = (byte**)fmalloc(8 * n);
+            L.i_hint = (int*)fmalloc(4 * n);
+            L.i_ord = (int*)fmalloc(4 * n);
+            L.i_code = (int*)fmalloc(4 * n);
+            L.i_thunk = (int*)fmalloc(4 * n);
+            L.i_dllidx = (int*)fmalloc(4 * n);
+            L.i_slot = (int*)fmalloc(4 * n);
+            L.i_iat = (i64*)fmalloc(8 * n);
+            L.i_thunkrva = (i64*)fmalloc(8 * n);
+            lm_init(@L.imps, 256);
+            k = 0;
+            while (k < L.nobj & ok)
+            {
+                ok = pe_load_obj(@L, k);
+                k++;
+            };
+            if (ok) { ok = pe_resolve(@L); };
+            if (ok) { ok = pe_scan_relocs(@L); };
+            if (ok) { ok = pe_link_all(@L, entry, subsystem, stack_reserve, out); };
+            -> L.err;
+        };
+    };
+};
+
+#endif;
