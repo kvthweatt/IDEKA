@@ -276,7 +276,7 @@ class TestRunner:
             # Compile the test
             try:
                 compile_success, compile_output, compile_time, exe_name = self.run_compiler(test_file)
-            except:
+            except Exception:
                 continue
             total_compile_time += compile_time
             
@@ -331,7 +331,7 @@ class TestRunner:
                         first_line = clean_error.split('\n')[0].strip()
                         if first_line:
                             print(f"     {'Error' if not compile_ok or not run_ok else 'Output'}: {first_line[:80]}...")
-                    except:
+                    except Exception:
                         print(f"     Error: [Could not decode error message]")
         
         print("=" * 60)
