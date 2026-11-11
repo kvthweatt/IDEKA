@@ -26,8 +26,10 @@ It is not a C derivative, and it is not a safe language in the Rust sense. It is
 
 The language was previously called Flux. Some names in the compiler still carry it and will follow the new names in upcoming patches.
 
-As of 10/12/2026, **IDEKA is bootstrapped and can compile itself**. It is recommended you bootstrap your compiler by running `python idkc.py idkc.idk` for faster compile times.  
+As of 11/09/2026, **IDEKA is fully self-hosted** and no longer requires Python or LLVM post-bootstrap. It is recommended you bootstrap your compiler by running `python idkc.py idkc.idk` for faster compile times.  
 Alternatively you can now run a specialized setup script located at `repo_root\scripts\setup.py` which automates the process of setup, configuration, and bootstrap.
+
+The native compiler code will remain syntax compliant with v1.6.1 of the Python compiler until v3 which will allow anyone who doesn't already have a copy of Ideka to bootstrap. Native binaries will be released when v3 arrives allowing programmers to install and get going without needing to bootstrap, officially retiring all Python code in the repo.
 
 ---
 

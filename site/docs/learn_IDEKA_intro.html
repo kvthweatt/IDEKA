@@ -1,0 +1,3774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learn IDEKA Intro - IDEKA Documentation</title>
+<meta name="description" content="IDEKA programming language documentation: Learn IDEKA Intro">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400..800&display=swap" rel="stylesheet">
+<style>
+:root {
+    --black:    #050608;
+    --dark:     #080a0f;
+    --panel:    #0b0e16;
+    --border:   #0f1520;
+    --border2:  #1a2235;
+    --blue:     #00aaff;
+    --blue-dim: #0066bb;
+    --blue-glow:#00aaff44;
+    --blue-soft:#00aaff12;
+    --text:     #c8d4e8;
+    --text-dim: #5a6880;
+    --text-mute:#2a3445;
+    --mono:     'Space Mono', monospace;
+    --sans:     'DM Sans', sans-serif;
+    --display:  'Syne', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: var(--black);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 0 40px; }
+
+/* Nav */
+nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    height: 64px;
+    padding: 0 40px;
+    background: rgba(5,6,8,0.92);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    gap: 32px;
+}
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    flex-shrink: 0;
+}
+.nav-logo-mark { width: 26px; height: 26px; }
+.nav-logo-text {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.06em;
+}
+.nav-links {
+    display: flex;
+    list-style: none;
+    gap: 28px;
+}
+.nav-links a {
+    font-size: 13px;
+    color: var(--text-dim);
+    text-decoration: none;
+    letter-spacing: 0.02em;
+    transition: color 0.15s;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-spacer { flex: 1; }
+.nav-cta {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--blue);
+    background: transparent;
+    border: 1px solid var(--blue-dim);
+    padding: 7px 16px;
+    border-radius: 2px;
+    text-decoration: none;
+    transition: background 0.2s, box-shadow 0.2s;
+}
+.nav-cta:hover {
+    background: var(--blue-soft);
+    box-shadow: 0 0 20px var(--blue-glow);
+    text-decoration: none;
+}
+.nav-hamburger {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    width: 36px; height: 36px;
+    padding: 6px;
+    background: none; border: none;
+    cursor: pointer; flex-shrink: 0;
+}
+.nav-hamburger span {
+    display: block; height: 1.5px;
+    background: var(--text-dim); border-radius: 2px;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+    transform-origin: center;
+}
+.nav-hamburger.open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); background: var(--text); }
+.nav-hamburger.open span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+.nav-hamburger.open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); background: var(--text); }
+.nav-mobile-menu {
+    display: none;
+    flex-direction: column;
+    position: fixed;
+    top: 64px; left: 0; right: 0;
+    background: rgba(5,6,8,0.97);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border2);
+    z-index: 99;
+    transform: translateY(-8px); opacity: 0;
+    pointer-events: none;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+}
+.nav-mobile-menu.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
+.nav-mobile-link {
+    display: flex; align-items: center;
+    padding: 16px 24px; font-size: 13px; font-weight: 500;
+    color: var(--text-dim); text-decoration: none;
+    border-bottom: 1px solid var(--border);
+    transition: color 0.15s, background 0.15s;
+}
+.nav-mobile-link:last-child { border-bottom: none; }
+.nav-mobile-link:active { background: var(--panel); color: var(--text); }
+.nav-mobile-link.cta {
+    color: var(--blue); font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+
+/* Footer */
+footer {
+    border-top: 1px solid var(--border);
+    padding: 28px 0;
+    background: var(--dark);
+}
+.footer-inner {
+    display: flex; align-items: center; gap: 20px;
+    max-width: 1200px; margin: 0 auto; padding: 0 40px;
+}
+.footer-logo { text-decoration: none; }
+.footer-sep {
+    width: 1px; height: 18px;
+    background: var(--border2);
+}
+.footer-copy { font-size: 12px; color: var(--text-mute); }
+.footer-links {
+    display: flex; gap: 20px; margin-left: auto;
+}
+.footer-links a {
+    font-size: 12px; color: var(--text-mute);
+    text-decoration: none; transition: color 0.15s;
+}
+.footer-links a:hover { color: var(--text); }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: var(--black); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+@media (max-width: 900px) {
+    nav { padding: 0 20px; gap: 16px; }
+    .nav-links { display: none; }
+    .nav-hamburger { display: flex; }
+    .nav-mobile-menu { display: flex; }
+    .footer-inner { padding: 0 20px; flex-wrap: wrap; gap: 12px; }
+    .footer-sep { display: none; }
+    .footer-links { margin-left: 0; }
+}
+
+
+/* ── Doc page layout ─────────────────────────────────────────────────── */
+.doc-layout {
+    display: flex;
+    min-height: calc(100vh - 64px);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px;
+    gap: 0;
+}
+
+.doc-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 64px;
+    height: calc(100vh - 64px);
+    overflow-y: auto;
+    padding: 32px 0 32px 0;
+    border-right: 1px solid var(--border);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border2) transparent;
+}
+
+.doc-sidebar::-webkit-scrollbar { width: 3px; }
+.doc-sidebar::-webkit-scrollbar-thumb { background: var(--border2); }
+
+.doc-sidebar-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    padding: 0 24px;
+    margin-bottom: 12px;
+}
+
+.doc-toc-link {
+    display: block;
+    padding: 4px 24px;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-decoration: none;
+    line-height: 1.5;
+    transition: color 0.15s;
+    border-left: 2px solid transparent;
+}
+.doc-toc-link:hover { color: var(--text); }
+.doc-toc-link.active { color: var(--blue); border-left-color: var(--blue); }
+.doc-toc-link.toc-h1 { padding-left: 24px; font-weight: 600; color: var(--text); font-size: 12px; }
+.doc-toc-link.toc-h2 { padding-left: 24px; }
+.doc-toc-link.toc-h3 { padding-left: 38px; font-size: 11px; }
+.doc-toc-link.toc-h4 { padding-left: 52px; font-size: 11px; color: var(--text-mute); }
+
+.doc-content {
+    flex: 1;
+    min-width: 0;
+    padding: 40px 0 80px 48px;
+    max-width: 860px;
+}
+
+/* ── Doc typography ──────────────────────────────────────────────────── */
+.doc-h1 {
+    font-family: var(--display);
+    font-size: clamp(26px, 4vw, 36px);
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.02em;
+    margin: 0 0 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border2);
+}
+.doc-h2 {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.02em;
+    margin: 40px 0 12px;
+    padding-top: 8px;
+}
+.doc-h3 {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.04em;
+    margin: 28px 0 8px;
+}
+.doc-h4 {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    margin: 20px 0 6px;
+    text-transform: uppercase;
+}
+.doc-h5, .doc-h6 {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    margin: 16px 0 4px;
+}
+
+.doc-p {
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+}
+
+.doc-p code, .doc-ul code, .doc-ol code, li code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--blue);
+    background: var(--blue-soft);
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+
+.doc-ul, .doc-ol {
+    margin: 0 0 14px 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.doc-hr {
+    border: none;
+    border-top: 1px solid var(--border2);
+    margin: 32px 0;
+}
+
+.doc-blockquote {
+    border-left: 3px solid var(--blue-dim);
+    padding: 8px 16px;
+    margin: 16px 0;
+    background: var(--blue-soft);
+    color: var(--text-dim);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.doc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--mono);
+    margin: 16px 0 24px;
+}
+.doc-table th {
+    background: var(--dark);
+    color: var(--blue);
+    padding: 8px 12px;
+    text-align: left;
+    border: 1px solid var(--border2);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.doc-table td {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    vertical-align: top;
+}
+.doc-table tr:nth-child(even) td { background: var(--dark); }
+
+/* ── Code blocks ─────────────────────────────────────────────────────── */
+.doc-code-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 12px 0 20px;
+}
+.doc-code-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--dark);
+    border-bottom: 1px solid var(--border);
+}
+.code-dot { width: 9px; height: 9px; border-radius: 50%; }
+.code-dot-r { background: #3a1c1c; }
+.code-dot-y { background: #2e2a12; }
+.code-dot-g { background: #122e18; }
+.code-lang {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-mute);
+    margin-left: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.doc-pre {
+    margin: 0;
+    padding: 18px 22px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text);
+    overflow-x: auto;
+    background: transparent;
+}
+.doc-pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+/* ── Syntax highlight spans ──────────────────────────────────────────── */
+.ck-kw  { color: #00aaff; font-weight: 700; }
+.ck-ty  { color: #68c4e8; }
+.ck-str { color: #7ec68a; }
+.ck-num { color: #c0956e; }
+.ck-cmt { color: #3a4a5a; font-style: italic; }
+.ck-pp  { color: #a07bd0; }
+
+/* ── Doc index page ──────────────────────────────────────────────────── */
+.doc-index-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 32px;
+}
+.doc-index-card {
+    background: var(--dark);
+    padding: 28px 24px;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: background 0.2s;
+    position: relative;
+}
+.doc-index-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: transparent;
+    transition: background 0.25s;
+}
+.doc-index-card:hover { background: var(--panel); }
+.doc-index-card:hover::after { background: var(--blue); }
+.doc-index-card-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+}
+.doc-index-card-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.02em;
+}
+.doc-index-card-arrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    margin-top: auto;
+    padding-top: 8px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+.doc-index-card:hover .doc-index-card-arrow { opacity: 1; }
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .doc-sidebar { display: none; }
+    .doc-content { padding: 24px 0 60px; }
+    .doc-layout { padding: 0 18px; }
+}
+
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">
+    <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+      <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+      <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+      <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+    </svg>
+    <span class="nav-logo-text">IDEKA</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs/">Docs</a></li>
+    <li><a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a></li>
+    <li><a href="https://IDEKAspl.org/ide" target="_blank">Try Online</a></li>
+  </ul>
+  <div class="nav-spacer"></div>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-cta">GitHub</a>
+  <button class="nav-hamburger" id="nav-hamburger" aria-label="Menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-mobile-menu" id="nav-mobile-menu" aria-hidden="true">
+  <a href="/" class="nav-mobile-link">Home</a>
+  <a href="/docs/" class="nav-mobile-link">Docs</a>
+  <a href="https://discord.gg/RAHjbYuNUc" target="_blank" class="nav-mobile-link">Discord</a>
+  <a href="https://IDEKAspl.org/ide" target="_blank" class="nav-mobile-link">Try Online</a>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-mobile-link cta">GitHub &rarr;</a>
+</div>
+
+<div class="doc-layout">
+  <aside class="doc-sidebar">
+    <div class="doc-sidebar-title">On this page</div>
+    <a href="#intro-to-programming-with-IDEKA" class="doc-toc-link toc-h1">Intro to Programming with IDEKA</a>
+<a href="#1---fundamentals" class="doc-toc-link toc-h2">1 - Fundamentals</a>
+<a href="#your-first-program" class="doc-toc-link toc-h2">Your first program.</a>
+<a href="#f11" class="doc-toc-link toc-h4">f1.1:</a>
+<a href="#f12" class="doc-toc-link toc-h4">f1.2</a>
+<a href="#f13" class="doc-toc-link toc-h4">f1.3</a>
+<a href="#2---simple-functions" class="doc-toc-link toc-h2">2 - Simple Functions</a>
+<a href="#temperature-conversion-c-f" class="doc-toc-link toc-h3">Temperature Conversion (C / F)</a>
+<a href="#f21" class="doc-toc-link toc-h4">f2.1</a>
+<a href="#calculating-distance" class="doc-toc-link toc-h3">Calculating distance</a>
+<a href="#f22" class="doc-toc-link toc-h4">f2.2</a>
+<a href="#performing-logic" class="doc-toc-link toc-h3">Performing logic</a>
+<a href="#f23" class="doc-toc-link toc-h4">f2.3</a>
+<a href="#logically-performing-logic" class="doc-toc-link toc-h3">Logically performing logic</a>
+<a href="#f24" class="doc-toc-link toc-h4">f2.4</a>
+<a href="#f25" class="doc-toc-link toc-h4">f2.5</a>
+<a href="#3---hello-world" class="doc-toc-link toc-h2">3 - Hello World</a>
+<a href="#f31-hello-world" class="doc-toc-link toc-h4">f3.1 Hello World</a>
+<a href="#f32-whats-your-name" class="doc-toc-link toc-h4">f3.2 What&#x27;s your name?</a>
+<a href="#f33-introducing-f-strings" class="doc-toc-link toc-h4">f3.3 Introducing `f-strings`:</a>
+<a href="#4---string-manipulation" class="doc-toc-link toc-h2">4 - String Manipulation</a>
+<a href="#f41-slices" class="doc-toc-link toc-h4">f4.1 Slices</a>
+<a href="#f42-reverse-a-string" class="doc-toc-link toc-h4">f4.2 Reverse a String</a>
+<a href="#f43-the-sizeof-keyword" class="doc-toc-link toc-h4">f4.3 The `sizeof()` Keyword</a>
+<a href="#f44-constant-values" class="doc-toc-link toc-h4">f4.4 Constant Values</a>
+<a href="#5---data-and-struct" class="doc-toc-link toc-h2">5 - `data` and `struct`</a>
+<a href="#f51-primitive-data-structures-in-IDEKA" class="doc-toc-link toc-h4">f5.1 Primitive Data Structures in IDEKA</a>
+<a href="#f52-calculating-the-distance-between-two-3d-points" class="doc-toc-link toc-h4">f5.2 Calculating the distance between two 3D points</a>
+<a href="#f53-modelling-a-file-format-header-with-struct" class="doc-toc-link toc-h4">f5.3 Modelling a File Format Header with `struct`</a>
+<a href="#f531" class="doc-toc-link toc-h5">f5.3.1</a>
+<a href="#f54-restructuring" class="doc-toc-link toc-h4">f5.4 Restructuring</a>
+<a href="#6---warming-up" class="doc-toc-link toc-h2">6 - Warming Up</a>
+<a href="#f61-a-little-game" class="doc-toc-link toc-h4">f6.1 A little game.</a>
+<a href="#f62-for-do-while-and-do-while-loops" class="doc-toc-link toc-h4">f6.2 `for`, `do`, `while`, and `do`-`while` loops</a>
+<a href="#f621-do-while" class="doc-toc-link toc-h4">f6.2.1 `do`-`while`</a>
+<a href="#f622-while-without-do" class="doc-toc-link toc-h4">f6.2.2 `while` without `do`</a>
+<a href="#f631-for-style-1-initializer-condition-expression" class="doc-toc-link toc-h4">f6.3.1 `for` Style 1: initializer, condition, expression</a>
+<a href="#f632-for-style-2-element-in-array" class="doc-toc-link toc-h4">f6.3.2 `for` Style 2: element in array</a>
+<a href="#f64-sizing-an-array-of-non-standard-type-width" class="doc-toc-link toc-h4">f6.4 Sizing an array of non-standard type width:</a>
+<a href="#7---object-oriented-programming-oop" class="doc-toc-link toc-h2">7 - Object-Oriented Programming (OOP)</a>
+<a href="#f71" class="doc-toc-link toc-h4">f7.1</a>
+<a href="#f72-modeling-a-lock-with-object" class="doc-toc-link toc-h4">f7.2 Modeling a lock with `object`</a>
+<a href="#f73-inheritance" class="doc-toc-link toc-h4">f7.3 Inheritance</a>
+<a href="#f731-struct-inheritance" class="doc-toc-link toc-h4">f7.3.1 Struct Inheritance</a>
+<a href="#8---functions-in-depth" class="doc-toc-link toc-h2">8 - Functions in Depth</a>
+<a href="#f81-defining-your-first-function" class="doc-toc-link toc-h4">f8.1 Defining Your First Function</a>
+<a href="#f82-parameters-and-arguments" class="doc-toc-link toc-h4">f8.2 Parameters and Arguments</a>
+<a href="#f83-return-values" class="doc-toc-link toc-h4">f8.3 Return Values</a>
+<a href="#f84-void-functions" class="doc-toc-link toc-h4">f8.4 Void Functions</a>
+<a href="#f85-scope---where-variables-live" class="doc-toc-link toc-h4">f8.5 Scope - Where Variables Live</a>
+<a href="#f86-function-overloading" class="doc-toc-link toc-h4">f8.6 Function Overloading</a>
+<a href="#f87-practical-examples" class="doc-toc-link toc-h4">f8.7 Practical Examples</a>
+<a href="#f88-building-with-functions" class="doc-toc-link toc-h4">f8.8 Building with Functions</a>
+<a href="#9---working-with-strings" class="doc-toc-link toc-h2">9 - Working with Strings</a>
+<a href="#f91-what-is-a-string" class="doc-toc-link toc-h4">f9.1 What is a String?</a>
+<a href="#f92-string-basics" class="doc-toc-link toc-h4">f9.2 String Basics</a>
+<a href="#f93-accessing-individual-characters" class="doc-toc-link toc-h4">f9.3 Accessing Individual Characters</a>
+<a href="#f94-string-length" class="doc-toc-link toc-h4">f9.4 String Length</a>
+<a href="#f95-comparing-strings" class="doc-toc-link toc-h4">f9.5 Comparing Strings</a>
+<a href="#f96-copying-strings" class="doc-toc-link toc-h4">f9.6 Copying Strings</a>
+<a href="#f97-building-strings" class="doc-toc-link toc-h4">f9.7 Building Strings</a>
+<a href="#f98-practical-string-example" class="doc-toc-link toc-h4">f9.8 Practical String Example</a>
+<a href="#10---enums-and-unions" class="doc-toc-link toc-h2">10 - Enums and Unions</a>
+<a href="#f101-enumerated-lists-enums" class="doc-toc-link toc-h4">f10.1 Enumerated Lists (Enums)</a>
+<a href="#f102-using-enums-in-practice" class="doc-toc-link toc-h4">f10.2 Using Enums in Practice</a>
+<a href="#f103-enum-in-switch-statements" class="doc-toc-link toc-h4">f10.3 Enum in Switch Statements</a>
+<a href="#f104-unions---one-value-at-a-time" class="doc-toc-link toc-h4">f10.4 Unions - One Value at a Time</a>
+<a href="#f105-why-use-unions" class="doc-toc-link toc-h4">f10.5 Why Use Unions?</a>
+<a href="#f106-important-union-rules" class="doc-toc-link toc-h4">f10.6 Important Union Rules</a>
+<a href="#f107-practical-enum-and-union-example" class="doc-toc-link toc-h4">f10.7 Practical Enum and Union Example</a>
+<a href="#11---structs" class="doc-toc-link toc-h2">11 - Structs</a>
+<a href="#f111-why-do-we-need-structs" class="doc-toc-link toc-h4">f11.1 Why Do We Need Structs?</a>
+<a href="#f112-creating-and-using-structs" class="doc-toc-link toc-h4">f11.2 Creating and Using Structs</a>
+<a href="#f113-initializing-structs" class="doc-toc-link toc-h4">f11.3 Initializing Structs</a>
+<a href="#f114-structs-with-arrays" class="doc-toc-link toc-h4">f11.4 Structs with Arrays</a>
+<a href="#f115-arrays-of-structs" class="doc-toc-link toc-h4">f11.5 Arrays of Structs</a>
+<a href="#f116-passing-structs-to-functions" class="doc-toc-link toc-h4">f11.6 Passing Structs to Functions</a>
+<a href="#f117-nested-structs" class="doc-toc-link toc-h4">f11.7 Nested Structs</a>
+<a href="#f118-structs-vs-objects---key-differences" class="doc-toc-link toc-h4">f11.8 Structs vs Objects - Key Differences</a>
+<a href="#f119-practical-struct-example" class="doc-toc-link toc-h4">f11.9 Practical Struct Example</a>
+<a href="#12---putting-it-all-together" class="doc-toc-link toc-h2">12 - Putting It All Together</a>
+<a href="#f121-what-youve-learned" class="doc-toc-link toc-h4">f12.1 What You&#x27;ve Learned</a>
+<a href="#f122-a-complete-example-program" class="doc-toc-link toc-h4">f12.2 A Complete Example Program</a>
+<a href="#f123-reading-compiler-errors" class="doc-toc-link toc-h4">f12.3 Reading Compiler Errors</a>
+<a href="#f124-debugging-tips" class="doc-toc-link toc-h4">f12.4 Debugging Tips</a>
+<a href="#f125-good-programming-practices" class="doc-toc-link toc-h4">f12.5 Good Programming Practices</a>
+<a href="#f126-next-steps" class="doc-toc-link toc-h4">f12.6 Next Steps</a>
+<a href="#f127-final-thoughts" class="doc-toc-link toc-h4">f12.7 Final Thoughts</a>
+  </aside>
+  <main class="doc-content">
+    <h1 id="intro-to-programming-with-IDEKA" class="doc-h1">Intro to Programming with IDEKA</h1>
+<p class="doc-p">For the purposes of this document, it is assumed this is your first language.   If it isn't, or if you're a pro, that's ok too!  </p>
+<ul class="doc-ul">
+<li><strong>What is programming?</strong>  </li>
+</ul>
+<p class="doc-p">Programming is the art of writing software with a programming language like C, Haskell, Python, Fortran, and others. We say art because anyone can program, but it takes skill to write good code.   Software is virtual, non-physical. You can't physically touch it. Software lives in and on hardware.   Hardware is physical, like your hard drive, keyboard, or monitor.   Firmware is a kind of software which lives <em>in</em> your hardware.   Software, specifically applications, live <em>on</em> your hard drive.</p>
+<ul class="doc-ul">
+<li><strong>How does code actually run?</strong>  </li>
+</ul>
+<p class="doc-p">To put it simply, all devices have a central processing unit (CPU).   The CPU is responsible for decoding and executing instructions.   Programs or applications are a collection of instructions.   The operating system follows the rules of the CPU to create extended rules. The operating system uses the extended rules to execute programs. This is a simplified explanation and the reality is more nuanced than this.</p>
+<ul class="doc-ul">
+<li><strong>How do you make programs?</strong>  </li>
+</ul>
+<p class="doc-p">Every program starts with source code. Source code is the human-readable code written in a programming language.   If the language is a <em>compiled</em> language, you <em>compile</em> your source code into an executable program file.   If the language is an <em>interpreted</em> language, you pass your source code to an <em>interpreter</em> which executes your program in memory.   Programs written for one operating system will not work on a different operating system.   A program compiled for Linux will not execute on Windows.   CPU architecture also affects whether a program will run or not.   A program compiled on a RISC CPU will not run on an ARM CPU.</p>
+<ul class="doc-ul">
+<li><strong>Why won't Windows programs run on Linux?</strong>  </li>
+</ul>
+<p class="doc-p">Operating systems have different architectures, and as a result, different <em>system calls</em>.   Every operating system does the same basic functions like reading and writing files, but have different function names for these tasks.   Most languages have <em>libraries</em> which allow you to call these functions. They expose your kernel to the application binary interface or <em>ABI</em>.</p>
+<p class="doc-p">If you're still keeping up, excellent. If not, <a href="https://google.com/">Google</a> is your friend. Look up the italicized terms.</p>
+<p class="doc-p">All of this information will become useful later. For now, let's begin learning how to program.</p>
+<hr class="doc-hr">
+<h2 id="1---fundamentals" class="doc-h2">1 - Fundamentals</h2>
+<p class="doc-p">IDEKA sits broadly between high and low level. What is that you ask?   High level languages are languages that are very close to human language. A good example is Python.   While Python isn't compiled, it still creates programs. Python looks like:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">if</span> (user <span class="ck-kw">not</span> <span class="ck-kw">in</span> userlist):
+    userlist.append(user)</code></pre>
+</div>
+<p class="doc-p">It is almost like speaking.</p>
+<p class="doc-p">Low level languages are more similar to machine code in regard to how it translates to machine code.   There are still human-readable terms like <code>if</code> and <code>true</code>/<code>false</code> but how it relates to machine code will be explained later.   C++ is a low level language, here's an example:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">for</span> (<span class="ck-ty">int</span> x = <span class="ck-num">0</span>; x &lt; <span class="ck-num">100</span>; x++)
+{
+    *ptr-&gt;value = x; foo(*ptr);
+};</code></pre>
+</div>
+<p class="doc-p">As you can see, Python and C++ are very different.   IDEKA sits right between the two in terms of grammar and syntax, which we will see shortly.  </p>
+<p class="doc-p">To work with a language like IDEKA you need to understand computer memory.   We're going to start from the smallest unit and work our way up.</p>
+<p class="doc-p">The smallest unit of memory (or data) is a bit. A bit is a single digit, 1 or 0.   A group of 8 bits is called a byte. An example: <code>01000001</code> equals 65. Here's an example of a memory segment that is 8 bits long:</p>
+<p class="doc-p"><table align="center">   <tr>     <th>2 ^ 8 (128)</th>     <th>2 ^ 6 (64)</th>     <th>2 ^ 5 (32)</th>     <th>2 ^ 4 (16)</th>     <th>2 ^ 3 (8)</th>     <th>2 ^ 2 (4)</th>     <th>2 ^ 1 (2)</th>     <th>2 ^ 0 (1)</th>   </tr>   <tr>     <td>0</td>     <td>1</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>1</td>   </tr>   <tr>     <td>0</td>     <td><b>64</b> <em> 1 = 64</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td><b>1</b> </em> 1 = 1</td>   </tr> </table></p>
+<p class="doc-p">Above we see 1 in the 64's place, and a 1 in the 1's place. We add 64 + 1 and get 65.</p>
+<ul class="doc-ul">
+<li><strong>What does <code>01000001</code> mean though?</strong>  </li>
+</ul>
+<p class="doc-p">All data is inherently meaningless. It is up to you, the programmer, to give meaning to data.  </p>
+<ul class="doc-ul">
+<li><strong>How do we make <code>01000001</code> mean something?</strong>  </li>
+</ul>
+<p class="doc-p">We do something like this:   <code>years_old = 65;</code> (remember it equals 65 so you can imagine binary here)   <code>miles_per_hour = 65;</code>   <code>percent_complete = 65;</code>   Notice anything? We have variables that all equal 65. They're all the same data, but clearly they should be used differently. We're not going to say someone is 65 miles per hour, we say they're 65 years old.  </p>
+<p class="doc-p">Some very smart people at <strong><a href="https://www.nist.gov/">NIST</a></strong> (formerly known as <strong>ASA</strong>) engineered a way to represent characters on screens so you and I can read, known as <strong><a href="https://asciitable.com/">ASCII</a></strong>. It is a table of values ranging 0-255. The value range of a byte is also 0-255.</p>
+<p class="doc-p"><p align="center"> <img src="https://www.asciitable.com/asciifull.gif"> <img src="https://www.asciitable.com/extend.gif"> </p></p>
+<ul class="doc-ul">
+<li><strong>How does this relate to programming?</strong>  </li>
+</ul>
+<p class="doc-p">It's dangerous  to go alone, take this. Generally speaking you will not be needing this table, but it's a good thing to have. When you start to learn string manipulation this will become relevant again.</p>
+<ul class="doc-ul">
+<li><strong>Diving into memory:</strong>  </li>
+</ul>
+<p class="doc-p">You can imagine computer memory to be linear. Whether you want to visualize it horizontally or vertically, it doesn't matter. What matters is understanding memory is made up of bits. If I have 1 GB of memory, that's 1 billion bytes; multiplied by 8 and you get 8 billion bits. We always count in bytes (groups of 8) when we count memory spaces.</p>
+<p class="doc-p"><table align="center">   <tr>     <th>Address</th>     <th>0</th>     <th>1</th>     <th>2</th>     <th>3</th>     <th>4</th>     <th>5</th>     <th>...</th>     <th>1,073,741,824</th>   </tr>   <tr>     <td>Value</td>     <td>0xDE</td>     <td>0xAD</td>     <td>0xBE</td>     <td>0xEF</td>     <td>0xDE</td>     <td>0xAD</td>     <td>...</td>     <td>0xEF</td>   </tr> </table></p>
+<ul class="doc-ul">
+<li><strong>Data types:</strong>  </li>
+</ul>
+<p class="doc-p">There is 1 byte per address. So now, say I want to get the value of some bytes. Welcome to data types.   Integer (<code>int</code>) types in IDEKA are 32 bits by default. 32 divided by 8 equals 4, so an <code>int</code>  is 4 bytes long. Let's start at address 2 and read an integer, we get <code>0xBEEFDEAD</code>.   When we convert to base 10 (what we can read) we get: <strong>3,203,391,149</strong>.   Let's say we're using a half-sized <code>int</code> that is only 2 bytes, starting at address 2, we get <code>0xBEEF</code>.   Converted to base 10: <strong>48,879</strong>. A much smaller number.</p>
+<ul class="doc-ul">
+<li><strong>How did we convert 0xBEEFDEAD to a number? What even is that?</strong>  </li>
+</ul>
+<p class="doc-p">A value like 0x5A206AE0 (<strong>0x</strong> prefix) is known as a hexidecimal number, or base 16. Humans read numbers in decimal or base 10. Binary is base 2. The base number represents how many numbers are available to make other numbers. Binary has 2 numbers available, 0 and 1. Decimal has 10 numbers, 0 through 9. Hexadecimal uses 6 more values, we call them A, B, C, D, E and F. This means hexadecimal ranges from 0-F, or 0 1 2 3 4 5 6 7 8 9 A B C D E F. This is essentially 0-15 which if you include the 0, is 16 numbers. <strong>The value 10 in any numbering system is equal to the base of the numbering system.</strong> In binary, 10 equals 2, there's a 1 in the 2's place. In hexadecimal the number 10 equals 16, here's how:</p>
+<p class="doc-p"><table align="center">   <tr>     <th>16 ^ 3 = <br>(4096)</th>     <th>16 ^ 2 = <br>(256)</th>     <th>16 ^ 1 = <br>(16)</th>     <th>16 ^ 0 = <br>(1)</th>   </tr>   <tr>     <td></td>     <td></td>     <td>1</td>     <td>0</td>   </tr>   <tr>     <td></td>     <td></td>     <td>1 <em> 16<br>= 16</td>     <td>0 </em> 1<br>= 0</td>   </tr> </table> Another example using 0xFF: <table align="center">   <tr>     <th>16 ^ 3 = <br>(4096)</th>     <th>16 ^ 2 = <br>(256)</th>     <th>16 ^ 1 = <br>(16)</th>     <th>16 ^ 0 = <br>(1)</th>   </tr>   <tr>     <td></td>     <td></td>     <td>F</td>     <td>F</td>   </tr>   <tr>     <td></td>     <td></td>     <td>F <em> 16<br>=<br>15 </em> 16<br>= 240</td>     <td>F <em> 1<br>=<br>15 </em> 1<br>= 15</td>   </tr> </table></p>
+<p class="doc-p">240 + 15 = 255, or the max value of a byte. Bytes in hexadecimal have 2 digits, like 0xFF or 0xA3.</p>
+<p class="doc-p">In IDEKA there are 3 primitive types known as <code>int</code>, <code>float</code>, and <code>char</code>.  </p>
+<ul class="doc-ul">
+<li><code>int</code> types are 32 bits long (4 bytes)</li>
+<li><code>float</code> types are 64 bits long (8 bytes)</li>
+<li><code>char</code> types are 8 bits long (1 byte)</li>
+</ul>
+<p class="doc-p">We also have a <strong>super-primitive</strong> known as <code>data</code>. Any primitive type can convert to <code>data</code> and back.   We will go over the <code>data</code> keyword in depth later in this guide.</p>
+<p class="doc-p">This is the fundamental understanding of data required going into IDEKA.    If you're still following, congratulations. Now we get to actually learn to code.</p>
+<hr class="doc-hr">
+<h2 id="your-first-program" class="doc-h2">Your first program.</h2>
+<p class="doc-p">We're going to start off doing something very simple. We're not going to see anything happen, but the purpose of this excercise is to familiarize you with the process of compilation.</p>
+<p class="doc-p">IDEKA program have a <code>main()</code> function. <code>main()</code> is called by your operating system automatically.   Not having a <code>main()</code> function will result in a compilation error. Compiling programs without a <code>main()</code> function is how we create libraries. As far as we're concerned - and until we get to libraries - all programs we write <strong>must</strong> have a <code>main()</code> function.</p>
+<h4 id="f11" class="doc-h4">f1.1:</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">This program does nothing. It will start and immediately stop. If you compile and run this, you will think something is broken, or did not work. This is actually expected behavior, we shouldn't see anything because the program didn't do anything.</p>
+<p class="doc-p">This is what you could call the skeleton of a IDEKA program. Any program you compile into an executable must have a main function defined in <strong>global scope</strong>.</p>
+<ul class="doc-ul">
+<li><strong>What are <em>global</em> and <em>scope</em>? What is <em>global scope</em>?</strong>  </li>
+</ul>
+<p class="doc-p">A global is something that can be referred to anywhere in the program. It exists so long as it isn't destroyed or invalidated in some way. Imagine a tree:  <ul id="myUL">   <li><span class="caret">Program</span>     <ul class="nested">       <li>int a = 1</li>       <li><span class="caret">myFunction()</span>         <ul class="nested">           <li>int b = 0</li>         </ul>       </li>       <li><span class="caret">main()</span>         <ul class="nested">           <li>int c = a + b</li>         </ul>       </li>     </ul>   </li> </ul></p>
+<p class="doc-p">If we look at this tree, we can see <code>int a</code>, <code>myFunction()</code> and <code>main()</code> exist at the same level as each other.   Figure 1.2 demonstrates this program.</p>
+<h4 id="f12" class="doc-h4">f1.2</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-cmt">// Double slashes are comments, the compiler ignores this as if it doesn&#x27;t exist</span>
+
+<span class="ck-ty">int</span> a = <span class="ck-num">1</span>;      <span class="ck-cmt">// This is in global scope.</span>
+
+<span class="ck-kw">def</span> myFunction() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> b = <span class="ck-num">0</span>;  <span class="ck-cmt">// This is in myFunction&#x27;s scope.</span>
+    <span class="ck-kw">return</span> b;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> c = a + b;  <span class="ck-cmt">// Error here</span>
+    <span class="ck-kw">return</span> c;
+};</code></pre>
+</div>
+<p class="doc-p">If we try to compile this program, we will get an unknown identifier error at line 13 column 16. The unknown identifier is <code>b</code>.   Why is <code>b</code> unknown? As far as <code>main()</code> is aware, the only things that exist to it are <code>a</code> and <code>myFunction</code>.   <code>myFunction</code> is totally aware of <code>b</code> because it's in scope. How would we fix this? Like so,</p>
+<h4 id="f13" class="doc-h4">f1.3</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> a = <span class="ck-num">1</span>;
+
+<span class="ck-kw">def</span> myFunction() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> b = <span class="ck-num">0</span>;
+    <span class="ck-kw">return</span> b;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> c = a + myFunction();  <span class="ck-cmt">// myFunction returns the value of b</span>
+    <span class="ck-kw">return</span> c;
+};</code></pre>
+</div>
+<ul class="doc-ul">
+<li><strong>What exactly is a function?</strong>  </li>
+</ul>
+<p class="doc-p">A function is a section of your program which does something. A function might check if two things are equal to each other, or it might handle authorization. It does whatever you write the function to do. Algorithms are a collection of functions that when executed in a specific order achieve a desired result.</p>
+<p class="doc-p">In figure 1.3 we see two functions, <code>main()</code> and <code>myFunction()</code>.</p>
+<p class="doc-p">Program execution always begins at <code>main()</code>. The first thing that happens is we create a new integer variable named <code>c</code> and assign it the value <code>a + myFunction()</code>. In order to evaluate this, we need to know what <code>myFunction()</code> equals, so we call the function (execute it), and it returns the value <code>0</code>. Then <code>a + 0</code> is evaluated as <code>1 + 0</code> and becomes <code>1</code>. After evaluating everything to the right of the <code>=</code>, we assign the result to <code>c</code>.</p>
+<p class="doc-p">Take the time to make your own functions, play around and name them whatever you like, then compile your program.</p>
+<hr class="doc-hr">
+<h2 id="2---simple-functions" class="doc-h2">2 - Simple Functions</h2>
+<h3 id="temperature-conversion-c-f" class="doc-h3">Temperature Conversion (C / F)</h3>
+<p class="doc-p">We're going to write a program to convert centigrade to fahrenheit.   The formula for fahrenheit is °F = (°C <em> 9/5) + 32   The formula for centigrade is °C = (°F - 32) </em> 9/5</p>
+<p class="doc-p">Here's how we implement this:</p>
+<h4 id="f21" class="doc-h4">f2.1</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> c_to_f(<span class="ck-ty">float</span> temp) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> (temp * (<span class="ck-num">9</span>/<span class="ck-num">5</span>)) + <span class="ck-num">32</span>;
+};
+
+<span class="ck-kw">def</span> f_to_c(<span class="ck-ty">float</span> temp) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> (temp - <span class="ck-num">32</span>) * (<span class="ck-num">9</span>/<span class="ck-num">5</span>);
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> c = <span class="ck-num">-40</span>;
+    <span class="ck-ty">int</span> f = c_to_f(c);  <span class="ck-cmt">// -40 °C == -40 °F</span>
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h3 id="calculating-distance" class="doc-h3">Calculating distance</h3>
+<h4 id="f22" class="doc-h4">f2.2</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> get_distance(<span class="ck-ty">float</span> speed, <span class="ck-ty">float</span> time) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> speed * time;
+};
+
+<span class="ck-kw">def</span> to_meters(<span class="ck-ty">float</span> distance) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> distance / <span class="ck-num">3.28084</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">float</span> speed = <span class="ck-num">88</span>;    <span class="ck-cmt">// Calculating in feet per second</span>
+    <span class="ck-ty">float</span> time = <span class="ck-num">60</span>;     <span class="ck-cmt">// 1 second</span>
+    <span class="ck-ty">float</span> d = get_distance(speed, time);  <span class="ck-cmt">// 5,280 feet = 1 mile</span>
+    <span class="ck-ty">float</span> m = to_meters(d);               <span class="ck-cmt">// 1,609.34 meters</span>
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h3 id="performing-logic" class="doc-h3">Performing logic</h3>
+<h4 id="f23" class="doc-h4">f2.3</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> a = <span class="ck-num">0</span>;
+<span class="ck-ty">int</span> b = <span class="ck-num">100</span>;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (a &lt; b)
+    {
+        a = b;
+    };
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p"><code>if</code> statements evaluate truth. All that is really happening is the expression inside of the parenthesis is evaluated, and if it's true, we do the code inside the <code>if</code> block.</p>
+<ul class="doc-ul">
+<li>Blocks are <code>{}</code> and the code within it. In figure 2.3 there are 2 blocks.  </li>
+</ul>
+<h3 id="logically-performing-logic" class="doc-h3">Logically performing logic</h3>
+<h4 id="f24" class="doc-h4">f2.4</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> a, b, c = <span class="ck-num">0</span>, <span class="ck-num">100</span>, <span class="ck-num">1000</span>;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (a &lt; b)
+    {
+        println(b);
+    }
+    <span class="ck-kw">elif</span> (a &lt; c)
+    {
+        println(c);
+    };
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result: <code>100</code></p>
+<h4 id="f25" class="doc-h4">f2.5</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> a = <span class="ck-num">0</span>,
+    b = <span class="ck-num">100</span>,
+    c = <span class="ck-num">1000</span>;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (a &lt; b)
+    {
+        println(b);
+    };
+    <span class="ck-kw">if</span> (a &lt; c)
+    {
+        println(c);
+    };
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-num">100</span>
+<span class="ck-num">1000</span></code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="3---hello-world" class="doc-h2">3 - Hello World</h2>
+<p class="doc-p">We now have a basic understanding of functions, and logical operations. Now it's time we see something happen on the screen.</p>
+<h4 id="f31-hello-world" class="doc-h4">f3.1 Hello World</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;   <span class="ck-cmt">// Contains print()</span>
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    print(<span class="ck-str">&quot;Hello World!\0&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>Hello World!</code></p>
+<p class="doc-p">The <code>print()</code> function will output a string to standard output. It takes 1 argument, the type of the argument is <code>unsigned data{8}[]</code> which is an unsigned byte array.</p>
+<ul class="doc-ul">
+<li><strong>What's the difference between <code>signed</code> and <code>unsigned</code>?</strong>  </li>
+</ul>
+<p class="doc-p">Signed integers can have a positive or negative value. The <em>sign</em> is 0 for positive, 1 for negative. Typically the most significant bit (largest value) represent the signedness of an integer.   Example if we have a binary value <code>10000000</code> and we treat it as signed it equals <code>-128</code>.   If this value was unsigned, it would equal <code>128</code>.   This means if we tried to interpret a character like the capital letter <code>A</code> as signed, we would still get A, but as soon as we go higher than <code>127</code> the value wraps around to the negatives and counts upwards towards zero. The ASCII table does not have negative values, only <code>0-255</code>.</p>
+<h4 id="f32-whats-your-name" class="doc-h4">f3.2 What's your name?</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console; <span class="ck-cmt">// Also includes input()</span>
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> max = <span class="ck-num">32</span>;
+    <span class="ck-ty">byte</span>[max] name;
+    print(<span class="ck-str">&quot;What&#x27;s your name? \0&quot;</span>);
+    <span class="ck-ty">int</span> bytes_read = input(@name, max);
+    print(); <span class="ck-cmt">// Empty prints perform newlines</span>
+    print(<span class="ck-str">&quot;Hello, \0&quot;</span>); print(@name, bytes_read); print(<span class="ck-str">&quot;!\0&quot;</span>)
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>What<span class="ck-str">&#x27;s your name? John
+Hello, John!</span></code></pre>
+</div>
+<p class="doc-p">That code was a little ugly, don't you think? Hard to read unless you take the time to look.   Also, what was that <code>\n</code> thing we printed? That is called an escape character. We "escape" the string with the backslash (<code>\</code>). There are a few escape characters to go over, but for now, <code>\n</code> is all we need.   This character represents a new line, or "carriage return". In reality, no text file you have ever read actually breaks words onto a new line   like this.   What's actually happening is there is an invisible character which instructs a text editor to move to a new line. In memory, the file spans linearly, it doesn't break into lines. We write programs to show these line breaks.</p>
+<h4 id="f33-introducing-f-strings" class="doc-h4">f3.3 Introducing <code>f-strings</code>:</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> max = <span class="ck-num">32</span>;
+    <span class="ck-ty">byte</span>[max] name;
+    print(<span class="ck-str">&quot;What&#x27;s your name? &quot;</span>);
+    <span class="ck-ty">int</span> bytes_read = input(@name, max);
+    println(f<span class="ck-str">&quot;Hello, {name}!&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>What<span class="ck-str">&#x27;s your name? John
+Hello, John!</span></code></pre>
+</div>
+<p class="doc-p">That's better. Here we see a string <code>f&quot;Hello, {name}!&quot;</code> but it is prefixed with an <code>f</code>. This makes this string an <code>f-string</code>. IDEKA also has something called an <code>i-string</code> but those are more advanced, we'll save them for later.</p>
+<hr class="doc-hr">
+<h2 id="4---string-manipulation" class="doc-h2">4 - String Manipulation</h2>
+<p class="doc-p">We will now learn different ways we can play with strings, starting by slicing them up.</p>
+<h4 id="f41-slices" class="doc-h4">f4.1 Slices</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::strings;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    string s(<span class="ck-str">&quot;Testing!&quot;</span>);
+    print(s.val()[<span class="ck-num">0</span>:<span class="ck-num">3</span>]);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>Test</code></p>
+<p class="doc-p">What did we just do? What is that <code>[0:3]</code> notation?   This is known as array slice notation.   It translates to "start at position 0, end at position 3". That totals 4 bytes, or <code>&quot;Test&quot;</code>.  </p>
+<ul class="doc-ul">
+<li><code>[x:y]</code>  </li>
+</ul>
+<p class="doc-p"><strong>x</strong> is the starting point, and <strong>y</strong> is the ending point. All slicing in IDEKA is inclusive.</p>
+<p class="doc-p">The <code>standard::strings::string</code> type has a <code>length</code> attribute which you can use to make some things easier.</p>
+<h4 id="f42-reverse-a-string" class="doc-h4">f4.2 Reverse a String</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::string;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    string s(<span class="ck-str">&quot;Testing!\0&quot;</span>);
+    print(s.val()[s.length:<span class="ck-num">0</span>]);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>!gnitseT</code></p>
+<p class="doc-p">To reverse an array, which is what a string is, we do <code>[len - 1:0]</code>. If the first parameter is larger than the second, it means we're traversing the array in descending order.</p>
+<ul class="doc-ul">
+<li><strong>Why do we subtract 1 from the length of the string?</strong>  </li>
+</ul>
+<p class="doc-p">Computers count starting at 0, meaning 9 is the 10th number when computers count. If my string length is 10, that means the last element is at position 9. Position 10 is outside of the array, and as far as the computer is concerned, position 10 is undefined. It's like saying:   <strong><code>[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]</code></strong> = 10 elements   You can do this, but it may result in a crash or undefined behavior.   This is why we must always be aware of our data types, sizes, and array lengths.</p>
+<h4 id="f43-the-sizeof-keyword" class="doc-h4">f4.3 The <code>sizeof()</code> Keyword</h4>
+<p class="doc-p">Characters are one byte in size. Strings are an array of bytes, interpreted as characters.   If I have 40 characters, that's 40 bytes.   <code>sizeof()</code> returns the size of something in bits, not bytes.   This means we must be aware of the bit length of our types.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::strings;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    string s(<span class="ck-str">&quot;Testing!&quot;</span>);
+    print(f<span class="ck-str">&quot;The length of string s is {s.length} characters long.&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>The size of string s is 8 characters long.</code></p>
+<h4 id="f44-constant-values" class="doc-h4">f4.4 Constant Values</h4>
+<p class="doc-p">Sometimes we want to make sure there's no possible way a value can change.   We do that by using the <code>const</code> keyword, like so:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>const <span class="ck-ty">int</span> myAge = <span class="ck-num">21</span>;  <span class="ck-cmt">// Forever 21!</span></code></pre>
+</div>
+<p class="doc-p">If we try to change the value of <code>myAge</code> we will get a compile error. Example:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>const <span class="ck-ty">bool</span> authorized = <span class="ck-kw">false</span>;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (!authorized)    <span class="ck-cmt">// false == false, therefore true</span>
+    {
+        authorized = <span class="ck-kw">true</span>;  <span class="ck-cmt">// Compile error.</span>
+    };
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="5---data-and-struct" class="doc-h2">5 - <code>data</code> and <code>struct</code></h2>
+<p class="doc-p">Remember that <code>data</code> keyword from a few segments ago? Here's what it looks like:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">data</span>{<span class="ck-num">32</span>} as <span class="ck-ty">u32</span>;</code></pre>
+</div>
+<p class="doc-p">This new <code>u32</code> type is unsigned, and 32 bits wide.   <code>data</code> is used to create new data types. These types are primitives, unsigned by default, and are not functional.   We'll expand more about <code>data</code> after you learn about structures.</p>
+<ul class="doc-ul">
+<li><strong>What exactly is a <code>struct</code>?</strong>  </li>
+</ul>
+<p class="doc-p">"struct" is short for structure. In other OOP languages, structs can be functional. In IDEKA, this is not the case. Structs are strictly data-only containers, bringing us back to the land of pure data structures.</p>
+<h4 id="f51-primitive-data-structures-in-IDEKA" class="doc-h4">f5.1 Primitive Data Structures in IDEKA</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">import</span> <span class="ck-str">&quot;io.idk&quot;</span>, <span class="ck-str">&quot;types.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console, types::string;
+
+<span class="ck-kw">struct</span> Point
+{
+    <span class="ck-ty">float</span> x, y, z;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> sizeitems = <span class="ck-kw">sizeof</span>(Point) / <span class="ck-kw">sizeof</span>(<span class="ck-ty">float</span>);
+    <span class="ck-ty">int</span> sizebytes = (<span class="ck-kw">sizeof</span>(Point) / <span class="ck-kw">sizeof</span>(<span class="ck-ty">float</span>)) * (<span class="ck-kw">sizeof</span>(<span class="ck-ty">float</span>) / <span class="ck-num">8</span>);
+    print(f<span class="ck-str">&quot;The size of the Point structure in bytes is {sizebytes}.&quot;</span>);
+    print(f<span class="ck-str">&quot;The size of the Point structure is {sizeitems} items.&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:  </p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>The size of the Point structure <span class="ck-kw">in</span> bytes is <span class="ck-num">24.</span>
+The size of the Point structure is <span class="ck-num">3</span> items.</code></pre>
+</div>
+<p class="doc-p">Here we have a basic structure representing 3D point. We create 3 floats, <code>x</code>,<code>y</code>, and <code>z</code>.   You do not need to initialize or create an instance of a struct to yield information about it.   Struct sizes cannot be modified, meaning once we declare the struct we cannot add new members to it.</p>
+<h4 id="f52-calculating-the-distance-between-two-3d-points" class="doc-h4">f5.2 Calculating the distance between two 3D points</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">import</span> <span class="ck-str">&quot;io.idk&quot;</span>, <span class="ck-str">&quot;types.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console, types::string;
+
+<span class="ck-kw">struct</span> Point
+{
+    <span class="ck-ty">float</span> x, y, z;
+};
+
+<span class="ck-kw">def</span> sqrt(<span class="ck-ty">float</span> x) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> x ^ <span class="ck-num">0.5</span>;
+};
+
+<span class="ck-kw">def</span> distance(Point a, Point b) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> sqrt( ((b.x - a.x) ^ <span class="ck-num">2</span>) + ((b.y - a.y) ^ <span class="ck-num">2</span>) + ((b.z - a.z) ^ <span class="ck-num">2</span>) );
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Point p1 = {x = <span class="ck-num">4.1</span>, y = <span class="ck-num">5.05</span>, z = <span class="ck-num">-3.9</span>};
+    Point p2 = {x = <span class="ck-num">10</span>, y = <span class="ck-num">-7.33</span>, z = <span class="ck-num">2.12</span>};
+
+    <span class="ck-ty">float</span> dist = distance(p1, p2);
+    
+    print(f<span class="ck-str">&quot;The distance between p1 and p2 is {dist}&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>The distance between p1 and p2 is 14.977142584618734</code></p>
+<p class="doc-p">Here we take <code>Point</code> and <em>instance</em> (<em>create</em>) two independent copies of it called <code>p1</code> and <code>p2</code>. Whenever we refer to an instance of something, we are talking about an independent copy that has the same attributes as the <code>struct</code> or <code>object</code> it was made from. Objects are too advanced yet, so let's continue with structures.</p>
+<ul class="doc-ul">
+<li><strong>Why can't structures have new members added to them?</strong>  </li>
+</ul>
+<p class="doc-p">This has to do with how programs compile. In other languages, structs have a lot of functionality which makes them very similar to classes with some key changes. However, structs having functionality requires the compiler to generate <strong>virtual call tables</strong> or <code>vtables</code> for them. This increases complexity for the resulting executable. IDEKA's goal is to create fast, small executables; to do this, we made structures non-flexible data-only containers.</p>
+<h4 id="f53-modelling-a-file-format-header-with-struct" class="doc-h4">f5.3 Modelling a File Format Header with <code>struct</code></h4>
+<p class="doc-p">For this example we will be modeling the <a href="https://www.ece.ualberta.ca/~elliott/ee552/studentAppNotes/2003_w/misc/bmp_file_format/bmp_file_format.htm">Bitmap File Format</a>.</p>
+<h5 id="f531" class="doc-h5">f5.3.1</h5>
+<p class="doc-p"><p align="center"> <img src="https://upload.wikimedia.org/wikipedia/commons/7/75/BMPfileFormat.svg"> </p></p>
+<p class="doc-p">Using this schematic we will capture the header of a <code>.bmp</code> image but not the color table.  </p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Header
+{
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} sig;  <span class="ck-cmt">// Not a type declaration, sig is a variable of this type</span>
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} filesize, reserved, dataoffset;  <span class="ck-cmt">// Structured in the order they appear</span>
+};
+
+<span class="ck-kw">struct</span> InfoHeader
+{
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} size, width, height;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} planes, bitsperpixel;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} compression, imagesize, xpixelsperm, ypixelsperm, colorsused, importantcolors;
+};
+
+<span class="ck-kw">struct</span> BMP
+{
+    Header header;
+    InfoHeader infoheader;
+    <span class="ck-cmt">// ...</span>
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    File bmpfile = open(<span class="ck-str">&quot;image.bmp&quot;</span>, <span class="ck-str">&quot;r&quot;</span>);
+    bmpfile.seek(<span class="ck-num">0</span>);
+    <span class="ck-ty">byte</span>[bmpfile.length] buffer = bmpfile.readall();
+    bmpfile.close();
+
+    <span class="ck-cmt">// We now have the file in the buffer. Time to capture that data.</span>
+    Header hdata;
+    <span class="ck-ty">int</span> hdlen = <span class="ck-kw">sizeof</span>(hdata) / ( <span class="ck-num">2</span> + (<span class="ck-num">4</span> * <span class="ck-num">3</span>) );  <span class="ck-cmt">// 2 bytes + 4x3 bytes</span>
+    InfoHeader ihdata;
+    <span class="ck-ty">int</span> ihdlen = <span class="ck-kw">sizeof</span>(ihdata) / ( (<span class="ck-num">4</span> * <span class="ck-num">9</span>) + (<span class="ck-num">2</span> * <span class="ck-num">2</span>) ); <span class="ck-cmt">// 9x4 bytes + 2x2 bytes</span>
+
+    hdata = (Header)buffer[<span class="ck-num">0</span>:hdlen - <span class="ck-num">1</span>];            <span class="ck-cmt">// Capture header</span>
+    ihdata = (InfoHeader)buffer[hdlen:ihdlen - <span class="ck-num">1</span>];  <span class="ck-cmt">// Capture info header</span>
+    print((<span class="ck-ty">char</span>[<span class="ck-num">2</span>])hdata.sig);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>BM</code></p>
+<p class="doc-p">Alternatively, on the lines we capture the data into our structs, if we had all the information about the file such as the file size, image size, etc, we could dynamically create the BMP struct, and capture like so:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>BMP bitmap;
+bitmap = (BMP)buffer;</code></pre>
+</div>
+<p class="doc-p">Since the BMP struct would 100% reflect the file's dimensions, it perfectly captures all data into the members of the struct accordingly.</p>
+<ul class="doc-ul">
+<li><strong>(What) is this? What's (that)thing there?</strong>  </li>
+</ul>
+<p class="doc-p">What you're seeing is called <strong>cast notation</strong>. Casting converts one type to another.   In this case, casting data to a structure results in the data aligning to the struct - this is also known as <strong>data structuring</strong>.</p>
+<h4 id="f54-restructuring" class="doc-h4">f5.4 Restructuring</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+<span class="ck-kw">using</span> types::string;
+
+<span class="ck-kw">struct</span> Values32
+{
+    <span class="ck-ty">i32</span> a, b, c, d;
+};
+
+<span class="ck-kw">struct</span> Values16
+{
+    <span class="ck-ty">i16</span> a, b, c, d, e, f, g, h;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Values32 v1 = {a=<span class="ck-num">10</span>, b=<span class="ck-num">20</span>, c=<span class="ck-num">30</span>, d=<span class="ck-num">40</span>};
+    Values16 v2 <span class="ck-kw">from</span> v1;    <span class="ck-cmt">// Restructure</span>
+
+    print(f<span class="ck-str">&quot;{v2.a} {v2.b} {v2.c} {v2.d}\n&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:  </p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>v2.a = <span class="ck-num">0</span>
+v2.b = <span class="ck-num">10</span></code></pre>
+</div>
+<ul class="doc-ul">
+<li><strong>Why does v2.a equal 0?</strong>  </li>
+</ul>
+<p class="doc-p">We converted a struct that contained 32 bit integers into a struct of 16 bit integers.   Here's what the value 10 looks like in 32 bits:</p>
+<p class="doc-p"><table align="center">   <tr>     <th>(2,147,483,648)</th>     <th>(1,073,741,824)</th>     <th>(536,870,912)</th>     <th>(268,435,456)</th>     <th>(134,217,728)</th>     <th>(67,108,864)</th>     <th>(33,554,432)</th>     <th>(16,777,216)</th>     <th>(8,388,608)</th>     <th>(4,194,304)</th>     <th>(2,097,152)</th>     <th>(1,048,576)</th>     <th>(524,288)</th>     <th>(262,144)</th>     <th>(131,072)</th>     <th>(65,536)</th>     <th>(32,769)</th>     <th>(16,384)</th>     <th>(8,192)</th>     <th>(4,096)</th>     <th>(2,048)</th>     <th>(1,024)</th>     <th>(512)</th>     <th>(256)</th>     <th>(128)</th>     <th>(64)</th>     <th>(32)</th>     <th>(16)</th>     <th>(8)</th>     <th>(4)</th>     <th>(2)</th>     <th>(1)</th>   </tr>   <tr>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>0</td>     <td>1</td>     <td>0</td>     <td>1</td>     <td>0</td>   </tr> </table></p>
+<p class="doc-p">What we're doing is splitting one 32 bit integer into two 16 bit integers.   The first 16 bits of the array above are 0. The last are <code>0000000000001010</code>.   So <code>v2.a</code> which is <code>i16</code> type (16 bits wide) gets all zeros, <code>v2.b</code> gets the remainder <code>0000000000001010</code>.</p>
+<p class="doc-p">Say we use <code>Values16</code> to create a new instance called <code>v3</code>, and we swap the order of <code>a</code> and <code>b</code>. Then we cast it to a new instance <code>v4</code> which is type <code>Values32</code>.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Values32
+{
+    <span class="ck-ty">i32</span> a, b, c, d;
+};
+
+<span class="ck-kw">struct</span> Values16
+{
+    <span class="ck-ty">i16</span> a, b, c, d, e, f, g, h;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Values32 v1 = {a=<span class="ck-num">10</span>, b=<span class="ck-num">20</span>, c=<span class="ck-num">30</span>, d=<span class="ck-num">40</span>};
+    Values16 v2 <span class="ck-kw">from</span> v1;    <span class="ck-cmt">// Restructure</span>
+    Values16 v3 = {a=v2.b, b=v2.a, c=v2.c, d=v2.d, e=v2.e, f=v2.f, g=v2.g, h=v2.h};
+    Values32 v4 <span class="ck-kw">from</span> v3;    <span class="ck-cmt">// Restructure</span>
+
+    print(f<span class="ck-str">&quot;v4.a = {v4.a}\n&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:   <code>v4.a = 655360</code></p>
+<ul class="doc-ul">
+<li><strong>Why is the value so much larger than 10?</strong>  </li>
+</ul>
+<p class="doc-p">We swapped the order of the bits, essentially rotating them left 16 spaces.</p>
+<hr class="doc-hr">
+<h2 id="6---warming-up" class="doc-h2">6 - Warming Up</h2>
+<p class="doc-p">Logical flow can be handled two ways. The slow way, or the fast way.   What's the difference?</p>
+<ul class="doc-ul">
+<li><code>if</code> statements are extremely slow.  </li>
+</ul>
+<p class="doc-p">Every condition of an <code>if/elif/else</code> chain needs to be evaluated. If there are 10 conditions, that requires 10 additional evaluations which consume CPU cycles. If you have some heavy duty algorithm, you should opt for <code>switch</code> statements.</p>
+<ul class="doc-ul">
+<li><code>switch</code> statements are extremely fast.  </li>
+</ul>
+<p class="doc-p">Every condition is known at compile time, so a more optimized jump table can be created.</p>
+<h4 id="f61-a-little-game" class="doc-h4">f6.1 A little game.</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>, <span class="ck-str">&quot;random.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::strings,
+      math::random;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    string s = <span class="ck-str">&quot;&quot;</span>;  <span class="ck-cmt">// Syntactic sugar for single-parameter constructors like __init(byte*)</span>
+    <span class="ck-ty">int</span> value,
+        rand;
+
+    <span class="ck-kw">while</span> (<span class="ck-kw">true</span>)
+    {
+        s = input(<span class="ck-str">&quot;Enter a value from 0-10: &quot;</span>);
+        value = s.as_int();
+        rand = rand_int(<span class="ck-num">0</span>,<span class="ck-num">10</span>);
+
+        <span class="ck-kw">switch</span> (value)
+        {
+            <span class="ck-kw">case</span> (rand)
+            {
+                print(<span class="ck-str">&quot;You win! Keep going!&quot;</span>);
+                <span class="ck-kw">continue</span>;
+            }
+            <span class="ck-kw">default</span>
+            {
+                print(f<span class="ck-str">&quot;You lose! The value was {rand}. Game over.&quot;</span>);
+                <span class="ck-kw">break</span>;
+            };
+        };
+    };
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:  </p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Enter a value <span class="ck-kw">from</span> <span class="ck-num">0</span><span class="ck-num">-10</span>: <span class="ck-num">7</span>
+You win! Keep going!
+Enter a value <span class="ck-kw">from</span> <span class="ck-num">0</span><span class="ck-num">-10</span>: <span class="ck-num">9</span>
+You lose! The value was <span class="ck-num">2.</span> Game over.</code></pre>
+</div>
+<p class="doc-p">Here we're introduced to 2 new keywords, <code>switch</code> and <code>while</code>.</p>
+<p class="doc-p"><code>while</code> is a keyword that means while the condition is true, execute this block repeatedly.   <code>break</code> exits the loop immediately. You may use <code>break</code> in any loop.   <code>continue</code> goes to the next iteration (cycle) of the loop.</p>
+<p class="doc-p"><code>switch</code> statements have 2 sub-keywords, called <code>case</code> and <code>default</code>.   All switches <strong>must</strong> have a default, the default branch executes when no cases match the condition.</p>
+<h4 id="f62-for-do-while-and-do-while-loops" class="doc-h4">f6.2 <code>for</code>, <code>do</code>, <code>while</code>, and <code>do</code>-<code>while</code> loops</h4>
+<p class="doc-p">We can do loops a few different ways. Loops repeat themselves until a condition is met.  </p>
+<p class="doc-p"><code>while</code> is like an <code>if</code> statement + a loop, they continue to loop while the condition is true.   A <code>while</code> loop will check the condition first, and if it's true it will execute the block.</p>
+<p class="doc-p">A <code>do</code>-<code>while</code> loop will execute its block before checking the condition. Here's an example of the difference.</p>
+<h4 id="f621-do-while" class="doc-h4">f6.2.1 <code>do</code>-<code>while</code></h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> start, end = <span class="ck-num">0</span>, <span class="ck-num">3</span>;
+
+    do
+    {
+        <span class="ck-kw">if</span> (start &gt;= end)
+        {
+            print(<span class="ck-str">&quot;You fell off the cliff!&quot;</span>);
+            <span class="ck-kw">break</span>;
+        };
+        print(<span class="ck-str">&quot;You take a step.\n&quot;</span>);
+        start++;
+    }
+    <span class="ck-kw">while</span> (start &lt; end);
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>You take a step.
+You take a step.
+You take a step.</code></pre>
+</div>
+<h4 id="f622-while-without-do" class="doc-h4">f6.2.2 <code>while</code> without <code>do</code></h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> start = <span class="ck-num">0</span>,
+        end = <span class="ck-num">3</span>;
+
+    <span class="ck-kw">while</span> (start &lt; end)
+    {
+        <span class="ck-kw">if</span> (start &gt;= end)
+        {
+            print(<span class="ck-str">&quot;You fell off the cliff!&quot;</span>);
+            <span class="ck-kw">break</span>;
+        };
+        print(<span class="ck-str">&quot;You take a step.\n&quot;</span>);
+        start++;
+    };
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>You take a step.
+You take a step.
+You take a step.</code></pre>
+</div>
+<p class="doc-p">As you can see, these programs run identically.   In figure 6.2.1 we go past the end and fall off the imaginary cliff.   In figure 6.2.2 we make sure we're not at the end before taking a step.   <code>do</code>-<code>while</code> loops are guaranteed to execute their block <strong>at least once</strong>.   A <code>while</code>-only loop may not execute at all in some circumstances.</p>
+<h4 id="f631-for-style-1-initializer-condition-expression" class="doc-h4">f6.3.1 <code>for</code> Style 1: initializer, condition, expression</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> counter; counter &lt; <span class="ck-num">3</span>; counter++)
+    {
+        print(f<span class="ck-str">&quot;All you&#x27;re base are belong to us.\n&quot;</span>);
+    };
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>All you<span class="ck-str">&#x27;re base are belong to us.
+All you&#x27;</span>re base are belong to us.
+All you<span class="ck-str">&#x27;re base are belong to us.</span></code></pre>
+</div>
+<h4 id="f632-for-style-2-element-in-array" class="doc-h4">f6.3.2 <code>for</code> Style 2: element in array</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span>[<span class="ck-num">10</span>] int_array = [<span class="ck-num">11</span>, <span class="ck-num">22</span>, <span class="ck-num">33</span>, <span class="ck-num">44</span>, <span class="ck-num">55</span>, <span class="ck-num">66</span>, <span class="ck-num">77</span>, <span class="ck-num">88</span>, <span class="ck-num">99</span>, <span class="ck-num">00</span>];
+
+    <span class="ck-kw">for</span> (x <span class="ck-kw">in</span> int_array)
+    {
+        print(f<span class="ck-str">&quot;{x}\n&quot;</span>);
+    };
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-num">11</span>
+<span class="ck-num">22</span>
+<span class="ck-num">33</span>
+<span class="ck-num">44</span>
+<span class="ck-num">55</span>
+<span class="ck-num">66</span>
+<span class="ck-num">77</span>
+<span class="ck-num">88</span>
+<span class="ck-num">99</span>
+<span class="ck-num">0</span></code></pre>
+</div>
+<h4 id="f64-sizing-an-array-of-non-standard-type-width" class="doc-h4">f6.4 Sizing an array of non-standard type width:</h4>
+<p class="doc-p">In IDEKA you are bound to come across an array like:  </p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>signed <span class="ck-kw">data</span>{<span class="ck-num">20</span>} as someType;
+someType[<span class="ck-num">50</span>] someArray;</code></pre>
+</div>
+<p class="doc-p">The reason we've been dividing <code>sizeof</code> results by <code>8</code> is because we've been sizing an array of bytes. In figure 6.4, <code>someType</code> is <code>20</code> bits wide so we divide the <code>sizeof(someArray)</code> by <code>sizeof(someType)</code> to get the number of elements.</p>
+<hr class="doc-hr">
+<h2 id="7---object-oriented-programming-oop" class="doc-h2">7 - Object-Oriented Programming (OOP)</h2>
+<p class="doc-p">We're not burning rubber on the track yet, but we are at the races.</p>
+<ul class="doc-ul">
+<li><strong>What is an <code>object</code>?</strong>  </li>
+</ul>
+<p class="doc-p">Objects in IDEKA are an imaginary container, like structures, but they can have functionality.   They are used to model real-world things.   We add attributes to change what these empty containers represent. Just like we add attributes to mirror the structure of a file, we add attributes to mirror the details of a real-life object or system. For example, a car object could have the attributes <code>paintColor</code>, <code>maxSpeed</code>, and <code>weight</code>, and functions like <code>accelerate()</code>, <code>applyBrake()</code>, <code>steer()</code> and <code>shiftGear()</code>.</p>
+<ul class="doc-ul">
+<li><strong>What does it mean to "have functionality"?</strong>  </li>
+</ul>
+<p class="doc-p">Imagine teaching your dog to fetch a specific toy. You have added "that specific toy fetching"-functionality to your dog.   A function of your smartphone is to make and receive calls.</p>
+<p class="doc-p">What does an <code>object</code> look like?</p>
+<h4 id="f71" class="doc-h4">f7.1</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">object</span> myObject
+{
+    <span class="ck-cmt">// Constructor Function - must be present</span>
+    <span class="ck-kw">def</span> __init() -&gt; this
+    {
+        <span class="ck-cmt">// Can place any code you want in here.</span>
+        <span class="ck-kw">return</span> this;  <span class="ck-cmt">// Must be present.</span>
+    };
+
+    <span class="ck-cmt">// Destructor Function - must be present</span>
+    <span class="ck-kw">def</span> __exit() -&gt; <span class="ck-kw">void</span>
+    {
+        <span class="ck-cmt">// Can place any code you want in here.</span>
+        <span class="ck-kw">return</span> <span class="ck-kw">void</span>;  <span class="ck-cmt">// Must be present.</span>
+    };
+};</code></pre>
+</div>
+<p class="doc-p">This is the minimum boilerplate for an object. It must have a constructor, and a destructor function defined exactly as so.  You can change the constructor or destructor definitions, but their signatures and return values must be the same.   Without the comments (<code>//</code>) or delimeters (<code>{}</code>) an object is only 5 lines of code to prepare.  </p>
+<p class="doc-p">Now that we see what objects look like, let's try doing something with them.</p>
+<h4 id="f72-modeling-a-lock-with-object" class="doc-h4">f7.2 Modeling a lock with <code>object</code></h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">object</span> Lock
+{
+    <span class="ck-ty">bool</span> status = <span class="ck-kw">false</span>;  <span class="ck-cmt">// We&#x27;ll treat false as unlocked, true as locked.</span>
+
+    <span class="ck-kw">def</span> __init() -&gt; this
+    {
+        print(<span class="ck-str">&quot;Created a new lock.\n&quot;</span>);
+        <span class="ck-kw">return</span> this;
+    };
+
+    <span class="ck-kw">def</span> __exit() -&gt; <span class="ck-kw">void</span>
+    {
+        print(<span class="ck-str">&quot;Lock destroyed.\n&quot;</span>);
+    };
+
+    <span class="ck-kw">def</span> doThis() -&gt; <span class="ck-kw">void</span>
+    {
+        <span class="ck-kw">switch</span> (this.status())
+        {
+            <span class="ck-kw">case</span> (<span class="ck-kw">true</span>)
+            {
+                println(<span class="ck-str">&quot;Error: Locked.&quot;</span>);
+            }
+            <span class="ck-kw">default</span>
+            {
+                println(<span class="ck-str">&quot;Doing this!&quot;</span>);
+            };
+        };
+    };
+
+    <span class="ck-kw">def</span> status() -&gt; <span class="ck-ty">bool</span>
+    {
+        <span class="ck-kw">switch</span> (this.status)
+        {
+            <span class="ck-kw">case</span> (<span class="ck-kw">true</span>)
+            {
+                println(<span class="ck-str">&quot;Status: Locked.&quot;</span>);
+                <span class="ck-kw">return</span> <span class="ck-kw">true</span>;
+            }
+            <span class="ck-kw">default</span>
+            {
+                println(<span class="ck-str">&quot;Status: Unlocked.&quot;</span>);
+                <span class="ck-kw">return</span> <span class="ck-kw">false</span>;
+            };
+        };
+        <span class="ck-kw">return</span> <span class="ck-kw">false</span>;
+    };
+
+    <span class="ck-kw">def</span> lock() -&gt; <span class="ck-kw">void</span>
+    {
+        println(<span class="ck-str">&quot;Locking...&quot;</span>);
+        this.status = <span class="ck-kw">true</span>;
+        println(<span class="ck-str">&quot;Locked.&quot;</span>);
+    };
+
+    <span class="ck-kw">def</span> unlock() -&gt; <span class="ck-kw">void</span>
+    {
+        println(<span class="ck-str">&quot;Unlocking...&quot;</span>);
+        this.status = <span class="ck-kw">false</span>;
+        println(<span class="ck-str">&quot;Unlocked.&quot;</span>);
+    };
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Lock lock();
+
+
+    lock.doThis();
+    lock.lock();
+    lock.doThis();
+    lock.unlock();
+    lock.doThis();
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Created a <span class="ck-kw">new</span> lock.
+Status: Unlocked.
+Doing this!
+Locking...
+Locked.
+Status: Locked.
+Error: Locked.
+Unlocking...
+Unlocked.
+Status: Unlocked.
+Doing this!</code></pre>
+</div>
+<p class="doc-p">The example above shows a very basic programmatic lock.   <code>doThis()</code> checks the lock status before doing anything else, and shows us an error if it's locked.</p>
+<h4 id="f73-inheritance" class="doc-h4">f7.3 Inheritance</h4>
+<p class="doc-p">The concept of inheritance is all about reusability. It allows us to not have to write so much code depending on what we're trying to accomplish. We're going to look at <code>struct</code> inheritance first, then we'll do <code>object</code> inheritance.</p>
+<h4 id="f731-struct-inheritance" class="doc-h4">f7.3.1 Struct Inheritance</h4>
+<p class="doc-p">We're going to re-use the BMP example, but slightly modified to demonstrate <em>how</em> inheritance for structs works. It's important to understand the semantics behind <code>struct</code> inheritance when dealing with complex structures and how they relate to <code>data</code>.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">struct</span> Header
+{
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} sig;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} filesize, reserved, dataoffset;
+};
+
+<span class="ck-kw">struct</span> InfoHeader
+{
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} size, width, height;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} planes, bitsperpixel;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} compression, imagesize, xpixelsperm, ypixelsperm, colorsused, importantcolors;
+};
+
+<span class="ck-kw">struct</span> BMP : Header, InfoHeader;</code></pre>
+</div>
+<p class="doc-p">Here we see <code>:</code> after the struct name, this indicates inheritance. It's as if <code>BMP</code> is now defined as:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">struct</span> BMP
+{
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} sig;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} filesize, reserved, dataoffset;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} size, width, height;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">16</span>} planes, bitsperpixel;
+    unsigned <span class="ck-kw">data</span>{<span class="ck-num">32</span>} compression, imagesize, xpixelsperm, ypixelsperm, colorsused, importantcolors;
+};</code></pre>
+</div>
+<p class="doc-p">Inheritance operates in the order the bases (inherited structs) appear. This is to maintain the 1:1 mapping to <code>data</code> and allow us to do <em>serialization/deserialization</em> without <em>marshalling</em>.</p>
+<ul class="doc-ul">
+<li><strong>What are serialization and deserialization?</strong></li>
+</ul>
+<p class="doc-p">Serialization in programming is the process of converting a data structure into a format that can be stored or transmitted and reconstructed later. This format is typically a sequence of bytes or characters. Deserialization is the reverse of this process, and in IDEKA is called <strong>restructuring</strong>. It is done by casting any arbitrary sequence of bits to a <code>struct</code> of equal bit length. If the bit-lengths are not equal, it will result in a runtime error and undefined behavior.</p>
+<ul class="doc-ul">
+<li><strong>What is marshalling?</strong></li>
+</ul>
+<p class="doc-p">This refers to the process of transforming data structures into a format suitable for transmission across different environments, such as over a network, between different processes, or between different programming languages. This process is often necessary when data needs to cross boundaries where direct memory access or shared object representations are not possible.</p>
+<hr class="doc-hr">
+<h2 id="8---functions-in-depth" class="doc-h2">8 - Functions in Depth</h2>
+<p class="doc-p">We've been using functions throughout this guide - <code>main()</code>, <code>print()</code>, and methods inside objects. Now it's time to understand them fully. Functions are reusable blocks of code that perform specific tasks. Think of them as recipes: you define the steps once, then you can follow that recipe whenever you need it.</p>
+<h4 id="f81-defining-your-first-function" class="doc-h4">f8.1 Defining Your First Function</h4>
+<p class="doc-p">Let's start simple. A function needs:</p>
+<ol class="doc-ol">
+<li>A name (what it's called)</li>
+<li>Parameters (what data it needs)</li>
+<li>A return type (what data it gives back)</li>
+<li>A body (the code it runs)</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> add_nums(<span class="ck-ty">int</span> x, <span class="ck-ty">int</span> y) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> x + y;
+};</code></pre>
+</div>
+<p class="doc-p">This function is named <code>add_nums</code>. It takes two integers (<code>x</code> and <code>y</code>), adds them together, and returns the result.</p>
+<p class="doc-p">Let's use it:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">def</span> add_nums(<span class="ck-ty">int</span> x, <span class="ck-ty">int</span> y) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> x + y;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> result = add_nums(<span class="ck-num">5</span>, <span class="ck-num">3</span>);
+    print(<span class="ck-str">&quot;5 + 3 = \0&quot;</span>);
+    print(result);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-num">5</span> + <span class="ck-num">3</span> = <span class="ck-num">8</span></code></pre>
+</div>
+<h4 id="f82-parameters-and-arguments" class="doc-h4">f8.2 Parameters and Arguments</h4>
+<p class="doc-p"><strong>Parameters</strong> are the variables you define in the function signature. <strong>Arguments</strong> are the actual values you pass when calling the function.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> greet(<span class="ck-ty">int</span> age) -&gt; <span class="ck-kw">void</span>  <span class="ck-cmt">// &#x27;age&#x27; is a parameter</span>
+{
+    print(<span class="ck-str">&quot;You are \0&quot;</span>);
+    print(age);
+    print(<span class="ck-str">&quot; years old!\n\0&quot;</span>);
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    greet(<span class="ck-num">25</span>);  <span class="ck-cmt">// 25 is an argument</span>
+    greet(<span class="ck-num">30</span>);  <span class="ck-cmt">// 30 is an argument</span>
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>You are <span class="ck-num">25</span> years old!
+You are <span class="ck-num">30</span> years old!</code></pre>
+</div>
+<p class="doc-p">Functions can have multiple parameters:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> introduce(<span class="ck-ty">int</span> age, <span class="ck-ty">int</span> height) -&gt; <span class="ck-kw">void</span>
+{
+    print(<span class="ck-str">&quot;Age: \0&quot;</span>);
+    print(age);
+    print(<span class="ck-str">&quot;, Height: \0&quot;</span>);
+    print(height);
+    print(<span class="ck-str">&quot; cm\n\0&quot;</span>);
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    introduce(<span class="ck-num">25</span>, <span class="ck-num">175</span>);
+    introduce(<span class="ck-num">30</span>, <span class="ck-num">182</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f83-return-values" class="doc-h4">f8.3 Return Values</h4>
+<p class="doc-p">The <code>return</code> statement does two things:</p>
+<ol class="doc-ol">
+<li>Exits the function immediately</li>
+<li>Sends a value back to whoever called the function</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> multiply(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> result = a * b;
+    <span class="ck-kw">return</span> result;       <span class="ck-cmt">// Can do: return a * b;</span>
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> answer = multiply(<span class="ck-num">7</span>, <span class="ck-num">6</span>;
+)    print(f<span class="ck-str">&quot;7 * 6 = {answer}&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">You can return early from a function:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> divide(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (b == <span class="ck-num">0</span>)
+    {
+        print(<span class="ck-str">&quot;Error: Cannot divide by zero!\n\0&quot;</span>);
+        <span class="ck-kw">return</span> <span class="ck-num">0</span>;  <span class="ck-cmt">// Exit early with a safe value</span>
+    };
+    <span class="ck-kw">return</span> a / b;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    print(divide(<span class="ck-num">10</span>, <span class="ck-num">2</span>));  <span class="ck-cmt">// Prints 5</span>
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    print(divide(<span class="ck-num">10</span>, <span class="ck-num">0</span>));  <span class="ck-cmt">// Prints error, returns 0</span>
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f84-void-functions" class="doc-h4">f8.4 Void Functions</h4>
+<p class="doc-p">Sometimes a function doesn't need to return anything - it just performs an action. We use <code>void</code> as the return type:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> print_border() -&gt; <span class="ck-kw">void</span>
+{
+    print(<span class="ck-str">&quot;====================\n\0&quot;</span>);
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    print_border();
+    print(<span class="ck-str">&quot;Welcome to IDEKA!\n\0&quot;</span>);
+    print_border();
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>====================
+Welcome to IDEKA!
+====================</code></pre>
+</div>
+<h4 id="f85-scope---where-variables-live" class="doc-h4">f8.5 Scope - Where Variables Live</h4>
+<p class="doc-p">Variables have a <strong>scope</strong> - they only exist in certain parts of your code. Think of scope like rooms in a house: what's in one room isn't automatically available in another.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> globalVar = <span class="ck-num">100</span>;  <span class="ck-cmt">// This exists everywhere</span>
+
+<span class="ck-kw">def</span> some_func() -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-ty">int</span> localVar = <span class="ck-num">50</span>;  <span class="ck-cmt">// This only exists inside some_func</span>
+    print(<span class="ck-str">&quot;Inside function: \0&quot;</span>);
+    print(localVar);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    print(<span class="ck-str">&quot;Global var: \0&quot;</span>);
+    print(globalVar);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    print(<span class="ck-str">&quot;In main, global var: \0&quot;</span>);
+    print(globalVar);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    some_func();
+    
+    <span class="ck-cmt">// print(localVar);  // ERROR! localVar doesn&#x27;t exist here</span>
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Variables defined inside a function are <strong>local</strong> to that function. Variables defined outside all functions are <strong>global</strong> and can be accessed anywhere.</p>
+<h4 id="f86-function-overloading" class="doc-h4">f8.6 Function Overloading</h4>
+<p class="doc-p">IDEKA lets you create multiple functions with the same name, as long as they have different parameters:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> calculate(<span class="ck-ty">int</span> x) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> x * <span class="ck-num">2</span>;
+};
+
+<span class="ck-kw">def</span> calculate(<span class="ck-ty">int</span> x, <span class="ck-ty">int</span> y) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> x * y;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    print(calculate(<span class="ck-num">5</span>));      <span class="ck-cmt">// Uses first version: 5 * 2 = 10</span>
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    print(calculate(<span class="ck-num">5</span>, <span class="ck-num">3</span>));   <span class="ck-cmt">// Uses second version: 5 * 3 = 15</span>
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">The name, paramters, and return type form a function's <code>signature</code>. If the signatures are different, you're all set!   The compiler picks the right function based on what - and how many - arguments you provide, and what the function call is returning to.</p>
+<h4 id="f87-practical-examples" class="doc-h4">f8.7 Practical Examples</h4>
+<p class="doc-p">Let's make a simple calculator:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> add(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> a + b;
+};
+
+<span class="ck-kw">def</span> subtract(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> a - b;
+};
+
+<span class="ck-kw">def</span> multiply(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">return</span> a * b;
+};
+
+<span class="ck-kw">def</span> divide(<span class="ck-ty">int</span> a, <span class="ck-ty">int</span> b) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">if</span> (b == <span class="ck-num">0</span>)
+    {
+        print(<span class="ck-str">&quot;Error: Division by zero!\n\0&quot;</span>);
+        <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+    };
+    <span class="ck-kw">return</span> a / b;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> x, y = <span class="ck-num">20</span>, <span class="ck-num">4</span>; <span class="ck-cmt">// x = 20, y = 4</span>
+
+    println(<span class="ck-str">&quot;x + y = {add(x,y)}&quot;</span>);
+    println(<span class="ck-str">&quot;x - y = {subtract(x,y)}&quot;</span>);
+    println(<span class="ck-str">&quot;x * y = {multiply(x,y)}&quot;</span>);
+    println(<span class="ck-str">&quot;x / y = {divide(x,y)}&quot;</span>);
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>x + y = <span class="ck-num">24</span>
+x - y = <span class="ck-num">16</span>
+x * y = <span class="ck-num">80</span>
+x / y = <span class="ck-num">5</span></code></pre>
+</div>
+<p class="doc-p">Here's a function that checks if a number is even:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> isEven(<span class="ck-ty">int</span> num) -&gt; <span class="ck-ty">bool</span>
+{
+    <span class="ck-kw">if</span> (num % <span class="ck-num">2</span> == <span class="ck-num">0</span>)
+    {
+        <span class="ck-kw">return</span> <span class="ck-kw">true</span>;
+    };
+    <span class="ck-kw">return</span> <span class="ck-kw">false</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> i; i &lt; <span class="ck-num">10</span>; i++)
+    {
+        <span class="ck-kw">switch</span>(isEven(i))
+        {
+            <span class="ck-kw">case</span> (<span class="ck-kw">true</span>) { println(f<span class="ck-str">&quot;{i} is even&quot;</span>); }
+            <span class="ck-kw">default</span>
+            {
+                println(f<span class="ck-str">&quot;{i} is odd&quot;</span>);
+            };
+        };
+    };
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-num">0</span> is even
+<span class="ck-num">1</span> is odd
+<span class="ck-num">2</span> is even
+<span class="ck-num">3</span> is odd
+<span class="ck-num">4</span> is even
+<span class="ck-num">5</span> is odd
+<span class="ck-num">6</span> is even
+<span class="ck-num">7</span> is odd
+<span class="ck-num">8</span> is even
+<span class="ck-num">9</span> is odd</code></pre>
+</div>
+<h4 id="f88-building-with-functions" class="doc-h4">f8.8 Building with Functions</h4>
+<p class="doc-p">Functions help you break down complex problems into smaller, manageable pieces. Each function should do one thing well.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> celsius_to_fahrenheit(<span class="ck-ty">float</span> celsius) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> (celsius * <span class="ck-num">9.0</span> / <span class="ck-num">5.0</span>) + <span class="ck-num">32.0</span>;
+};
+
+<span class="ck-kw">def</span> fahrenheit_to_celsius(<span class="ck-ty">float</span> fahrenheit) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> (fahrenheit - <span class="ck-num">32.0</span>) * <span class="ck-num">5.0</span> / <span class="ck-num">9.0</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">float</span> temp_c = <span class="ck-num">25.0</span>;
+    <span class="ck-ty">float</span> temp_f = celsius_to_fahrenheit(temp_c);
+    
+    print(<span class="ck-str">&quot;25°C = \0&quot;</span>);
+    print(temp_f);
+    print(<span class="ck-str">&quot;°F\n\0&quot;</span>);
+    
+    <span class="ck-ty">float</span> back_to_c = fahrenheit_to_celsius(temp_f);
+    print(<span class="ck-str">&quot;Converting back: \0&quot;</span>);
+    print(back_to_c);
+    print(<span class="ck-str">&quot;°C\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Functions make your code:</p>
+<ul class="doc-ul">
+<li><strong>Reusable</strong> - write once, use many times</li>
+<li><strong>Readable</strong> - good function names explain what the code does</li>
+<li><strong>Testable</strong> - you can test each function separately</li>
+<li><strong>Maintainable</strong> - fix or improve one function without breaking others</li>
+</ul>
+<hr class="doc-hr">
+<h2 id="9---working-with-strings" class="doc-h2">9 - Working with Strings</h2>
+<p class="doc-p">Strings are how we work with text in programs. In IDEKA, strings are arrays of characters. We've used strings with <code>print()</code> throughout this guide, but now let's understand them properly.</p>
+<h4 id="f91-what-is-a-string" class="doc-h4">f9.1 What is a String?</h4>
+<p class="doc-p">A string is a sequence of characters. Remember from Section 1 that characters are just numbers (ASCII values). A string is an array of these numbers:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">char</span>[] myString = [<span class="ck-str">&#x27;H&#x27;</span>,<span class="ck-str">&#x27;e&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;o&#x27;</span>,<span class="ck-str">&#x27;\0&#x27;</span>];</code></pre>
+</div>
+<p class="doc-p">The <code>\0</code> at the end is the <strong>null terminator</strong> - it tells the computer where the string ends. In IDEKA, string literals need a null terminator <code>\0</code> unless you set your configuration to allow the compiler to null terminate your strings. The default setting is enabled.</p>
+<h4 id="f92-string-basics" class="doc-h4">f9.2 String Basics</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[] greeting = [<span class="ck-str">&#x27;H&#x27;</span>,<span class="ck-str">&#x27;e&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;o&#x27;</span>,<span class="ck-str">&#x27;,&#x27;</span>,<span class="ck-str">&#x27; &#x27;</span>,<span class="ck-str">&#x27;w&#x27;</span>,<span class="ck-str">&#x27;o&#x27;</span>,<span class="ck-str">&#x27;r&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;d&#x27;</span>,<span class="ck-str">&#x27;!&#x27;</span>,<span class="ck-str">&#x27;\0&#x27;</span>];
+    println(greeting);
+    
+    <span class="ck-ty">char</span>[] name = [<span class="ck-str">&#x27;A&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;i&#x27;</span>,<span class="ck-str">&#x27;c&#x27;</span>,<span class="ck-str">&#x27;e&#x27;</span>,<span class="ck-str">&#x27;\0&#x27;</span>];
+    println(f<span class="ck-str">&quot;My name is {name}.&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Hello, World!
+My name is Alice.</code></pre>
+</div>
+<h4 id="f93-accessing-individual-characters" class="doc-h4">f9.3 Accessing Individual Characters</h4>
+<p class="doc-p">Since strings are arrays, you can access individual characters:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[] word = [<span class="ck-str">&#x27;F&#x27;</span>,<span class="ck-str">&#x27;l&#x27;</span>,<span class="ck-str">&#x27;u&#x27;</span>,<span class="ck-str">&#x27;x&#x27;</span>,<span class="ck-str">&#x27;\0&#x27;</span>];
+    
+
+    println(f<span class="ck-str">&quot;First character value: {word[0]}&quot;</span>);
+    
+    println(f<span class="ck-str">&quot;Second character value: {word[1]}&quot;</span>);
+
+    println(f<span class="ck-str">&quot;First character: {(byte[1])word[0]}&quot;</span>);
+    
+    println(f<span class="ck-str">&quot;Second and third characters: {(byte[2])word[2:3]}&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>First character value: <span class="ck-num">70</span>
+Second character value: <span class="ck-num">108</span>
+First character: F
+Second character: ux</code></pre>
+</div>
+<h4 id="f94-string-length" class="doc-h4">f9.4 String Length</h4>
+<p class="doc-p">To find how long a string is, we count characters until we hit the null terminator:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::strings;
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    noopstr text = <span class="ck-str">&quot;Programming!\0&quot;</span>;
+    <span class="ck-ty">int</span> len = strlen(text);
+    
+    println(f<span class="ck-str">&quot;Length: {len}&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Length: <span class="ck-num">12</span></code></pre>
+</div>
+<h4 id="f95-comparing-strings" class="doc-h4">f9.5 Comparing Strings</h4>
+<p class="doc-p">To check if two strings are equal, you need to compare each character:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> compare_string_chars(<span class="ck-ty">char</span>[] str1, <span class="ck-ty">char</span>[] str2) -&gt; <span class="ck-ty">bool</span>
+{
+    <span class="ck-ty">int</span> i = <span class="ck-num">0</span>;
+    <span class="ck-kw">for</span> (i = <span class="ck-num">0</span>; i &lt; <span class="ck-num">1000</span>; i++)
+    {
+        <span class="ck-kw">if</span> (str1[i] != str2[i])
+        {
+            <span class="ck-kw">return</span> <span class="ck-kw">false</span>;  <span class="ck-cmt">// Found a difference</span>
+        };
+        
+        <span class="ck-kw">if</span> (str1[i] == <span class="ck-num">0</span>)  <span class="ck-cmt">// Both reached end at same time</span>
+        {
+            <span class="ck-kw">return</span> <span class="ck-kw">true</span>;
+        };
+    };
+    <span class="ck-kw">return</span> <span class="ck-kw">false</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[] word1 = <span class="ck-str">&quot;cat\0&quot;</span>;
+    <span class="ck-ty">char</span>[] word2 = <span class="ck-str">&quot;cat\0&quot;</span>;
+    <span class="ck-ty">char</span>[] word3 = <span class="ck-str">&quot;dog\0&quot;</span>;
+    
+    <span class="ck-kw">if</span> (compare_string_chars(word1, word2))
+    {
+        print(<span class="ck-str">&quot;word1 and word2 are the same\n\0&quot;</span>);
+    };
+    
+    <span class="ck-kw">if</span> (!compare_string_chars(word1, word3))
+    {
+        print(<span class="ck-str">&quot;word1 and word3 are different\n\0&quot;</span>);
+    };
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f96-copying-strings" class="doc-h4">f9.6 Copying Strings</h4>
+<p class="doc-p">You can't just assign one string to another - you need to copy character by character:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> copyString(<span class="ck-ty">char</span>[] dest, <span class="ck-ty">char</span>[] src) -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-ty">int</span> i = <span class="ck-num">0</span>;
+    <span class="ck-kw">for</span> (i = <span class="ck-num">0</span>; i &lt; <span class="ck-num">1000</span>; i++)
+    {
+        dest[i] = src[i];
+        <span class="ck-kw">if</span> (src[i] == <span class="ck-num">0</span>)  <span class="ck-cmt">// Copied null terminator, we&#x27;re done</span>
+        {
+            <span class="ck-kw">return</span>;
+        };
+    };
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[] original = <span class="ck-str">&quot;Hello!\0&quot;</span>;
+    <span class="ck-ty">char</span>[<span class="ck-num">100</span>] copy;  <span class="ck-cmt">// Make sure it&#x27;s big enough</span>
+    
+    copyString(copy, original);
+    
+    print(<span class="ck-str">&quot;Original: \0&quot;</span>);
+    print(original);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    print(<span class="ck-str">&quot;Copy: \0&quot;</span>);
+    print(copy);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f97-building-strings" class="doc-h4">f9.7 Building Strings</h4>
+<p class="doc-p">You can build strings by setting characters one at a time:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">10</span>] buffer;
+    
+    buffer[<span class="ck-num">0</span>] = <span class="ck-num">72</span>;   <span class="ck-cmt">// &#x27;H&#x27;</span>
+    buffer[<span class="ck-num">1</span>] = <span class="ck-num">105</span>;  <span class="ck-cmt">// &#x27;i&#x27;</span>
+    buffer[<span class="ck-num">2</span>] = <span class="ck-num">33</span>;   <span class="ck-cmt">// &#x27;!&#x27;</span>
+    buffer[<span class="ck-num">3</span>] = <span class="ck-num">0</span>;    <span class="ck-cmt">// Null terminator</span>
+    buffer[<span class="ck-num">4</span>] = <span class="ck-num">0</span>;    <span class="ck-cmt">// Second null</span>
+    
+    print(buffer);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f98-practical-string-example" class="doc-h4">f9.8 Practical String Example</h4>
+<p class="doc-p">Let's make a function that counts how many times a character appears in a string:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> count_chars(<span class="ck-ty">char</span>[] str, <span class="ck-ty">char</span> target) -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">int</span> count = <span class="ck-num">0</span>;
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> i = <span class="ck-num">0</span>; i &lt; <span class="ck-num">1000</span>; i++)
+    {
+        <span class="ck-kw">if</span> (str[i] == <span class="ck-num">0</span>)  <span class="ck-cmt">// End of string</span>
+        {
+            <span class="ck-kw">return</span> count;
+        };
+        
+        <span class="ck-kw">if</span> (str[i] == target)
+        {
+            count++;
+        };
+    };
+    <span class="ck-kw">return</span> count;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    <span class="ck-ty">char</span>[] sentence = <span class="ck-str">&quot;the quick brown fox\0&quot;</span>;
+    
+    print(<span class="ck-str">&quot;Counting &#x27;o&#x27; in: \0&quot;</span>);
+    print(sentence);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-ty">int</span> o = count_chars(sentence, <span class="ck-num">111</span>);  <span class="ck-cmt">// 111 is ASCII for &#x27;o&#x27;</span>
+    print(<span class="ck-str">&quot;Found \0&quot;</span>);
+    print(o);
+    print(<span class="ck-str">&quot; letter &#x27;o&#x27;s\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Counting <span class="ck-str">&#x27;o&#x27;</span> <span class="ck-kw">in</span>: the quick brown fox
+Found <span class="ck-num">2</span> letter <span class="ck-str">&#x27;o&#x27;</span></code></pre>
+</div>
+<p class="doc-p">Strings are fundamental to most programs - user input, file names, messages, etc. Understanding how they work as character arrays is important for working with text effectively.</p>
+<hr class="doc-hr">
+<h2 id="10---enums-and-unions" class="doc-h2">10 - Enums and Unions</h2>
+<h4 id="f101-enumerated-lists-enums" class="doc-h4">f10.1 Enumerated Lists (Enums)</h4>
+<p class="doc-p">Sometimes you need to represent a set of named constants. For example, days of the week, colors, or states. Enums make this clean and readable.</p>
+<p class="doc-p">Without enums, you might do this:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">int</span> MONDAY = <span class="ck-num">0</span>;
+<span class="ck-ty">int</span> TUESDAY = <span class="ck-num">1</span>;
+<span class="ck-ty">int</span> WEDNESDAY = <span class="ck-num">2</span>;
+<span class="ck-cmt">// ... this gets tedious</span></code></pre>
+</div>
+<p class="doc-p">With enums:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">enum</span> DayOfWeek
+{
+    MONDAY,
+    TUESDAY,
+    WEDNESDAY,
+    THURSDAY,
+    FRIDAY,
+    SATURDAY,
+    SUNDAY
+};</code></pre>
+</div>
+<p class="doc-p">Enums automatically assign values starting from 0:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">enum</span> TrafficLight
+{
+    RED,      <span class="ck-cmt">// 0</span>
+    YELLOW,   <span class="ck-cmt">// 1</span>
+    GREEN     <span class="ck-cmt">// 2</span>
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    TrafficLight light;
+    light = TrafficLight.RED;
+    
+    <span class="ck-kw">if</span> (light == TrafficLight.RED)
+    {
+        print(<span class="ck-str">&quot;Stop!\n\0&quot;</span>);
+    };
+    
+    light = TrafficLight.GREEN;
+    
+    <span class="ck-kw">if</span> (light == TrafficLight.GREEN)
+    {
+        print(<span class="ck-str">&quot;Go!\n\0&quot;</span>);
+    };
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Stop!
+Go!</code></pre>
+</div>
+<h4 id="f102-using-enums-in-practice" class="doc-h4">f10.2 Using Enums in Practice</h4>
+<p class="doc-p">Enums make your code more readable. Compare these two versions:</p>
+<p class="doc-p"><strong>Without enum:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> process_status(<span class="ck-ty">int</span> status) -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-kw">if</span> (status == <span class="ck-num">0</span>)
+    {
+        print(<span class="ck-str">&quot;Pending\n\0&quot;</span>);
+    }
+    <span class="ck-kw">else</span> <span class="ck-kw">if</span> (status == <span class="ck-num">1</span>)
+    {
+        print(<span class="ck-str">&quot;Processing\n\0&quot;</span>);
+    }
+    <span class="ck-kw">else</span> <span class="ck-kw">if</span> (status == <span class="ck-num">2</span>)
+    {
+        print(<span class="ck-str">&quot;Complete\n\0&quot;</span>);
+    };
+    <span class="ck-kw">return</span>;
+};</code></pre>
+</div>
+<p class="doc-p"><strong>With enum:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">enum</span> Status
+{
+    PENDING,
+    PROCESSING,
+    COMPLETE
+};
+
+<span class="ck-kw">def</span> process_status(Status status) -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-kw">if</span> (status == Status.PENDING)
+    {
+        print(<span class="ck-str">&quot;Pending\n\0&quot;</span>);
+    }
+    <span class="ck-kw">else</span> <span class="ck-kw">if</span> (status == Status.PROCESSING)
+    {
+        print(<span class="ck-str">&quot;Processing\n\0&quot;</span>);
+    }
+    <span class="ck-kw">else</span> <span class="ck-kw">if</span> (status == Status.COMPLETE)
+    {
+        print(<span class="ck-str">&quot;Complete\n\0&quot;</span>);
+    };
+    <span class="ck-kw">return</span>;
+};</code></pre>
+</div>
+<p class="doc-p">The second version is much clearer about what the values mean.</p>
+<h4 id="f103-enum-in-switch-statements" class="doc-h4">f10.3 Enum in Switch Statements</h4>
+<p class="doc-p">Enums work great with switch statements:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">enum</span> Direction
+{
+    NORTH,
+    SOUTH,
+    EAST,
+    WEST
+};
+
+<span class="ck-kw">def</span> move(Direction dir) -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-kw">switch</span> (dir)
+    {
+        <span class="ck-kw">case</span> Direction.NORTH:
+        {
+            print(<span class="ck-str">&quot;Moving North\n\0&quot;</span>);
+        };
+        <span class="ck-kw">case</span> Direction.SOUTH:
+        {
+            print(<span class="ck-str">&quot;Moving South\n\0&quot;</span>);
+        };
+        <span class="ck-kw">case</span> Direction.EAST:
+        {
+            print(<span class="ck-str">&quot;Moving East\n\0&quot;</span>);
+        };
+        <span class="ck-kw">case</span> Direction.WEST:
+        {
+            print(<span class="ck-str">&quot;Moving West\n\0&quot;</span>);
+        };
+    };
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Direction heading = Direction.NORTH;
+    move(heading);
+    
+    heading = Direction.WEST;
+    move(heading);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f104-unions---one-value-at-a-time" class="doc-h4">f10.4 Unions - One Value at a Time</h4>
+<p class="doc-p">A <strong>union</strong> is like a struct, but it can only hold ONE of its members at a time. Think of it like a box that can hold different things, but only one thing at once.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">union</span> NumberHolder
+{
+    <span class="ck-ty">int</span> as_int;
+    <span class="ck-ty">float</span> as_float;
+};</code></pre>
+</div>
+<p class="doc-p">This creates a union that can store EITHER an int OR a float, but not both simultaneously:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    NumberHolder value;
+    
+    value.as_int = <span class="ck-num">42</span>;
+    print(<span class="ck-str">&quot;As integer: \0&quot;</span>);
+    print(value.as_int);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-cmt">// Now we change which member is active</span>
+    value.as_float = <span class="ck-num">3.14</span>;
+    print(<span class="ck-str">&quot;As float: \0&quot;</span>);
+    print(value.as_float); <span class="ck-cmt">// Printing a float by default goes 5 decimal places to the right</span>
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-cmt">// WARNING: as_int is now undefined! Don&#x27;t use it!</span>
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f105-why-use-unions" class="doc-h4">f10.5 Why Use Unions?</h4>
+<p class="doc-p">Unions save memory when you only need one type of data at a time:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">union</span> Data
+{
+    <span class="ck-ty">int</span> error_code;
+    <span class="ck-ty">float</span> measurement;
+    <span class="ck-ty">bool</span> success;
+};
+
+<span class="ck-kw">def</span> process_result(<span class="ck-ty">bool</span> is_error, Data result) -&gt; <span class="ck-kw">void</span>
+{
+    <span class="ck-kw">if</span> (is_error)
+    {
+        print(<span class="ck-str">&quot;Error code: \0&quot;</span>);
+        print(result.error_code);
+        print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    }
+    <span class="ck-kw">else</span>
+    {
+        print(<span class="ck-str">&quot;Measurement: \0&quot;</span>);
+        print(result.measurement);
+        print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    };
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Data result1;
+    result1.error_code = <span class="ck-num">404</span>;
+    process_result(<span class="ck-kw">true</span>, result1);
+    
+    Data result2;
+    result2.measurement = <span class="ck-num">98.6</span>;
+    process_result(<span class="ck-kw">false</span>, result2);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f106-important-union-rules" class="doc-h4">f10.6 Important Union Rules</h4>
+<ol class="doc-ol">
+<li><strong>Only one member is valid at a time</strong> - accessing the wrong member gives undefined behavior</li>
+<li><strong>You must remember which member is active</strong> - the union doesn't track this for you</li>
+<li><strong>All members share the same memory</strong> - the union's size is the size of its largest member</li>
+</ol>
+<p class="doc-p">Example of what NOT to do:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">union</span> BadExample
+{
+    <span class="ck-ty">int</span> x;
+    <span class="ck-ty">float</span> y;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    BadExample bad;
+    bad.x = <span class="ck-num">100</span>;
+    
+    <span class="ck-cmt">// WRONG! y is not the active member!</span>
+    print(bad.y);  <span class="ck-cmt">// This is undefined behavior!</span>
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f107-practical-enum-and-union-example" class="doc-h4">f10.7 Practical Enum and Union Example</h4>
+<p class="doc-p">Here's a simple state machine using enums and a union:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">enum</span> State
+{
+    IDLE,
+    RUNNING,
+    ERROR
+};
+
+<span class="ck-kw">union</span> StateData
+{
+    <span class="ck-ty">int</span> idle_count;
+    <span class="ck-ty">float</span> run_speed;
+    <span class="ck-ty">int</span> error_code;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    State current = State.IDLE;
+    StateData <span class="ck-kw">data</span>;
+    
+    <span class="ck-cmt">// In IDLE state</span>
+    <span class="ck-kw">data</span>.idle_count = <span class="ck-num">0</span>;
+    print(<span class="ck-str">&quot;State: IDLE, Count: \0&quot;</span>);
+    print(<span class="ck-kw">data</span>.idle_count);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-cmt">// Transition to RUNNING</span>
+    current = State.RUNNING;
+    <span class="ck-kw">data</span>.run_speed = <span class="ck-num">5.5</span>;
+    print(<span class="ck-str">&quot;State: RUNNING, Speed: \0&quot;</span>);
+    print(<span class="ck-kw">data</span>.run_speed);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-cmt">// Transition to ERROR</span>
+    current = State.ERROR;
+    <span class="ck-kw">data</span>.error_code = <span class="ck-num">123</span>;
+    print(<span class="ck-str">&quot;State: ERROR, Code: \0&quot;</span>);
+    print(<span class="ck-kw">data</span>.error_code);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Enums help organize related constants, and unions help save memory when you need different types at different times.</p>
+<hr class="doc-hr">
+<h2 id="11---structs" class="doc-h2">11 - Structs</h2>
+<p class="doc-p">Structs are one of the most important features in IDEKA for organizing data. While objects have behavior (functions), structs are pure data containers. Think of a struct as a custom data type you create.</p>
+<h4 id="f111-why-do-we-need-structs" class="doc-h4">f11.1 Why Do We Need Structs?</h4>
+<p class="doc-p">Imagine you're making a program to track books. Each book has:</p>
+<ul class="doc-ul">
+<li>A title</li>
+<li>An author</li>
+<li>A page count</li>
+<li>A price</li>
+</ul>
+<p class="doc-p">You could use separate variables:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-ty">char</span>[] book1_title = <span class="ck-str">&quot;1984\0&quot;</span>,
+       book1_author = <span class="ck-str">&quot;George Orwell\0&quot;</span>;
+<span class="ck-ty">int</span> book1_pages = <span class="ck-num">328</span>;
+<span class="ck-ty">float</span> book1_price = <span class="ck-num">15.99</span>;
+
+<span class="ck-ty">char</span>[] book2_title = <span class="ck-str">&quot;Dune\0&quot;</span>,
+       book2_author = <span class="ck-str">&quot;Frank Herbert\0&quot;</span>;
+<span class="ck-ty">int</span> book2_pages = <span class="ck-num">688</span>;
+<span class="ck-ty">float</span> book2_price = <span class="ck-num">19.99</span>;</code></pre>
+</div>
+<p class="doc-p">This gets messy fast! Instead, we use a struct:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">struct</span> Book
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">64</span>] title;
+    <span class="ck-ty">char</span>[<span class="ck-num">32</span>] author;
+    <span class="ck-ty">int</span> pages;
+    <span class="ck-ty">float</span> price;
+};</code></pre>
+</div>
+<p class="doc-p">Now <code>Book</code> is a type, just like <code>int</code> or <code>float</code>.</p>
+<h4 id="f112-creating-and-using-structs" class="doc-h4">f11.2 Creating and Using Structs</h4>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Point
+{
+    <span class="ck-ty">int</span> x,
+        y;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Point p1;
+    p1.x = <span class="ck-num">10</span>;
+    p1.y = <span class="ck-num">20</span>;
+    
+    print(f<span class="ck-str">&quot;Point: ({p1.x},{p1.y})&quot;</span>);
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Point: (<span class="ck-num">10</span>,<span class="ck-num">20</span>)</code></pre>
+</div>
+<p class="doc-p">You access struct members with the dot <code>.</code> operator.</p>
+<h4 id="f113-initializing-structs" class="doc-h4">f11.3 Initializing Structs</h4>
+<p class="doc-p">You can set values when you create a struct:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Rectangle
+{
+    <span class="ck-ty">int</span> width,
+        height;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Rectangle rect = {width = <span class="ck-num">50</span>, height = <span class="ck-num">30</span>};
+    
+    print(f<span class="ck-str">&quot;Rectangle: {rect.width} x {rect.height}&quot;</span>);
+
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f114-structs-with-arrays" class="doc-h4">f11.4 Structs with Arrays</h4>
+<p class="doc-p">Structs can contain arrays:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console,
+      standard::string;
+
+<span class="ck-kw">struct</span> Student
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">50</span>] name;
+    <span class="ck-ty">int</span>[<span class="ck-num">5</span>] grades;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Student s1;
+
+    s1.name = <span class="ck-str">&quot;Alice&quot;</span>;
+    
+    s1.grades[<span class="ck-num">0</span>] = <span class="ck-num">85</span>;
+    s1.grades[<span class="ck-num">1</span>] = <span class="ck-num">92</span>;
+    s1.grades[<span class="ck-num">2</span>] = <span class="ck-num">78</span>;
+    s1.grades[<span class="ck-num">3</span>] = <span class="ck-num">95</span>;
+    s1.grades[<span class="ck-num">4</span>] = <span class="ck-num">88</span>;
+    
+    println(f<span class="ck-str">&quot;Student: {s1.name}&quot;</span>);
+    print(<span class="ck-str">&quot;Grades: &quot;</span>);
+    
+    <span class="ck-kw">for</span> (x <span class="ck-kw">in</span> s1.grades)
+    {
+        print(f<span class="ck-str">&quot;{x} &quot;</span>);
+    };
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<h4 id="f115-arrays-of-structs" class="doc-h4">f11.5 Arrays of Structs</h4>
+<p class="doc-p">You can create arrays of structs:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Temperature
+{
+    <span class="ck-ty">int</span> day;
+    <span class="ck-ty">float</span> celsius;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Temperature[<span class="ck-num">7</span>] week;
+    
+    week[<span class="ck-num">0</span>] = {day = <span class="ck-num">1</span>, celsius = <span class="ck-num">20.5</span>};
+    week[<span class="ck-num">1</span>] = {day = <span class="ck-num">2</span>, celsius = <span class="ck-num">22.0</span>};
+    week[<span class="ck-num">2</span>] = {day = <span class="ck-num">3</span>, celsius = <span class="ck-num">19.5</span>};
+    
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> i; i &lt; <span class="ck-num">3</span>; i++)
+    {
+        println(f<span class="ck-str">&quot;Day {week[i].day)}: {week[i].celsius}&quot;</span>);
+    };
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Day <span class="ck-num">1</span>: <span class="ck-num">20.500000</span>
+Day <span class="ck-num">2</span>: <span class="ck-num">22.000000</span>
+Day <span class="ck-num">3</span>: <span class="ck-num">19.500000</span></code></pre>
+</div>
+<h4 id="f116-passing-structs-to-functions" class="doc-h4">f11.6 Passing Structs to Functions</h4>
+<p class="doc-p">Structs can be passed to functions:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Circle
+{
+    <span class="ck-ty">float</span> radius;
+};
+
+<span class="ck-kw">def</span> calc_area(Circle c) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> <span class="ck-num">3.14159</span> * (c.radius ^ <span class="ck-num">2f</span>);
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Circle myCircle = {<span class="ck-num">5.0</span>};
+    
+    <span class="ck-ty">float</span> area = calc_area(myCircle);
+    
+    println(f<span class="ck-str">&quot;Circle with radius {myCircle.radius} has area {area}&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Circle with radius <span class="ck-num">5.000000</span> <span class="ck-kw">has</span> area <span class="ck-num">78.539749</span></code></pre>
+</div>
+<h4 id="f117-nested-structs" class="doc-h4">f11.7 Nested Structs</h4>
+<p class="doc-p">Structs can contain other structs:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Date
+{
+    <span class="ck-ty">int</span> day;
+    <span class="ck-ty">int</span> month;
+    <span class="ck-ty">int</span> year;
+};
+
+<span class="ck-kw">struct</span> Event
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">32</span>] name;
+    Date date;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Event e;
+    e.name = <span class="ck-str">&quot;John&#x27;s Birthday&quot;</span>;
+    
+    e.date.day = <span class="ck-num">15</span>;
+    e.date.month = <span class="ck-num">7</span>;
+    e.date.year = <span class="ck-num">2024</span>;
+    
+    println(f<span class="ck-str">&quot;Event:\t{e.name}&quot;</span>);
+    println(f<span class="ck-str">&quot;Date:\t{e.date.day}/{e.date.month}/{e.date.year}&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Event:  John<span class="ck-str">&#x27;s Birthday
+Date:   15/7/2024</span></code></pre>
+</div>
+<h4 id="f118-structs-vs-objects---key-differences" class="doc-h4">f11.8 Structs vs Objects - Key Differences</h4>
+<p class="doc-p">Remember these important differences:</p>
+<p class="doc-p"><strong>Structs:</strong></p>
+<ul class="doc-ul">
+<li>Data only, no functions</li>
+<li>Cannot have methods like <code>__init()</code> or <code>__exit()</code></li>
+<li>Non-executable</li>
+<li>Used for organizing related data</li>
+<li>Tightly packed in memory</li>
+</ul>
+<p class="doc-p"><strong>Objects:</strong></p>
+<ul class="doc-ul">
+<li>Have both data AND functions (methods)</li>
+<li>Have constructors and destructors</li>
+<li>Executable</li>
+<li>Used for things with behavior</li>
+<li>Can contain structs</li>
+</ul>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">object</span> Container
+{
+    <span class="ck-kw">struct</span> Box
+    {               <span class="ck-cmt">// Struct definition disallowed inside object</span>
+        <span class="ck-ty">int</span> value;
+    };
+    
+    Box b;          <span class="ck-cmt">// Struct instance allowed</span>
+};
+
+<span class="ck-cmt">// This is ILLEGAL - structs cannot contain objects!</span>
+<span class="ck-kw">struct</span> BadExample
+{
+    <span class="ck-kw">object</span> SomeObject;   <span class="ck-cmt">// COMPILE ERROR!</span>
+    <span class="ck-kw">object</span>* pSomeObject; <span class="ck-cmt">// Legal, can contain pointers to objects.</span>
+};</code></pre>
+</div>
+<h4 id="f119-practical-struct-example" class="doc-h4">f11.9 Practical Struct Example</h4>
+<p class="doc-p">Let's create a simple inventory system:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">struct</span> Item
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">50</span>] name;
+    <span class="ck-ty">int</span> quantity;
+    <span class="ck-ty">float</span> price;
+};
+
+<span class="ck-kw">def</span> printItem(Item item) -&gt; <span class="ck-kw">void</span>
+{
+    println(f<span class="ck-str">&quot;Item:\t\t{item.name}&quot;</span>);
+    println(f<span class="ck-str">&quot;Quantity:\t{item.quantity}&quot;</span>);
+    println(f<span class="ck-str">&quot;Price:\t\t${item.price}\0&quot;</span>);
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-kw">def</span> totalValue(Item item) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-kw">return</span> (<span class="ck-ty">float</span>)item.quantity * item.price;
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    Item[<span class="ck-num">3</span>] inventory;
+    
+    <span class="ck-cmt">// First item</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">0</span>] = <span class="ck-num">65</span>; <span class="ck-cmt">// &#x27;A&#x27;</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">1</span>] = <span class="ck-num">112</span>; <span class="ck-cmt">// &#x27;p&#x27;</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">2</span>] = <span class="ck-num">112</span>; <span class="ck-cmt">// &#x27;p&#x27;</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">3</span>] = <span class="ck-num">108</span>; <span class="ck-cmt">// &#x27;l&#x27;</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">4</span>] = <span class="ck-num">101</span>; <span class="ck-cmt">// &#x27;e&#x27;</span>
+    inventory[<span class="ck-num">0</span>].name[<span class="ck-num">5</span>] = <span class="ck-num">0</span>;   <span class="ck-cmt">// null-terminate</span>
+    inventory[<span class="ck-num">0</span>].quantity = <span class="ck-num">50</span>;
+    inventory[<span class="ck-num">0</span>].price = <span class="ck-num">1.25</span>;
+    
+    printItem(inventory[<span class="ck-num">0</span>]);
+    println(f<span class="ck-str">&quot;Total value:\t${totalValue(inventory[0])}&quot;</span>);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">Result:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Item:           Apple
+Quantity:       <span class="ck-num">50</span>
+Price:          $<span class="ck-num">1.250000</span>
+Total value:    $<span class="ck-num">62.500000</span></code></pre>
+</div>
+<p class="doc-p">Structs are essential for organizing complex data. They let you group related information together and treat it as a single unit.</p>
+<hr class="doc-hr">
+<h2 id="12---putting-it-all-together" class="doc-h2">12 - Putting It All Together</h2>
+<p class="doc-p">Congratulations! You've learned the fundamentals of programming with IDEKA. Let's review what you know and see how it all fits together.</p>
+<h4 id="f121-what-youve-learned" class="doc-h4">f12.1 What You've Learned</h4>
+<p class="doc-p"><strong>Core Concepts:</strong></p>
+<ul class="doc-ul">
+<li>How computers store and interpret data (bits, bytes, memory)</li>
+<li>Variables and data types (<code>int</code>, <code>float</code>, <code>char</code>, <code>bool</code>)</li>
+<li>Operators for math, logic, and comparison</li>
+<li>Control flow (if/else, loops, switch)</li>
+<li>Arrays for storing collections of data</li>
+<li>Functions for organizing reusable code</li>
+<li>Strings for working with text</li>
+<li>Enums for named constants</li>
+<li>Unions for storing one of several types</li>
+<li>Structs for organizing related data</li>
+<li>Objects for combining data with behavior</li>
+</ul>
+<p class="doc-p"><strong>Programming Skills:</strong></p>
+<ul class="doc-ul">
+<li>Breaking problems into smaller pieces</li>
+<li>Organizing code with functions</li>
+<li>Managing data with structs and objects</li>
+<li>Understanding scope and variable lifetime</li>
+<li>Reading and fixing compilation errors</li>
+</ul>
+<h4 id="f122-a-complete-example-program" class="doc-h4">f12.2 A Complete Example Program</h4>
+<p class="doc-p">Let's write a program that uses many of these concepts together:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> <span class="ck-str">&quot;standard.idk&quot;</span>;
+
+<span class="ck-cmt">// Enum for game states</span>
+<span class="ck-kw">enum</span> GameState
+{
+    MENU,
+    PLAYING,
+    GAME_OVER
+};
+
+<span class="ck-cmt">// Struct for player data</span>
+<span class="ck-kw">struct</span> Player
+{
+    <span class="ck-ty">char</span>[<span class="ck-num">50</span>] name;
+    <span class="ck-ty">int</span> score;
+    <span class="ck-ty">int</span> lives;
+};
+
+<span class="ck-cmt">// Initialize a player</span>
+<span class="ck-kw">def</span> createPlayer(<span class="ck-ty">char</span>[] playerName) -&gt; Player
+{
+    Player p;
+    
+    <span class="ck-cmt">// Copy name</span>
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> i = <span class="ck-num">0</span>; i &lt; <span class="ck-num">50</span>; i++)
+    {
+        p.name[i] = playerName[i];
+        <span class="ck-kw">if</span> (playerName[i] == <span class="ck-num">0</span>)
+        {
+            <span class="ck-kw">break</span>;
+        };
+    };
+    
+    p.score = <span class="ck-num">0</span>;
+    p.lives = <span class="ck-num">3</span>;
+    
+    <span class="ck-kw">return</span> p;
+};
+
+<span class="ck-cmt">// Print player info</span>
+<span class="ck-kw">def</span> showPlayer(Player p) -&gt; <span class="ck-kw">void</span>
+{
+    print(<span class="ck-str">&quot;Player: \0&quot;</span>);
+    print(p.name);
+    print(<span class="ck-str">&quot;\nScore: \0&quot;</span>);
+    print(p.score);
+    print(<span class="ck-str">&quot;\nLives: \0&quot;</span>);
+    print(p.lives);
+    print();
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-cmt">// Add points to player</span>
+<span class="ck-kw">def</span> addScore(Player* p, <span class="ck-ty">int</span> points) -&gt; <span class="ck-kw">void</span>
+{
+    p.score = p.score + points;
+    <span class="ck-kw">return</span>;
+};
+
+<span class="ck-cmt">// Remove a life</span>
+<span class="ck-kw">def</span> loseLife(Player* p) -&gt; <span class="ck-ty">bool</span>
+{
+    <span class="ck-kw">if</span> (p.lives &gt; <span class="ck-num">0</span>)
+    {
+        p.lives--;
+        <span class="ck-kw">return</span> <span class="ck-kw">true</span>;  <span class="ck-cmt">// Still alive</span>
+    };
+    <span class="ck-kw">return</span> <span class="ck-kw">false</span>;  <span class="ck-cmt">// Game over</span>
+};
+
+<span class="ck-kw">def</span> main() -&gt; <span class="ck-ty">int</span>
+{
+    GameState state = GameState.MENU;
+    
+    print(<span class="ck-str">&quot;=== Simple Game Demo ===\n\n\0&quot;</span>);
+    
+    <span class="ck-cmt">// Create player</span>
+    <span class="ck-ty">char</span>[] playerName = <span class="ck-str">&quot;Hero\0&quot;</span>;
+    Player player = createPlayer(playerName);
+    
+    print(<span class="ck-str">&quot;Starting game...\n\0&quot;</span>);
+    state = GameState.PLAYING;
+    
+    showPlayer(player);
+    print(); <span class="ck-cmt">// Empty prints newline</span>
+    
+    <span class="ck-cmt">// Game loop simulation</span>
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> turn = <span class="ck-num">1</span>; turn &lt;= <span class="ck-num">5</span>; turn++)
+    {
+        print(<span class="ck-str">&quot;--- Turn \0&quot;</span>);
+        print(turn);
+        print(<span class="ck-str">&quot; ---\n\0&quot;</span>);
+        
+        <span class="ck-cmt">// Add some points</span>
+        addScore(@player, turn * <span class="ck-num">10</span>);
+        print(<span class="ck-str">&quot;Gained \0&quot;</span>);
+        print(turn * <span class="ck-num">10</span>);
+        print(<span class="ck-str">&quot; points!\n\0&quot;</span>);
+        
+        <span class="ck-cmt">// Random life loss</span>
+        <span class="ck-kw">if</span> (turn % <span class="ck-num">2</span> == <span class="ck-num">0</span>)
+        {
+            print(<span class="ck-str">&quot;Hit by enemy!\n\0&quot;</span>);
+            <span class="ck-ty">bool</span> alive = loseLife(@player);
+            
+            <span class="ck-kw">if</span> (!alive)
+            {
+                print(<span class="ck-str">&quot;\n*** GAME OVER ***\n\0&quot;</span>);
+                state = GameState.GAME_OVER;
+                <span class="ck-kw">break</span>;
+            };
+        };
+        
+        showPlayer(player);
+        print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    };
+    
+    <span class="ck-cmt">// Final results</span>
+    <span class="ck-kw">if</span> (state == GameState.PLAYING)
+    {
+        print(<span class="ck-str">&quot;*** YOU WIN! ***\n\0&quot;</span>);
+    };
+    
+    print(<span class="ck-str">&quot;\nFinal \0&quot;</span>);
+    showPlayer(player);
+    
+    <span class="ck-kw">return</span> <span class="ck-num">0</span>;
+};</code></pre>
+</div>
+<p class="doc-p">This program demonstrates:</p>
+<ul class="doc-ul">
+<li>Enums for game states</li>
+<li>Structs for organizing player data</li>
+<li>Functions for different actions</li>
+<li>Pointers to modify data in-place</li>
+<li>Arrays (strings) for player names</li>
+<li>Loops and conditionals for game logic</li>
+<li>Boolean returns for game state</li>
+</ul>
+<h4 id="f123-reading-compiler-errors" class="doc-h4">f12.3 Reading Compiler Errors</h4>
+<p class="doc-p">When something goes wrong, the compiler tells you. Learning to read these messages is crucial:</p>
+<p class="doc-p"><strong>Common Error Types:</strong></p>
+<ol class="doc-ol">
+<li><strong>Syntax Errors</strong> - You wrote something the compiler doesn't understand</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Expected <span class="ck-str">&#x27;;&#x27;</span> after statement
+Expected <span class="ck-str">&#x27;)&#x27;</span> after expression</code></pre>
+</div>
+<ol class="doc-ol">
+<li><strong>Type Errors</strong> - You tried to use the wrong type</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>Cannot assign <span class="ck-ty">float</span> to <span class="ck-ty">int</span> variable
+Type mismatch <span class="ck-kw">in</span> function call</code></pre>
+</div>
+<ol class="doc-ol">
+<li><strong>Name Errors</strong> - You used a name that doesn't exist</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-str">&#x27;myVar&#x27;</span> was <span class="ck-kw">not</span> declared <span class="ck-kw">in</span> this scope
+Unknown function <span class="ck-str">&#x27;foo&#x27;</span></code></pre>
+</div>
+<p class="doc-p"><strong>How to Fix Errors:</strong></p>
+<ol class="doc-ol">
+<li>Read the error message carefully</li>
+<li>Look at the line number it mentions</li>
+<li>Check the lines just before and after too</li>
+<li>Fix one error at a time (earlier errors can cause later ones)</li>
+<li>Recompile and see if it helped</li>
+</ol>
+<h4 id="f124-debugging-tips" class="doc-h4">f12.4 Debugging Tips</h4>
+<p class="doc-p">When your program compiles but doesn't work right:</p>
+<ol class="doc-ol">
+<li><strong>Use print statements</strong> to see what's happening:</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> myFunction(<span class="ck-ty">int</span> x) -&gt; <span class="ck-ty">int</span>
+{
+    print(<span class="ck-str">&quot;myFunction called with x = \0&quot;</span>);
+    print(x);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-ty">int</span> result = x * <span class="ck-num">2</span>;
+    
+    print(<span class="ck-str">&quot;Returning: \0&quot;</span>);
+    print(result);
+    print(<span class="ck-str">&quot;\n\0&quot;</span>);
+    
+    <span class="ck-kw">return</span> result;
+};</code></pre>
+</div>
+<ol class="doc-ol">
+<li><strong>Check your assumptions</strong> - print variable values:</li>
+</ol>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>print(<span class="ck-str">&quot;Before loop: i = \0&quot;</span>);
+print(i);
+print(<span class="ck-str">&quot;\n\0&quot;</span>);
+
+<span class="ck-kw">for</span> (i = <span class="ck-num">0</span>; i &lt; <span class="ck-num">10</span>; i++)
+{
+    <span class="ck-cmt">// ...</span>
+};
+
+print(<span class="ck-str">&quot;After loop: i = \0&quot;</span>);
+print(i);
+print(<span class="ck-str">&quot;\n\0&quot;</span>);</code></pre>
+</div>
+<ol class="doc-ol">
+<li><strong>Simplify</strong> - comment out code until it works, then add back piece by piece</li>
+</ol>
+<ol class="doc-ol">
+<li><strong>Test small pieces</strong> - write functions that do one thing and test them separately</li>
+</ol>
+<h4 id="f125-good-programming-practices" class="doc-h4">f12.5 Good Programming Practices</h4>
+<p class="doc-p">As you continue learning:</p>
+<p class="doc-p"><strong>1. Use meaningful names:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-cmt">// Bad</span>
+<span class="ck-ty">int</span> x = <span class="ck-num">5</span>;
+<span class="ck-kw">def</span> f(<span class="ck-ty">int</span> a) -&gt; <span class="ck-ty">int</span> { <span class="ck-kw">return</span> a * <span class="ck-num">2</span>; };
+
+<span class="ck-cmt">// Good</span>
+<span class="ck-ty">int</span> playerSpeed = <span class="ck-num">5</span>;
+<span class="ck-kw">def</span> doubleValue(<span class="ck-ty">int</span> value) -&gt; <span class="ck-ty">int</span> { <span class="ck-kw">return</span> value * <span class="ck-num">2</span>; };</code></pre>
+</div>
+<p class="doc-p"><strong>2. Write comments:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-cmt">// Calculate average of array</span>
+<span class="ck-kw">def</span> average(<span class="ck-ty">int</span>[] numbers, <span class="ck-ty">int</span> count) -&gt; <span class="ck-ty">float</span>
+{
+    <span class="ck-ty">int</span> sum = <span class="ck-num">0</span>;
+    
+    <span class="ck-cmt">// Add up all numbers</span>
+    <span class="ck-kw">for</span> (<span class="ck-ty">int</span> i = <span class="ck-num">0</span>; i &lt; count; i++)
+    {
+        sum = sum + numbers[i];
+    };
+    
+    <span class="ck-cmt">// Divide by count to get average</span>
+    <span class="ck-kw">return</span> (<span class="ck-ty">float</span>)sum / (<span class="ck-ty">float</span>)count;
+};</code></pre>
+</div>
+<p class="doc-p"><strong>3. Keep functions focused:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-cmt">// Each function should do ONE thing well</span>
+<span class="ck-kw">def</span> readInput() -&gt; <span class="ck-ty">int</span> { <span class="ck-cmt">/// ... /// };</span>
+<span class="ck-kw">def</span> validateInput(<span class="ck-ty">int</span> value) -&gt; <span class="ck-ty">bool</span> { <span class="ck-cmt">/// ... /// };</span>
+<span class="ck-kw">def</span> processInput(<span class="ck-ty">int</span> value) -&gt; <span class="ck-kw">void</span> { <span class="ck-cmt">/// ... /// };</span>
+
+<span class="ck-cmt">// Not one giant function that does everything</span></code></pre>
+</div>
+<h4 id="f126-next-steps" class="doc-h4">f12.6 Next Steps</h4>
+<p class="doc-p">You now have a solid foundation in programming! Here's what to explore next:</p>
+<p class="doc-p"><strong>Practice Projects:</strong></p>
+<ol class="doc-ol">
+<li>Simple calculator with multiple operations</li>
+<li>Text-based adventure game</li>
+<li>Temperature converter</li>
+<li>Todo list manager</li>
+<li>Number guessing game</li>
+</ol>
+<p class="doc-p"><strong>Advanced Topics</strong> (in the Adept document):</p>
+<ul class="doc-ul">
+<li>The <code>data</code> type system for bit-level control</li>
+<li>Templates for generic code</li>
+<li>Namespaces for organization</li>
+<li>Advanced memory management</li>
+<li>Working with files</li>
+<li>Network programming basics</li>
+<li>Hardware interfacing</li>
+</ul>
+<p class="doc-p"><strong>Keep Learning:</strong></p>
+<ul class="doc-ul">
+<li>Read other people's code</li>
+<li>Try to solve problems in multiple ways</li>
+<li>Don't be afraid to experiment</li>
+<li>Break things and fix them - that's how you learn</li>
+<li>Join the IDEKA community and ask questions</li>
+</ul>
+<h4 id="f127-final-thoughts" class="doc-h4">f12.7 Final Thoughts</h4>
+<p class="doc-p">Programming is a skill that improves with practice. The concepts you've learned here - variables, functions, structs, objects - are universal. They appear in almost every programming language, just with different syntax.</p>
+<p class="doc-p">You're now ready to:</p>
+<ul class="doc-ul">
+<li>Write complete programs</li>
+<li>Organize code into reusable pieces</li>
+<li>Manage data with structs and objects</li>
+<li>Solve problems by breaking them down</li>
+<li>Read and understand error messages</li>
+<li>Debug when things go wrong</li>
+</ul>
+<p class="doc-p">Keep coding, keep learning, and most importantly - have fun building things!</p>
+<p class="doc-p">The journey from beginner to adept programmer is all about practice. Write code every day, even if it's just a small function or a simple program. Every line of code teaches you something.</p>
+<p class="doc-p">Welcome to the world of programming. The only limit is your imagination.</p>
+<hr class="doc-hr">
+<p class="doc-p"><strong>Ready for more?</strong> Check out the IDEKA Adept documentation to dive deeper into advanced features, optimization, and real-world systems programming.</p>
+  </main>
+</div>
+
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <a href="/" class="nav-logo footer-logo">
+        <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+          <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+          <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+          <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+        </svg>
+        <span class="nav-logo-text">IDEKA</span>
+      </a>
+      <div class="footer-sep"></div>
+      <span class="footer-copy">&copy; Karac Von Thweatt. All rights reserved.</span>
+      <div class="footer-links">
+        <a href="https://github.com/kvthweatt/IDEKALang" target="_blank">GitHub</a>
+        <a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+
+// Active TOC link on scroll
+(function() {
+    const links = document.querySelectorAll('.doc-toc-link');
+    if (!links.length) return;
+    const headings = Array.from(document.querySelectorAll(
+        '.doc-content h1[id],h2[id],h3[id],h4[id]'
+    ));
+    function onScroll() {
+        const scrollY = window.scrollY + 90;
+        let active = null;
+        for (const h of headings) {
+            if (h.offsetTop <= scrollY) active = h.id;
+        }
+        links.forEach(l => {
+            const href = l.getAttribute('href');
+            l.classList.toggle('active', href === '#' + active);
+        });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+})();
+
+// Hamburger
+(function() {
+    const btn  = document.getElementById('nav-hamburger');
+    const menu = document.getElementById('nav-mobile-menu');
+    if (!btn || !menu) return;
+    function toggle(open) {
+        btn.classList.toggle('open', open);
+        menu.classList.toggle('open', open);
+        btn.setAttribute('aria-expanded', String(open));
+        menu.setAttribute('aria-hidden', String(!open));
+    }
+    btn.addEventListener('click', () => toggle(!btn.classList.contains('open')));
+    menu.querySelectorAll('.nav-mobile-link').forEach(l => l.addEventListener('click', () => toggle(false)));
+    document.addEventListener('click', e => {
+        if (btn.classList.contains('open') && !btn.contains(e.target) && !menu.contains(e.target))
+            toggle(false);
+    });
+})();
+
+</script>
+</body>
+</html>

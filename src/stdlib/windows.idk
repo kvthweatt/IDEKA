@@ -69,7 +69,7 @@ namespace standard
             // ============================================================================
 
             // MSG structure for message loop
-            struct MSG
+            cstruct MSG
             {
                 HWND hwnd;
                 UINT message;
@@ -80,7 +80,7 @@ namespace standard
             };
 
             // WNDCLASSEXA structure for window class registration
-            struct WNDCLASSEXA
+            cstruct WNDCLASSEXA
             {
                 UINT cbSize,style;
                 WNDPROC lpfnWndProc;
@@ -94,7 +94,7 @@ namespace standard
             };
 
             // MINMAXINFO structure (sent with WM_GETMINMAXINFO)
-            struct MINMAXINFO
+            cstruct MINMAXINFO
             {
                 POINT ptReserved,
                       ptMaxSize,
@@ -104,17 +104,16 @@ namespace standard
             };
 
             // RECT structure
-            struct RECT
+            cstruct RECT
             {
                 LONG left, top, right, bottom;
             };
 
             // PAINTSTRUCT for WM_PAINT
-            struct PAINTSTRUCT
+            cstruct PAINTSTRUCT
             {
                 HDC hdc;              // 8 bytes, offset 0
-                LONG fErase,          // 4 bytes, offset 8
-                     _pad;            // 4 bytes padding, offset 12 -> RECT at 16
+                LONG fErase;          // 4 bytes, offset 8 (cstruct pads to 16)
                 RECT rcPaint;         // 16 bytes, offset 16
                 LONG fRestore,        // 4 bytes, offset 32
                      fIncUpdate;      // 4 bytes, offset 36
@@ -459,20 +458,17 @@ namespace standard
             // OPENFILENAME STRUCT
             // ============================================================================
 
-            struct OPENFILENAMEA
+            cstruct OPENFILENAMEA
             {
                 DWORD  lStructSize;
-                DWORD  _pad0;
                 HWND   hwndOwner, hInstance;
                 LPCSTR lpstrFilter;
                 LPSTR  lpstrCustomFilter;
                 DWORD  nMaxCustFilter, nFilterIndex;
                 LPSTR  lpstrFile;
                 DWORD  nMaxFile;
-                DWORD  _pad1;
                 LPSTR  lpstrFileTitle;
                 DWORD  nMaxFileTitle;
-                DWORD  _pad2;
                 LPCSTR lpstrInitialDir, lpstrTitle;
                 DWORD  Flags;
                 WORD   nFileOffset, nFileExtension;

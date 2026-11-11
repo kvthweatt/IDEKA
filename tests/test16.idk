@@ -2,14 +2,17 @@
 
 using standard::io::console;
 
-data{10::0} as lebit;
-data{10::1} as bebit;
-
-foo(bebit x) -> void ->;
 
 comptime
 {
-    
+    data{10::0} as lebit;
+    data{10::1} as bebit;
+
+    foo(bebit x) -> void ->;
+
+    lebit y = 1;
+
+    foo(y); // fails to catch at comptime // fix this
 };
 
 main () -> int

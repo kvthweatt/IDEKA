@@ -223,6 +223,82 @@ namespace IDEKA
             -> r;
         };
 
+        // Bytes a type occupies in memory and the alignment it needs, as the backends lay out
+        // aggregates that have no declared bit layout (objects, tuples): each member at its own alignment
+        mem_leaf(IRType* t) -> int
+        {
+            int k = t.kind;
+            if (k == LK.INT)
+            {
+                if (t.width <= 8) { -> 1; };
+                if (t.width <= 16) { -> 2; };
+                if (t.width <= 32) { -> 4; };
+                if (t.width <= 64) { -> 8; };
+                -> 16;
+            };
+            if (k == LK.PTR | k == LK.DOUBLE | k == LK.FUNC) { -> 8; };
+            if (k == LK.FLOAT) { -> 4; };
+            -> 0;
+        };
+
+        mem_align(IRType* t) -> int
+        {
+            int i, a, al, sz;
+            if (t.kind == LK.ARRAY) { -> mem_align(t.elem); };
+            if (t.kind == LK.STRUCT | t.kind == LK.ISTRUCT)
+            {
+                al = 1;
+                while (i < t.nitems)
+                {
+                    a = mem_align(t.items[i]);
+                    if (a > al) { al = a; };
+                    i++;
+                };
+                -> al;
+            };
+            sz = mem_leaf(t);
+            if (sz < 1) { sz = 1; };
+            if (sz > 16) { sz = 16; };
+            -> sz;
+        };
+
+        mem_size(IRType* t) -> int
+        {
+            int i, a, al, off;
+            int k = t.kind;
+            if (k == LK.INT)
+            {
+                if (t.width <= 8) { -> 1; };
+                if (t.width <= 16) { -> 2; };
+                if (t.width <= 32) { -> 4; };
+                if (t.width <= 64) { -> 8; };
+                -> 16;
+            };
+            if (k == LK.PTR | k == LK.DOUBLE | k == LK.FUNC) { -> 8; };
+            if (k == LK.FLOAT) { -> 4; };
+            if (k == LK.ARRAY) { -> t.count * mem_size(t.elem); };
+            if (k == LK.STRUCT | k == LK.ISTRUCT)
+            {
+                if (t.lbits > 0) { -> (t.lbits + 7) / 8; };
+                al = 1;
+                while (i < t.nitems)
+                {
+                    a = mem_align(t.items[i]);
+                    if (a > al) { al = a; };
+                    off = (off + a - 1) / a * a;
+                    off = off + mem_size(t.items[i]);
+                    i++;
+                };
+                -> (off + al - 1) / al * al;
+            };
+            -> 0;
+        };
+
+        mem_size_bits(IRType* t) -> int
+        {
+            -> mem_size(t) * 8;
+        };
+
         // Bit width of an LLVM type (SizeOfTypeHandler.bits_from_llvm_type)
         bits_of(IRType* t) -> int
         {
@@ -256,12 +332,8 @@ namespace IDEKA
                                                     switch (k == LK.STRUCT | k == LK.ISTRUCT)
                                                     {
                                                         case (true) {
-                                                        while (i < t.nitems)
-                                                        {
-                                                            total = total + bits_of(t.items[i]);
-                                                            i++;
-                                                        };
-                                                        -> total;
+                                                        if (t.lbits > 0) { -> t.lbits; };
+                                                        -> mem_size_bits(t);
                                                     }
                                                         default
                                                         {
@@ -380,6 +452,12 @@ namespace IDEKA
             NameMap* enums;         // mangled name to IRType*
             NameMap* aliases;       // mangled name to IRType*
             NameMap* consts;        // global name to i64* (integer initializers)
+            NameMap* ovi;           // overload key text and its __ suffixes to the first function carrying that key
+            int ovi_n;              // functions of the module already indexed in ovi
+            NameMap* ovk;           // exact overload key text to PtrVec of the functions carrying it, in module order
+            NameMap* ovz_d;         // dotted overload keys, and their __ suffixes, to first key index + 1
+            NameMap* ovz_s;         // the same for keys without a dot
+            int ovz_n;              // overload keys already indexed
             PtrVec* ct_enums;       // EnumDef nodes of the top level statements seen so far
             NodeVec* ct_pstmts;     // the top level statements of the program (module._program_statements), borrowed
             PtrVec* ct_macros;      // macroDef nodes of the top level statements
@@ -412,6 +490,12 @@ namespace IDEKA
             int pend_col;           // column handed to the next fail() by fail_at
             byte* err_msg;
             IRType* t_i1, t_i8, t_i32, t_i64, t_void, t_float, t_double, t_i8p;
+            IRValue* bpe;           // bit pointer helper results: element pointer and shift
+            IRValue* bps;
+            IRType* bpt;            // integer type the bit pointer points into
+            SInfo* bpsi;            // struct layout reached while walking a member chain
+            IRType* bpat;           // type reached while walking a member chain
+            IRValue* bpdyn;         // run time part of that bit offset
             int nfuncs, ntypes, al_tmp;
             Buf sc;             // text scratch
             int q_len;          // next_quoted results
@@ -443,6 +527,7 @@ namespace IDEKA
             PtrVec* inited_unions;   // union variables assigned in the current function
             bool gmv_full;           // global_member_value text already carries its type
             NameMap* fdefs;     // function name to its FUNCTION_DEF
+            NameMap* frspec;    // function or method name to its declared return TypeSpec
             int nbodies, nskipped;
             Node* cur_fd;       // function definition whose body is being generated
             NameMap* gcache;    // g-string bytes (escaped) to its global
@@ -481,6 +566,12 @@ namespace IDEKA
                 this.enums = nm_new();
                 this.aliases = nm_new();
                 this.consts = nm_new();
+                this.ovi = nm_new();
+                this.ovk = nm_new();
+                this.ovi_n = 0;
+                this.ovz_d = nm_new();
+                this.ovz_s = nm_new();
+                this.ovz_n = 0;
                 this.ct_enums = pv_new();
                 this.ct_pstmts = (NodeVec*)0;
                 this.ct_macros = pv_new();
@@ -543,6 +634,7 @@ namespace IDEKA
                 this.labels = nm_new();
                 this.inited_unions = pv_new();
                 this.fdefs = nm_new();
+                this.frspec = nm_new();
                 this.nbodies = 0;
                 this.nskipped = 0;
                 this.cur_fd = (Node*)0;
@@ -607,6 +699,10 @@ namespace IDEKA
                 nm_free(this.enums);
                 nm_free(this.aliases);
                 nm_free(this.consts);
+                nm_free(this.ovi);
+                nm_free(this.ovk);
+                nm_free(this.ovz_d);
+                nm_free(this.ovz_s);
                 pv_free(this.ct_enums);
                 pv_free(this.ct_macros);
                 nm_free(this.defined);
@@ -615,6 +711,7 @@ namespace IDEKA
                 nm_free(this.labels);
                 nm_free(this.untied);
                 nm_free(this.fdefs);
+                nm_free(this.frspec);
                 nm_free(this.gcache);
                 nm_free(this.enumvals);
                 nm_free(this.enum_defs);
@@ -1240,9 +1337,26 @@ namespace IDEKA
             };
 
             // TypeSystem.get_llvm_type. incl wraps the array dimensions.
+            // T`*: the pair (origin pointer to T, bit index)
+            lower_bitptr(TypeSpec* t, bool incl, int line) -> IRType*
+            {
+                IRType* pt;
+                IRType** it;
+                t.flags = t.flags - TS_BITPTR;
+                pt = this.lower(t, incl, line);
+                t.flags = t.flags + TS_BITPTR;
+                if (pt.kind == LK.VOID) { pt = this.t_i8; };
+                it = (IRType**)fmalloc((u64)2 * (u64)((sizeof(IRType*) + 7) / 8));
+                this.keep((void*)it);
+                it[0] = this.ptr_of(pt);
+                it[1] = this.t_i64;
+                -> this.mod.t_struct(it, 2);
+            };
+
             lower(TypeSpec* t, bool incl, int line) -> IRType*
             {
                 IRType* base = (IRType*)0;
+                if ((t.flags `& TS_BITPTR) != 0) { -> this.lower_bitptr(t, incl, line); };
                 IRType* el;
                 IRType** ps;
                 int i, depth, bt;
@@ -1662,6 +1776,85 @@ namespace IDEKA
                 -> e.kind == LK.ISTRUCT & !e.defined & e.nitems == 0;
             };
 
+            // StructTypeHandler._field_extent and _c_field_extent: width and alignment (in bits) of one member.
+            //   data{w}: no constraint; data{w:a}: aligned to a; standard types: aligned to their width, at most 64
+            //   (arrays: to their element); a struct member: its own alignment and exact size.
+            // In a cstruct the alignment is the largest power of two dividing the width (at most 64) unless data{w:a}
+            // gives one, and a width that is not a whole number of bytes is an error.
+            member_extent(TypeSpec* sp, IRType* ft, bool c, byte* mname, int line, int* bwo, int* alo) -> bool
+            {
+                int bw, al, ew, ea, cnt, nat;
+                IRType* el = ft;
+                SInfo* ni = (SInfo*)0;
+                void* p;
+                bool isarr = ts_is_array(sp);
+                cnt = 1;
+                while (el.kind == LK.ARRAY)
+                {
+                    cnt = cnt * el.count;
+                    el = el.elem;
+                };
+                if (el.kind == LK.ISTRUCT & el.name != (byte*)0 & !ts_is_pointer(sp))
+                {
+                    p = nm_get(this.structs, el.name);
+                    if (p != (void*)0) { ni = (SInfo*)p; };
+                };
+                if (ni != (SInfo*)0)
+                {
+                    ew = ni.total_bits;
+                    ea = ni.max_align;
+                    bw = ew * cnt;
+                    if (isarr) { bw = (ew + 7) / 8 * 8 * cnt; };
+                    al = ea;
+                }
+                else
+                {
+                    if (ts_is_pointer(sp) | el.kind == LK.PTR)
+                    {
+                        ew = 64;
+                        ea = 64;
+                    }
+                    else { if (sp.bit_width > 0)
+                    {
+                        ew = sp.bit_width;
+                        if (sp.alignment > 0) { ea = sp.alignment; }
+                        else
+                        {
+                            if (sp.base_type == DataType.DATA) { ea = 1; }
+                            else { ea = ew; if (ea > 64) { ea = 64; }; };
+                        };
+                    }
+                    else
+                    {
+                        ew = bits_of(el);
+                        ea = ew;
+                        if (ea > 64) { ea = 64; };
+                    }; };
+                    bw = ew * cnt;
+                    // array elements are addressable, so each takes a whole number of bytes
+                    if (isarr) { bw = mem_size(el) * 8 * cnt; };
+                    if (!isarr) { bw = ew; };
+                    al = ea;
+                    if (c)
+                    {
+                        if (bw % 8 != 0)
+                        {
+                            this.fail(join3(g"cstruct field '\0", mname, g"' is not a whole number of bytes wide: a C layout needs whole bytes\0"), line);
+                            -> false;
+                        };
+                        if (!(sp.bit_width > 0 & sp.alignment > 0 & sp.base_type == DataType.DATA))
+                        {
+                            nat = ew `& (0 - ew);
+                            if (nat > 64) { nat = 64; };
+                            al = nat;
+                        };
+                    };
+                };
+                *bwo = bw;
+                *alo = al;
+                -> true;
+            };
+
             // visit_StructDef
             reg_struct(Node* sd, byte* ns) -> void
             {
@@ -1788,10 +1981,10 @@ namespace IDEKA
                         };
                         si.n = idx;
 
-                        // calculate_vtable: tightly packed, widths from the declared bit width
-                        // of scalar data{} members, else from the LLVM type
+                        // calculate_vtable: the layout rules of StructTypeHandler (see member_extent)
                         int off = 0;
-                        int bw, al;
+                        int bw, al, slot;
+                        bool cl = (sd.flags `& NF_CSTRUCT) != 0;
                         i = 0;
                         while (i < si.n)
                         {
@@ -1807,30 +2000,15 @@ namespace IDEKA
                             }
                                 default
                                 {
-                                    switch (si.specs[i].bit_width > 0 & !ts_is_array(si.specs[i]))
-                                    {
-                                        case (true) {
-                                        bw = si.specs[i].bit_width;
-                                        switch (si.specs[i].alignment > 0)
-                                        {
-                                            case (true) { al = si.specs[i].alignment; }
-                                            default { al = bw; };
-                                        };
-                                    }
-                                        default {
-                                        bw = bits_of(ft);
-                                        al = bw;
-                                        switch (bw > 64)
-                                        {
-                                            case (true) { al = 64; }
-                                            default {};
-                                        };
-                                    };
-                                    };
+                                    if (!this.member_extent(si.specs[i], ft, cl, si.names[i], sd.line, @bw, @al)) { -> ffree(name); };
+                                    // a field starts at the next multiple of its alignment and occupies at least that many bits
+                                    if (al > 1 & off % al != 0) { off = off + al - off % al; };
+                                    slot = bw;
+                                    if (al > bw) { slot = al; };
                                     si.offs[i] = off;
                                     si.bits[i] = bw;
                                     si.aligns[i] = al;
-                                    off = off + bw;
+                                    off = off + slot;
                                     switch (al > si.max_align)
                                     {
                                         case (true) { si.max_align = al; }
@@ -1840,7 +2018,11 @@ namespace IDEKA
                                 };
                             };
                         };
+                        // a struct ends where its last field ends, a cstruct is padded up to its alignment
+                        if (cl & si.max_align > 1 & off % si.max_align != 0) { off = off + si.max_align - off % si.max_align; };
                         si.total_bits = off;
+                        si.ty.lbits = off;
+                        si.ty.loff = si.offs;
                         this.mod.set_body(si.ty, si.ftys, si.n);
                         this.tld_global(si);
 
@@ -2409,6 +2591,7 @@ namespace IDEKA
                                     case (true) {
                                     nm_put(this.defined, mn, (void*)f);
                                     nm_put(this.fdefs, f.name, (void*)fd);
+                                    nm_put(this.frspec, f.name, (void*)(fd.ts));
                                     switch ((fd.flags `& NF_INLINE) != 0)
                                     {
                                         case (true) { pv_push(f.attrs, (void*)this.mod.own(g"alwaysinline\0")); }
@@ -2592,6 +2775,7 @@ namespace IDEKA
                                 }
                                     default {};
                                 };
+                                nm_put(this.frspec, f.name, (void*)(m.ts));
                                 // Python predeclares a namespaced object's method in the type only pass and
                                 // again in visit_ObjectDef, and once more for each repeated definition
                                 // (prototype and body), and every assignment of a taken name takes the next suffix
@@ -2995,6 +3179,29 @@ namespace IDEKA
             // ----------------------------------------------------------
 
             // Marks the current body as not generated. what names the construct.
+            // "<pre><name>" as a new string, for diagnostics that must name the thing they are about
+            name_msg(byte* pre, byte* nm) -> byte*
+            {
+                int a = 0;
+                int b = 0;
+                byte* r;
+                while (pre[a] != 0) { a++; };
+                switch (nm == (byte*)0)
+                {
+                    case (true) { nm = g"?\0"; }
+                    default {};
+                };
+                while (nm[b] != 0) { b++; };
+                r = (byte*)fmalloc(a + b + 1);
+                a = 0;
+                while (pre[a] != 0) { r[a] = pre[a]; a++; };
+                b = 0;
+                while (nm[b] != 0) { r[a + b] = nm[b]; b++; };
+                r[a + b] = 0;
+                this.keep((void*)r);
+                -> r;
+            };
+
             unsup(Node* n, byte* what) -> void
             {
                 i64* box;
@@ -5446,6 +5653,34 @@ namespace IDEKA
                 -> r;
             };
 
+            // VariableTypeHandler.infer_array_size: a pointer initialized with an array literal becomes
+            // an array of the literal's length, one pointer level less
+            ptr_array_ts(TypeSpec* ts, Node* ini, Node* n) -> TypeSpec*
+            {
+                TypeSpec* r;
+                Node* zn;
+                switch (ini == (Node*)0 | (ts.flags `& TS_ARRAY) != 0 | ts.pointer_depth <= 0)
+                {
+                    case (true) { -> ts; }
+                    default {};
+                };
+                switch (ini.kind != NodeKind.ARRAY_LITERAL | (ini.flags `& NF_IS_STRING) != 0 | node_count(ini, 0) == 0)
+                {
+                    case (true) { -> ts; }
+                    default {};
+                };
+                r = typespec_clone(ts);
+                r.flags = r.flags `| TS_ARRAY;
+                r.pointer_depth = ts.pointer_depth - 1;
+                switch (r.pointer_depth == 0) { case (true) { r.flags = r.flags `& (`!TS_POINTER); } default {}; };
+                r.array_dims = (NodeVec*)0;
+                zn = node_new(NodeKind.LITERAL, n.line, n.col);
+                zn.op = DataType.SINT;
+                zn.ival = (i64)node_count(ini, 0);
+                r.array_size = zn;
+                -> r;
+            };
+
             // visit_VariableDeclaration at global scope (_vardecl_global)
             dims_empty(TypeSpec* ts) -> bool
             {
@@ -5494,6 +5729,7 @@ namespace IDEKA
                                             default
                                             {
                                                 lt = (IRType*)0;
+                                                ts = this.ptr_array_ts(ts, n.a, n);
                                                 switch ((ts.flags `& TS_ARRAY) != 0 & ts.array_size == (Node*)0 & (ts.array_dims == (NodeVec*)0 | this.dims_empty(ts)))
                                                 {
                                                     case (true) {
@@ -7226,6 +7462,7 @@ namespace IDEKA
             convert_assign(IRValue* v, IRType* target) -> IRValue*
             {
                 IRType* vt = v.ty;
+                if (this.bp_is_ty(vt) & this.bp_is_ty(target) & !lt_eq(vt, target)) { -> this.bp_cast(v, target, (Node*)0); };
                 switch (lt_eq(vt, target))
                 {
                     case (true) { -> v; }
@@ -8567,12 +8804,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Buf* cb;
                 byte* txt;
                 int tl;
-                IRValue* val, pos, dest, sp, buffer, pos_ptr, r, bp;
+                IRValue* val, pos, dest, sp, buffer, pos_ptr, r, bp, cpos, cdst;
                 IRFunc* cf;
                 IRType* aty, vt;
                 byte* fname;
                 int j, w, wt, ec;
-                bool uns, istext;
+                bool uns, istext, ischr;
                 // Compile time attempt
                 cb = (Buf*)fmalloc((u64)((sizeof(Buf) + 7) / 8));
                 cb.__init();
@@ -8738,6 +8975,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             default {};
                                         };
                                         fname = (byte*)0;
+                                        ischr = false;
                                         vt = val.ty;
                                         switch (vt.kind == LK.FLOAT) { case (true) { fname = g"standard__strings__fstr_append__3__floatE1__byteE1_ptr1__intE1_ptr1__ret_intE1\0"; } default {}; };
                                         switch (vt.kind == LK.DOUBLE) { case (true) { fname = g"standard__strings__fstr_append__3__doubleE1__byteE1_ptr1__intE1_ptr1__ret_intE1\0"; } default {}; };
@@ -8747,6 +8985,26 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             case (true) {
                                             w = vt.width;
                                             uns = this.is_uns(val);
+                                            switch (w == 8 & val.spec != (TypeSpec*)0)
+                                            {
+                                                case (true) {
+                                                switch (val.spec.base_type == DataType.CHAR)
+                                                {
+                                                    case (true) {
+                                                    // char interpolates as its character, not its code
+                                                    cpos = this.mod.load(pos_ptr, g"char_pos\0");
+                                                    this.mod.ia[0] = this.ci32(0);
+                                                    this.mod.ia[1] = cpos;
+                                                    cdst = this.mod.gep(buffer, this.mod.ia, 2, false, g"char_dest\0");
+                                                    this.mod.store(val, cdst);
+                                                    this.mod.store(this.mod.binop(g"add\0", cpos, this.ci32(1), (byte*)0), pos_ptr);
+                                                    ischr = true;
+                                                }
+                                                    default {};
+                                                };
+                                            }
+                                                default {};
+                                            };
                                             wt = 64;
                                             switch (w <= 32) { case (true) { wt = 32; } default {}; };
                                             switch (w <= 16) { case (true) { wt = 16; } default {}; };
@@ -8764,7 +9022,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         }
                                             default {};
                                         };
-                                        switch (fname != (byte*)0)
+                                        switch (fname != (byte*)0 & !ischr)
                                         {
                                             case (true) {
                                             cf = this.fa_decl(fname, val.ty);
@@ -9111,6 +9369,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 }
                                                     default
                                                     {
+                                                        if (this.bp_is(lhs) | this.bp_is(rhs))
+                                                        {
+                                                            if ((op == Operator.ADD | op == Operator.SUB) & this.bp_is(lhs) & !this.bp_is(rhs) & rhs.ty.kind == LK.INT) { -> this.bp_step(lhs, rhs, op); };
+                                                            if (this.bp_is(lhs)) { lhs = this.bp_idx(lhs); };
+                                                            if (this.bp_is(rhs)) { rhs = this.bp_idx(rhs); };
+                                                        };
                                                         r = (IRValue*)0;
                                                         switch (op == Operator.EQUAL | op == Operator.NOT_EQUAL)
                                                         {
@@ -9959,6 +10223,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* an, dn;
                 IRValue** pslot;
                 Node* fd_e, pe;
+                TypeSpec* rts;
                 int se_v, te_v, ne_v;
                 switch (n.text != (byte*)0)
                 {
@@ -10130,6 +10395,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 r = this.mod.call_ex(f.self, args, total, (byte*)0, f.cconv, this.fn == f);
                                             };
                                         };
+                                        // the result carries the declared return type, so a cast of it knows the signedness
+                                        if (r != (IRValue*)0) { rts = (TypeSpec*)nm_get(this.frspec, f.name); if (rts != (TypeSpec*)0) { r.spec = rts; }; };
                                         -> r;
                                     }; };
                             };
@@ -10194,6 +10461,53 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // Indexes the functions added since the last call. A call name matches a function when its
+            // key text equals the name or ends in __name, so the key and each suffix after a __ are
+            // registered; the first function in module order wins, as the linear scan did
+            ov_index_sync() -> void
+            {
+                int e, p;
+                byte* g;
+                byte* kb;
+                IRFunc* f;
+                PtrVec* ks;
+                while (this.ovi_n < this.mod.funcs.len)
+                {
+                    f = (IRFunc*)this.mod.funcs.items[this.ovi_n];
+                    this.ovi_n++;
+                    e = this.ov_key_end(f.name);
+                    switch (e >= 0)
+                    {
+                        case (true) {
+                            kb = (byte*)fmalloc((u64)(e + 1));
+                            p = 0;
+                            while (p < e) { kb[p] = f.name[p]; p++; };
+                            kb[e] = 0;
+                            ks = (PtrVec*)nm_get(this.ovk, kb);
+                            switch (ks == (PtrVec*)0) { case (true) { ks = pv_new(); this.keep((void*)ks); nm_put(this.ovk, kb, (void*)ks); } default {}; };
+                            pv_push(ks, (void*)f);
+                            switch (!nm_has(this.ovi, kb)) { case (true) { nm_put(this.ovi, kb, (void*)f); } default {}; };
+                            p = 0;
+                            while (p + 2 <= e)
+                            {
+                                switch (kb[p] == '_' & kb[p + 1] == '_')
+                                {
+                                    case (true) {
+                                        g = kb + (p + 2);
+                                        switch (!nm_has(this.ovi, g)) { case (true) { nm_put(this.ovi, g, (void*)f); } default {}; };
+                                    }
+                                    default {};
+                                };
+                                p++;
+                            };
+                            ffree(kb);
+                        }
+                        default {};
+                    };
+                };
+                ->;
+            };
+
             // Base compiler's pointer-param overload shortcut: the first registered overload key
             // named by the call, whose pointer-only overload matches the local variable
             // allocas passed as arguments, is called with those allocas
@@ -10204,6 +10518,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int ke = -1;
                 IRFunc* g;
                 IRFunc* key_f = (IRFunc*)0;
+                PtrVec* cands;
+                byte* kb;
                 IRValue** args;
                 IRType* pt;
                 LVar* lv;
@@ -10232,26 +10548,21 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             };
                         };
                         name[j] = 0;
-                        i = 0;
-                        while (i < this.mod.funcs.len & key_f == (IRFunc*)0)
-                        {
-                            g = (IRFunc*)this.mod.funcs.items[i];
-                            e = this.ov_key_end(g.name);
-                            switch (e >= 0)
-                            {
-                                case (true) {
-                                switch (this.ov_key_matches(g.name, e, name)) { case (true) { key_f = g; ke = e; } default {}; };
-                            }
-                                default {};
-                            };
-                            i++;
-                        };
+                        this.ov_index_sync();
+                        key_f = (IRFunc*)nm_get(this.ovi, name);
+                        switch (key_f != (IRFunc*)0) { case (true) { ke = this.ov_key_end(key_f.name); } default {}; };
                         switch (key_f == (IRFunc*)0) { case (true) { -> false; } default
                             {
+                                kb = (byte*)fmalloc((u64)(ke + 1));
+                                j = 0;
+                                while (j < ke) { kb[j] = key_f.name[j]; j++; };
+                                kb[ke] = 0;
+                                cands = (PtrVec*)nm_get(this.ovk, kb);
+                                ffree(kb);
                                 i = 0;
-                                while (i < this.mod.funcs.len)
+                                while (i < cands.len)
                                 {
-                                    g = (IRFunc*)this.mod.funcs.items[i];
+                                    g = (IRFunc*)cands.items[i];
                                     i++;
                                     e = this.ov_key_end(g.name);
                                     switch (e != ke) { case (true) { continue; } default
@@ -10331,51 +10642,72 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 -> false;
             };
 
-            ptr_ovl_zero(byte* name) -> bool
+            // Indexes the overload keys added since the last call. A name matches a key when it equals
+            // the key or the key ends in __name (with at least one character before that __); dotted
+            // (object method) keys and plain keys are kept apart and the first key in order wins
+            ov_zero_sync() -> void
             {
-                int i, j, kl, nl, pass;
+                int p, kl;
                 bool dotted;
                 byte* key;
-                PtrVec* list;
-                Overload* oc;
-                while (name[nl] != 0) { nl++; };
-                // Object method keys are registered by the type pre-pass, before any function key
-                while (pass < 2)
+                NameMap* m;
+                void* tag;
+                while (this.ovz_n < this.st.overloads.count)
                 {
-                i = 0;
-                while (i < this.st.overloads.count)
-                {
-                    key = this.st.overloads.keys[i];
+                    key = this.st.overloads.keys[this.ovz_n];
+                    tag = (void*)(i64)(this.ovz_n + 1);
+                    this.ovz_n++;
                     kl = 0;
                     dotted = false;
                     while (key[kl] != 0) { switch (key[kl] == '.') { case (true) { dotted = true; } default {}; }; kl++; };
-                    j = 0;
-                    switch ((pass == 0) != dotted)
+                    m = this.ovz_s;
+                    switch (dotted) { case (true) { m = this.ovz_d; } default {}; };
+                    switch (!nm_has(m, key)) { case (true) { nm_put(m, key, tag); } default {}; };
+                    p = 1;
+                    while (p + 2 <= kl)
                     {
-                        case (true) { i++; continue; }
-                        default
+                        switch (key[p] == '_' & key[p + 1] == '_')
                         {
-                            switch (cstr_eq(key, name) | (kl > nl + 2 & cstr_eq(key + (kl - nl), name) & key[kl - nl - 1] == '_' & key[kl - nl - 2] == '_'))
-                            {
-                                case (true) {
-                                list = (PtrVec*)this.st.overloads.vals[i];
-                                while (j < list.len)
-                                {
-                                    oc = (Overload*)list.items[j];
-                                    switch (oc.nparams == 0 & !this.is_ext_fn(oc.func)) { case (true) { -> true; } default {}; };
-                                    j++;
-                                };
-                                -> false;
+                            case (true) {
+                                switch (!nm_has(m, key + (p + 2))) { case (true) { nm_put(m, key + (p + 2), tag); } default {}; };
                             }
-                                default
-                                {
-                                    i++;
-                                };
-                            };
+                            default {};
                         };
+                        p++;
                     };
                 };
-                pass++;
+                ->;
+            };
+
+            ptr_ovl_zero(byte* name) -> bool
+            {
+                int j, pass, k;
+                void* tag;
+                PtrVec* list;
+                Overload* oc;
+                this.ov_zero_sync();
+                // Object method keys are registered by the type pre-pass, before any function key
+                while (pass < 2)
+                {
+                    tag = nm_get(this.ovz_d, name);
+                    switch (pass == 1) { case (true) { tag = nm_get(this.ovz_s, name); } default {}; };
+                    switch (tag != (void*)0)
+                    {
+                        case (true) {
+                            k = (int)(i64)tag - 1;
+                            list = (PtrVec*)this.st.overloads.vals[k];
+                            j = 0;
+                            while (j < list.len)
+                            {
+                                oc = (Overload*)list.items[j];
+                                switch (oc.nparams == 0 & !this.is_ext_fn(oc.func)) { case (true) { -> true; } default {}; };
+                                j++;
+                            };
+                            -> false;
+                        }
+                        default {};
+                    };
+                    pass++;
                 };
                 -> false;
             };
@@ -10460,7 +10792,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 switch (lv == (LVar*)0)
                 {
                     case (true) {
-                    this.unsup(target, g"assign to non-local\0");
+                    this.unsup(target, this.name_msg(g"assign to a name that is not a local variable here: \0", target.text));
                     -> (IRValue*)0;
                 }
                     default
@@ -11396,7 +11728,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             };
                                                         }; };
                                                 };
-                                                -> this.mod.call_ex(f.self, args, argc + 1, (byte*)0, f.cconv, false);
+                                                IRValue* ocr = this.mod.call_ex(f.self, args, argc + 1, (byte*)0, f.cconv, false);
+                                                TypeSpec* ots = (TypeSpec*)nm_get(this.frspec, f.name);
+                                                if (ocr != (IRValue*)0 & ots != (TypeSpec*)0) { ocr.spec = ots; };
+                                                -> ocr;
                                             };
                                         };
                                     };
@@ -11577,7 +11912,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         };
                                                     };
                                                 };
-                                                -> this.mod.call_ex(f.self, args, argc + 1, (byte*)0, f.cconv, false);
+                                                IRValue* mcr = this.mod.call_ex(f.self, args, argc + 1, (byte*)0, f.cconv, false);
+                                                TypeSpec* mts = (TypeSpec*)nm_get(this.frspec, f.name);
+                                                if (mcr != (IRValue*)0 & mts != (TypeSpec*)0) { mcr.spec = mts; };
+                                                -> mcr;
                                             };
                                         };
                                     };
@@ -11604,16 +11942,31 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 switch (b.terminated)
                 {
                     case (true) {
-                    tl = b.lines.items[b.lines.len - 1];
-                    b.lines.len = b.lines.len - 1;
+                    tl = (void*)b;
                     b.terminated = false;
+                    // the terminator goes back out of the recorded instruction list
+                    b.popsi = (void*)0;
+                    switch (b.insts != (PtrVec*)0)
+                    {
+                        case (true) {
+                        switch (b.insts.len > 0)
+                        {
+                            case (true) {
+                            b.popsi = b.insts.items[b.insts.len - 1];
+                            b.insts.len = b.insts.len - 1;
+                        }
+                            default {};
+                        };
+                    }
+                        default {};
+                    };
                 }
                     default {};
                 };
                 -> tl;
             };
 
-            // Puts a popped terminator line back without renumbering
+            // Puts a popped terminator back
             push_term(IRBlock* b, void* tl) -> void
             {
                 switch (tl == (void*)0)
@@ -11621,8 +11974,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     case (true) { ->; }
                     default
                     {
-                        pv_push(b.lines, tl);
                         b.terminated = true;
+                        switch (b.popsi != (void*)0)
+                        {
+                            case (true) { pv_push(b.insts, b.popsi); b.popsi = (void*)0; }
+                            default {};
+                        };
                         ->;
                     };
                 };
@@ -13458,7 +13815,19 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 i64 sc, ec;
                 u64 full, mask, inv;
                 int w, swid, lsb;
-                switch (o.kind != NodeKind.IDENTIFIER)
+                Node* atmp;
+                bool viaaddr = false;
+                if (o.kind == NodeKind.MEMBER_ACCESS | o.kind == NodeKind.ARRAY_ACCESS)
+                {
+                    atmp = node_new(NodeKind.ADDRESS_OF, t.line, t.col);
+                    atmp.a = o;
+                    ptr = this.x_addrof(atmp);
+                    atmp.a = (Node*)0;
+                    node_free(atmp);
+                    if (this.bad | ptr == (IRValue*)0) { -> (IRValue*)0; };
+                    viaaddr = true;
+                };
+                switch (o.kind != NodeKind.IDENTIFIER & !viaaddr)
                 {
                     case (true) {
                     this.unsup(t, g"bit assignment target must be a simple variable\0");
@@ -13466,8 +13835,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 }
                     default
                     {
-                        lv = this.find_var(o.text);
-                        switch (lv == (LVar*)0)
+                        if (!viaaddr) { lv = this.find_var(o.text); };
+                        switch (!viaaddr & lv == (LVar*)0)
                         {
                             case (true) {
                             this.unsup(t, g"bit assignment to unknown variable\0");
@@ -13475,7 +13844,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         }
                             default
                             {
-                                ptr = lv.ptr;
+                                if (!viaaddr) { ptr = lv.ptr; };
                                 switch (ptr.ty.kind != LK.PTR)
                                 {
                                     case (true) {
@@ -13585,6 +13954,24 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 Node* t = n.a;
                 int tk = t.kind;
+                if (tk == NodeKind.BIT_POINTER_DEREF) { -> this.x_bitptr_assign(n); };
+                if (tk == NodeKind.IDENTIFIER & n.b.kind == NodeKind.ADDRESS_OF)
+                {
+                    if (n.b.a.kind == NodeKind.MEMBER_ACCESS | n.b.a.kind == NodeKind.ARRAY_ACCESS)
+                    {
+                        LVar* blv = this.find_var(t.text);
+                        if (blv != (LVar*)0)
+                        {
+                            if (blv.ptr.ty.kind == LK.PTR & this.bp_is_ty(blv.ptr.ty.elem))
+                            {
+                                IRValue* bpv = this.x_bitptr_member(n.b, blv.ptr.ty.elem);
+                                if (this.bad | bpv == (IRValue*)0) { -> (IRValue*)0; };
+                                this.mod.store(bpv, blv.ptr);
+                                -> bpv;
+                            };
+                        };
+                    };
+                };
                 IRValue* val;
                 switch (tk != NodeKind.IDENTIFIER & tk != NodeKind.MEMBER_ACCESS & tk != NodeKind.ARRAY_ACCESS &
                     tk != NodeKind.POINTER_DEREF & tk != NodeKind.BIT_SLICE & tk != NodeKind.BIT_INDEX_ACCESS)
@@ -14014,6 +14401,90 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+
+            // Forward bit slice with constant indices of a struct in memory. The slice reads the struct as the
+            // big-endian concatenation of its whole byte members (see bs_struct_buf), so each member the slice
+            // touches is loaded once and the wanted bytes are shifted into place; no staging buffer is built.
+            // Returns null when a touched member is not an integer of 8, 16, 32 or 64 bits or the slice is wider than 8 bytes.
+            bs_struct_slice(IRType* st, IRValue* sp, i64 sc, i64 ec) -> IRValue*
+            {
+                SInfo* si = this.sinfo_of(st);
+                int first = (int)(sc / (i64)8);
+                int last = (int)(ec / (i64)8);
+                int nb = last - first + 1;
+                int sw = (int)(ec - sc + (i64)1);
+                int i, off, nbf, bits, lo, hi, pb, shr, shl, shout;
+                IRType* ft;
+                IRType* wty;
+                IRValue* fp;
+                IRValue* fv;
+                IRValue* p;
+                IRValue* acc;
+                if (si == (SInfo*)0) { -> (IRValue*)0; };
+                if (nb > 8) { -> (IRValue*)0; };
+                // a first pass checks that every touched member can be read here
+                off = 0;
+                i = 0;
+                while (i < si.n)
+                {
+                    ft = si.ftys[i];
+                    bits = bits_of(ft);
+                    if (bits == 0) { bits = 8; };
+                    nbf = bits / 8;
+                    if (off + nbf > first & off <= last & nbf > 0)
+                    {
+                        if (ft.kind != LK.INT) { -> (IRValue*)0; };
+                        if (ft.width != 8 & ft.width != 16 & ft.width != 32 & ft.width != 64) { -> (IRValue*)0; };
+                    };
+                    off = off + nbf;
+                    i++;
+                };
+                if (off <= last) { -> (IRValue*)0; };
+                wty = this.mod.t_int(nb * 8);
+                acc = (IRValue*)0;
+                off = 0;
+                i = 0;
+                while (i < si.n)
+                {
+                    ft = si.ftys[i];
+                    bits = bits_of(ft);
+                    if (bits == 0) { bits = 8; };
+                    nbf = bits / 8;
+                    if (off + nbf > first & off <= last & nbf > 0)
+                    {
+                        lo = first - off;
+                        if (lo < 0) { lo = 0; };
+                        hi = last - off;
+                        if (hi > nbf - 1) { hi = nbf - 1; };
+                        this.mod.ia[0] = this.ci32(0);
+                        this.mod.ia[1] = this.ci32(i);
+                        fp = this.mod.gep(sp, this.mod.ia, 2, true, this.nm_ab(g"bs_sfptr_\0", i, -1));
+                        fv = this.mod.load(fp, this.nm_ab(g"bs_sfval_\0", i, -1));
+                        p = fv;
+                        shr = (nbf - 1 - hi) * 8;
+                        if (shr > 0) { p = this.mod.binop(g"lshr\0", p, this.mod.c_int(ft, (i64)shr), this.nm_ab(g"bs_sfsh_\0", i, -1)); };
+                        pb = (hi - lo + 1) * 8;
+                        if (pb < ft.width) { p = this.mod.cast(g"trunc\0", p, this.mod.t_int(pb), this.nm_ab(g"bs_sft_\0", i, -1)); };
+                        if (pb < nb * 8) { p = this.mod.cast(g"zext\0", p, wty, this.nm_ab(g"bs_sfz_\0", i, -1)); };
+                        shl = (last - (off + hi)) * 8;
+                        if (shl > 0) { p = this.mod.binop(g"shl\0", p, this.mod.c_int(wty, (i64)shl), this.nm_ab(g"bs_sfl_\0", i, -1)); };
+                        if (acc == (IRValue*)0) { acc = p; }
+                        else { acc = this.mod.binop(g"or\0", acc, p, this.nm_ab(g"bs_sfo_\0", i, -1)); };
+                    };
+                    off = off + nbf;
+                    i++;
+                };
+                if (acc == (IRValue*)0) { -> (IRValue*)0; };
+                shout = 7 - (int)(ec % (i64)8);
+                if (shout != 0) { acc = this.mod.binop(g"lshr\0", acc, this.mod.c_int(wty, (i64)shout), g"bs_sdown\0"); };
+                if (sw < wty.width)
+                {
+                    acc = this.mod.binop(g"and\0", acc, this.mod.c_int(wty, ((i64)1 << (i64)sw) - (i64)1), g"bs_smask\0");
+                    -> this.mod.cast(g"trunc\0", acc, this.mod.t_int(sw), g"bs_strunc\0");
+                };
+                -> acc;
+            };
+
             // visit_BitSlice
             // A bit slice is a run of raw bits, so its value is always unsigned
             x_bitslice(Node* n) -> IRValue*
@@ -14091,6 +14562,75 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 -> acc;
             };
 
+            // llvm.bitreverse of an integer value of 8, 16, 32 or 64 bits
+            bitrev(IRValue* v) -> IRValue*
+            {
+                IRFunc* f;
+                IRType** ps;
+                this.sc.clear();
+                this.sc.put_str(f"llvm.bitreverse.i{v.ty.width}\0");
+                ps = (IRType**)fmalloc((u64)2 * (u64)((sizeof(IRType*) + 7) / 8));
+                this.keep((void*)ps);
+                ps[0] = v.ty;
+                f = this.intrinsic(this.sc.mem, this.mod.t_func(v.ty, ps, 1, false));
+                this.mod.ia[0] = v;
+                -> this.mod.call(f.self, this.mod.ia, 1, g"bitrev\0");
+            };
+
+            // Bit slice of an integer value with constant indices: bit 0 is the most significant bit. A slice that runs
+            // forward is a shift and a truncation, one that runs backward is that number with its bits reversed.
+            // Returns null when the value or the indices are not of a form handled here.
+            bs_int_slice(IRValue* val, i64 sc, i64 ec) -> IRValue*
+            {
+                IRType* vt = val.ty;
+                IRType* wt;
+                IRValue* r;
+                int w = vt.width;
+                int nb, sh, bw;
+                bool std;
+                switch (vt.kind != LK.INT | w > 64) { case (true) { -> (IRValue*)0; } default {}; };
+                switch (!(w <= 8 | w % 8 == 0)) { case (true) { -> (IRValue*)0; } default {}; };
+                switch (sc < (i64)0 | ec < (i64)0 | sc >= (i64)w | ec >= (i64)w) { case (true) { -> (IRValue*)0; } default {}; };
+                r = val;
+                switch (sc <= ec)
+                {
+                    case (true) {
+                        nb = (int)(ec - sc) + 1;
+                        sh = w - 1 - (int)ec;
+                        switch (sh > 0) { case (true) { r = this.mod.binop(g"lshr\0", r, this.mod.c_int(vt, (i64)sh), g"bs_dn\0"); } default {}; };
+                        // bits in front of the slice are cleared before the narrowing, and the bits above a value whose
+                        // width is not a machine size are not known to be clear
+                        std = w == 8 | w == 16 | w == 32 | w == 64;
+                        switch (nb < w & (sc > (i64)0 | !std)) { case (true) { r = this.mod.binop(g"and\0", r, this.mod.c_int(vt, ((i64)1 << (i64)nb) - (i64)1), g"bs_fm\0"); } default {}; };
+                        switch (nb == w & !std) { case (true) { r = this.mod.binop(g"and\0", r, this.mod.c_int(vt, ((i64)1 << (i64)nb) - (i64)1), g"bs_fm\0"); } default {}; };
+                        switch (nb < w) { case (true) { r = this.mod.cast(g"trunc\0", r, this.mod.t_int(nb), g"bs_fw\0"); } default {}; };
+                        -> r;
+                    }
+                    default {};
+                };
+                nb = (int)(sc - ec) + 1;
+                sh = w - 1 - (int)sc;
+                bw = 8;
+                switch (nb > 8) { case (true) { bw = 16; } default {}; };
+                switch (nb > 16) { case (true) { bw = 32; } default {}; };
+                switch (nb > 32) { case (true) { bw = 64; } default {}; };
+                wt = this.mod.t_int(bw);
+                switch (sh > 0) { case (true) { r = this.mod.binop(g"lshr\0", r, this.mod.c_int(vt, (i64)sh), g"bs_dn\0"); } default {}; };
+                switch (w > bw) { case (true) { r = this.mod.cast(g"trunc\0", r, wt, g"bs_rv_t\0"); } default {}; };
+                switch (w < bw) { case (true) { r = this.mod.cast(g"zext\0", r, wt, g"bs_rv_z\0"); } default {}; };
+                switch (nb < bw) { case (true) { r = this.mod.binop(g"and\0", r, this.mod.c_int(wt, ((i64)1 << (i64)nb) - (i64)1), g"bs_rv_m\0"); } default {}; };
+                r = this.bitrev(r);
+                switch (nb < bw)
+                {
+                    case (true) {
+                        r = this.mod.binop(g"lshr\0", r, this.mod.c_int(wt, (i64)(bw - nb)), g"bs_rv_d\0");
+                        r = this.mod.cast(g"trunc\0", r, this.mod.t_int(nb), g"bs_rv_n\0");
+                    }
+                    default {};
+                };
+                -> r;
+            };
+
             x_bitslice_raw(Node* n) -> IRValue*
             {
                 IRValue* val = this.visit(n.a);
@@ -14129,6 +14669,46 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 vt = val.ty;
                                                 has_s = sv.is_const & this.parse_int_text(sv.text, @sc);
                                                 has_e = ev.is_const & this.parse_int_text(ev.text, @ec);
+                                                switch (has_s & has_e & vt.kind == LK.INT)
+                                                {
+                                                    case (true) {
+                                                    res = this.bs_int_slice(val, sc, ec);
+                                                    switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
+                                                }
+                                                    default {};
+                                                };
+                                                // Forward slice of a struct: read the touched members directly
+                                                switch (has_s & has_e & sc <= ec & sc >= (i64)0)
+                                                {
+                                                    case (true) {
+                                                    switch (vt.kind == LK.PTR)
+                                                    {
+                                                        case (true) {
+                                                        switch (vt.elem.kind == LK.STRUCT | vt.elem.kind == LK.ISTRUCT)
+                                                        {
+                                                            case (true) {
+                                                            res = this.bs_struct_slice(vt.elem, val, sc, ec);
+                                                            switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
+                                                        }
+                                                            default {};
+                                                        };
+                                                    }
+                                                        default {
+                                                            switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
+                                                            {
+                                                                case (true) {
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
+                                                                this.mod.store(val, tmp);
+                                                                res = this.bs_struct_slice(vt, tmp, sc, ec);
+                                                                switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
+                                                            }
+                                                                default {};
+                                                            };
+                                                        };
+                                                    };
+                                                }
+                                                    default {};
+                                                };
                                                 // Reverse bit slice
                                                 switch (has_s & has_e & sc > ec)
                                                 {
@@ -14925,6 +15505,23 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // T`* p = @s.field;
+            vardecl_bitptr(Node* n) -> IRValue*
+            {
+                TypeSpec* ts = n.ts;
+                IRType* lt = this.lower(ts, true, n.line);
+                IRValue* pv;
+                IRValue* alloca;
+                if (this.nerrors > this.body_errs) { this.unsup(n, g"variable type lowering\0"); -> (IRValue*)0; };
+                pv = this.x_bitptr_member(n.a, lt);
+                if (this.bad | pv == (IRValue*)0) { -> (IRValue*)0; };
+                alloca = this.mod.alloca(lt, n.text);
+                alloca.spec = ts;
+                this.mod.store(pv, alloca);
+                this.define_var(n.text, alloca, ts);
+                -> alloca;
+            };
+
             x_vardecl(Node* n) -> IRValue*
             {
                 TypeSpec* ts = n.ts;
@@ -14934,6 +15531,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Node* dimn;
                 IRValue* cv;
                 Node* ini = n.a;
+                if (ts != (TypeSpec*)0 & this.fn != (IRFunc*)0 & ini != (Node*)0)
+                {
+                    if ((ts.flags `& TS_BITPTR) != 0 & ini.kind == NodeKind.ADDRESS_OF)
+                    {
+                        if (ini.a.kind == NodeKind.MEMBER_ACCESS | ini.a.kind == NodeKind.ARRAY_ACCESS) { -> this.vardecl_bitptr(n); };
+                    };
+                };
                 switch (this.fn == (IRFunc*)0 | (n.flags `& NF_GLOBAL) != 0)
                 {
                     case (true) {
@@ -17629,6 +18233,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 }
                                     default
                                     {
+                                        if (incdec & this.bp_is(v)) { -> this.bp_incdec(n, v, op, post); };
                                         switch (incdec & opd.kind == NodeKind.IDENTIFIER)
                                         {
                                             case (true) {
@@ -17937,9 +18542,500 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // The bit pointer value of v: a variable may come back as its address
+            bp_value(IRValue* v, Node* n) -> IRValue*
+            {
+                if (v == (IRValue*)0) { this.unsup(n, g"void bit pointer\0"); -> (IRValue*)0; };
+                if (v.ty.kind == LK.PTR)
+                {
+                    if (v.ty.elem.kind == LK.STRUCT) { v = this.mod.load(v, g"bp_val\0"); };
+                };
+                if (v.ty.kind != LK.STRUCT)
+                {
+                    this.unsup(n, g"not a bit pointer\0");
+                    -> (IRValue*)0;
+                };
+                if (v.ty.nitems != 2) { this.unsup(n, g"not a bit pointer\0"); -> (IRValue*)0; };
+                if (v.ty.items[0].kind != LK.PTR | v.ty.items[1].kind != LK.INT)
+                {
+                    this.unsup(n, g"not a bit pointer\0");
+                    -> (IRValue*)0;
+                };
+                -> v;
+            };
+
+            // Element pointer, integer type and MSB first shift of the bit a bit pointer names. The index
+            // counts from the most significant bit of the integer at the origin and runs on into the next one.
+            bp_locate(IRValue* bp, Node* n) -> bool
+            {
+                IRValue* origin = this.mod.extractvalue(bp, 0, g"bp_origin\0");
+                IRValue* idx = this.mod.extractvalue(bp, 1, g"bp_index\0");
+                IRType* t = origin.ty.elem;
+                IRValue* el;
+                IRValue* bit;
+                IRValue* sh;
+                int w;
+                if (t.kind != LK.INT)
+                {
+                    this.unsup(n, g"a bit pointer must point into an integer\0");
+                    -> false;
+                };
+                w = t.width;
+                el = this.mod.binop(g"udiv\0", idx, this.mod.c_int(this.t_i64, (i64)w), g"bp_elem\0");
+                bit = this.mod.binop(g"urem\0", idx, this.mod.c_int(this.t_i64, (i64)w), g"bp_bit\0");
+                this.bpe = this.mod.gep_ptr(origin, el, true, g"bp_eptr\0");
+                sh = this.mod.binop(g"sub\0", this.mod.c_int(this.t_i64, (i64)(w - 1)), bit, g"bp_shift\0");
+                if (w < 64) { sh = this.mod.cast(g"trunc\0", sh, t, g"bp_shift_t\0"); };
+                this.bps = sh;
+                this.bpt = t;
+                -> true;
+            };
+
+            // Walks a member or element chain a.b[i].c: leaves the base struct pointer in bpe, the type reached
+            // in bpat (its layout in bpsi when it is a struct) and the run time part of the bit offset in bpdyn.
+            // Returns the constant bit offset or -1.
+            bp_walk(Node* m) -> int
+            {
+                Node* o = m.a;
+                Node* tmp;
+                IRValue* base;
+                IRValue* iv;
+                SInfo* si;
+                IRType* at;
+                int off = 0;
+                int idx;
+                int stride;
+                if (m.kind == NodeKind.ARRAY_ACCESS)
+                {
+                    if (o.kind != NodeKind.MEMBER_ACCESS & o.kind != NodeKind.ARRAY_ACCESS)
+                    {
+                        this.unsup(m, g"a bit pointer to an element needs a member array\0");
+                        -> 0 - 1;
+                    };
+                    off = this.bp_walk(o);
+                    if (off < 0 | this.bad) { -> 0 - 1; };
+                    at = this.bpat;
+                    if (at.kind != LK.ARRAY) { this.unsup(m, g"not an array\0"); -> 0 - 1; };
+                    stride = (bits_of(at.elem) + 7) / 8 * 8;
+                    iv = this.visit(m.b);
+                    if (this.bad | iv == (IRValue*)0) { -> 0 - 1; };
+                    if (iv.ty.kind != LK.INT) { this.unsup(m, g"element index must be an integer\0"); -> 0 - 1; };
+                    if (iv.ty.width < 64) { iv = this.mod.cast(g"sext\0", iv, this.t_i64, (byte*)0); };
+                    if (iv.ty.width > 64) { iv = this.mod.cast(g"trunc\0", iv, this.t_i64, (byte*)0); };
+                    iv = this.mod.binop(g"mul\0", iv, this.mod.c_int(this.t_i64, (i64)stride), (byte*)0);
+                    if (this.bpdyn != (IRValue*)0) { iv = this.mod.binop(g"add\0", this.bpdyn, iv, (byte*)0); };
+                    this.bpdyn = iv;
+                    this.bpat = at.elem;
+                    this.bpsi = (SInfo*)0;
+                    if (at.elem.kind == LK.STRUCT | at.elem.kind == LK.ISTRUCT) { this.bpsi = this.sinfo_of(at.elem); };
+                    -> off;
+                };
+                if (o.kind == NodeKind.MEMBER_ACCESS | o.kind == NodeKind.ARRAY_ACCESS)
+                {
+                    off = this.bp_walk(o);
+                    if (off < 0 | this.bad) { -> 0 - 1; };
+                    si = this.bpsi;
+                }
+                else
+                {
+                    tmp = node_new(NodeKind.ADDRESS_OF, m.line, m.col);
+                    tmp.a = o;
+                    base = this.x_addrof(tmp);
+                    tmp.a = (Node*)0;
+                    node_free(tmp);
+                    if (this.bad | base == (IRValue*)0) { -> 0 - 1; };
+                    if (!this.is_struct_ptr_ty(base.ty))
+                    {
+                        this.unsup(m, g"a bit pointer to a member needs a struct\0");
+                        -> 0 - 1;
+                    };
+                    this.bpe = base;
+                    si = this.sinfo_of(base.ty.elem);
+                };
+                if (si == (SInfo*)0)
+                {
+                    this.unsup(m, g"member of unnamed struct\0");
+                    -> 0 - 1;
+                };
+                idx = this.sidx(si, m.text);
+                if (idx < 0) { this.unsup(m, g"member not found\0"); -> 0 - 1; };
+                off = off + si.offs[idx];
+                this.bpat = si.ftys[idx];
+                this.bpsi = (SInfo*)0;
+                if (si.ftys[idx].kind == LK.STRUCT | si.ftys[idx].kind == LK.ISTRUCT) { this.bpsi = this.sinfo_of(si.ftys[idx]); };
+                -> off;
+            };
+
+            // @s.field, @s.arr[i].field as a bit pointer: (address of s, bit offset inside s)
+            x_bitptr_member(Node* n, IRType* want) -> IRValue*
+            {
+                int off;
+                IRValue* pair;
+                IRValue* iv;
+                this.bpdyn = (IRValue*)0;
+                off = this.bp_walk(n.a);
+                if (off < 0 | this.bad) { -> (IRValue*)0; };
+                if (this.bpe.ty != want.items[0] & !lt_eq(this.bpe.ty, want.items[0]))
+                {
+                    this.unsup(n, g"bit pointer origin type differs from the struct\0");
+                    -> (IRValue*)0;
+                };
+                iv = this.mod.c_int(this.t_i64, (i64)off);
+                if (this.bpdyn != (IRValue*)0) { iv = this.mod.binop(g"add\0", iv, this.bpdyn, (byte*)0); };
+                pair = this.mod.c_undef(want);
+                pair = this.mod.insertvalue(pair, this.bpe, 0, g"bp_o\0");
+                -> this.mod.insertvalue(pair, iv, 1, g"bp_i\0");
+            };
+
+            // The pointer reached from root by the member path (an element of member i when e is not null)
+            bp_ptr(IRValue* root, int* path, int plen, int i, IRValue* e, IRType* ft) -> IRValue*
+            {
+                IRValue* fp = root;
+                int k = 0;
+                while (k < plen)
+                {
+                    fp = this.mod.gep_field(fp, path[k], true, (byte*)0);
+                    k = k + 1;
+                };
+                fp = this.mod.gep_field(fp, i, true, (byte*)0);
+                if (e != (IRValue*)0)
+                {
+                    fp = this.mod.cast(g"bitcast\0", fp, this.ptr_of(ft), (byte*)0);
+                    fp = this.mod.gep_ptr(fp, e, true, (byte*)0);
+                };
+                -> fp;
+            };
+
+            // The bit at MSB first position sh of one scalar. A read stores the bit in slot, a write sets it
+            // from wv (an i1).
+            bp_leaf(IRValue* root, int* path, int plen, int i, IRValue* e, IRType* ft, IRValue* sh, IRValue* wv, IRValue* slot, IRBlock* done) -> void
+            {
+                IRValue* v;
+                IRValue* c;
+                IRValue* one = this.mod.c_int(this.t_i64, (i64)1);
+                IRType* it = ft;
+                int w = bits_of(ft);
+                v = this.mod.load(this.bp_ptr(root, path, plen, i, e, ft), g"bp_fld\0");
+                if (ft.kind != LK.INT)
+                {
+                    it = this.mod.t_int(w);
+                    v = this.mod.cast(g"bitcast\0", v, it, (byte*)0);
+                };
+                if (w < 64) { v = this.mod.cast(g"zext\0", v, this.t_i64, (byte*)0); };
+                if (wv == (IRValue*)0)
+                {
+                    v = this.mod.binop(g"and\0", this.mod.binop(g"lshr\0", v, sh, (byte*)0), one, (byte*)0);
+                    this.mod.store(this.mod.cast(g"trunc\0", v, this.t_i8, (byte*)0), slot);
+                }
+                else
+                {
+                    c = this.mod.binop(g"shl\0", one, sh, (byte*)0);
+                    v = this.mod.binop(g"and\0", v, this.mod.binop(g"xor\0", c, this.mod.c_int(this.t_i64, (i64)0 - (i64)1), (byte*)0), (byte*)0);
+                    v = this.mod.binop(g"or\0", v, this.mod.binop(g"shl\0", this.mod.cast(g"zext\0", wv, this.t_i64, (byte*)0), sh, (byte*)0), (byte*)0);
+                    if (w < 64) { v = this.mod.cast(g"trunc\0", v, it, (byte*)0); };
+                    if (ft.kind != LK.INT) { v = this.mod.cast(g"bitcast\0", v, ft, (byte*)0); };
+                    this.mod.store(v, this.bp_ptr(root, path, plen, i, e, ft));
+                };
+                this.mod.br(done);
+            };
+
+            // True for the scalar member types a bit pointer can reach
+            bp_scalar(IRType* t) -> bool -> t.kind == LK.INT | t.kind == LK.FLOAT | t.kind == LK.DOUBLE;
+
+            // One chain of blocks over the members of si, where idx is the bit index from the start of si: a
+            // member whose bit range holds idx gets a block that reaches the bit, anything else falls through.
+            // Reached from root through the member path. Ends with a branch to done.
+            bp_members(IRValue* root, int* path, int plen, SInfo* si, IRValue* idx, IRValue* wv, IRValue* slot, IRBlock* done) -> void
+            {
+                IRBlock* yes;
+                IRBlock* nxt;
+                IRValue* c;
+                IRValue* rel;
+                IRValue* sh;
+                IRValue* e;
+                IRValue* ep;
+                IRType* ft;
+                IRType* et;
+                SInfo* si2;
+                int* path2;
+                int w, off, tot, stride, i, k;
+                i = 0;
+                while (i < si.n)
+                {
+                    ft = si.ftys[i];
+                    off = si.offs[i];
+                    tot = 0;
+                    w = 0;
+                    stride = 0;
+                    si2 = (SInfo*)0;
+                    et = ft;
+                    if (this.bp_scalar(ft) & bits_of(ft) <= 64) { w = bits_of(ft); tot = w; };
+                    if (ft.kind == LK.STRUCT | ft.kind == LK.ISTRUCT)
+                    {
+                        si2 = this.sinfo_of(ft);
+                        if (si2 != (SInfo*)0) { tot = bits_of(ft); };
+                    };
+                    if (ft.kind == LK.ARRAY & off % 8 == 0)
+                    {
+                        et = ft.elem;
+                        stride = (bits_of(et) + 7) / 8 * 8;
+                        if (this.bp_scalar(et))
+                        {
+                            w = bits_of(et);
+                            if (w == 8 | w == 16 | w == 32 | w == 64) { tot = w * ft.count; };
+                        };
+                        if (et.kind == LK.STRUCT | et.kind == LK.ISTRUCT)
+                        {
+                            si2 = this.sinfo_of(et);
+                            if (si2 != (SInfo*)0) { tot = stride * ft.count; };
+                        };
+                        if (tot == 0) { stride = 0; };
+                    };
+                    if (tot > 0)
+                    {
+                        c = this.mod.binop(g"and\0",
+                            this.mod.icmp(g"uge\0", idx, this.mod.c_int(this.t_i64, (i64)off), (byte*)0),
+                            this.mod.icmp(g"ult\0", idx, this.mod.c_int(this.t_i64, (i64)(off + tot)), (byte*)0), (byte*)0);
+                        yes = this.mod.append_block(this.fn, g"bp_member\0");
+                        nxt = this.mod.append_block(this.fn, g"bp_next\0");
+                        this.mod.cbr(c, yes, nxt);
+                        this.mod.position(this.fn, yes);
+                        rel = this.mod.binop(g"sub\0", idx, this.mod.c_int(this.t_i64, (i64)off), (byte*)0);
+                        if (stride > 0)
+                        {
+                            e = this.mod.binop(g"udiv\0", rel, this.mod.c_int(this.t_i64, (i64)stride), (byte*)0);
+                            rel = this.mod.binop(g"urem\0", rel, this.mod.c_int(this.t_i64, (i64)stride), (byte*)0);
+                            if (si2 != (SInfo*)0)
+                            {
+                                ep = this.bp_ptr(root, path, plen, i, e, et);
+                                this.bp_members(ep, path, 0, si2, rel, wv, slot, done);
+                            }
+                            else
+                            {
+                                sh = this.mod.binop(g"sub\0", this.mod.c_int(this.t_i64, (i64)(w - 1)), rel, (byte*)0);
+                                this.bp_leaf(root, path, plen, i, e, et, sh, wv, slot, done);
+                            };
+                        }
+                        else
+                        {
+                            if (si2 != (SInfo*)0)
+                            {
+                                path2 = (int*)fmalloc((u64)(plen + 1) * (u64)((sizeof(int) + 7) / 8));
+                                this.keep((void*)path2);
+                                k = 0;
+                                while (k < plen) { path2[k] = path[k]; k = k + 1; };
+                                path2[plen] = i;
+                                this.bp_members(root, path2, plen + 1, si2, rel, wv, slot, done);
+                            }
+                            else
+                            {
+                                sh = this.mod.binop(g"sub\0", this.mod.c_int(this.t_i64, (i64)(w - 1)), rel, (byte*)0);
+                                this.bp_leaf(root, path, plen, i, (IRValue*)0, ft, sh, wv, slot, done);
+                            };
+                        };
+                        this.mod.position(this.fn, nxt);
+                    };
+                    i = i + 1;
+                };
+                this.mod.br(done);
+            };
+
+            // The bit of a struct origin bit pointer. Reads yield the bit (MSB first within the member value);
+            // a write sets it from wv (an i1).
+            bp_struct(IRValue* bp, IRValue* wv, Node* n) -> IRValue*
+            {
+                IRValue* origin = this.mod.extractvalue(bp, 0, g"bp_origin\0");
+                IRValue* idx = this.mod.extractvalue(bp, 1, g"bp_index\0");
+                SInfo* si = this.sinfo_of(origin.ty.elem);
+                IRValue* slot = this.mod.alloca(this.t_i8, (byte*)0);
+                IRBlock* done = this.mod.append_block(this.fn, g"bp_done\0");
+                if (si == (SInfo*)0) { this.unsup(n, g"bit pointer into unnamed struct\0"); -> (IRValue*)0; };
+                this.mod.store(this.mod.c_int(this.t_i8, (i64)0), slot);
+                this.bp_members(origin, (int*)0, 0, si, idx, wv, slot, done);
+                this.mod.position(this.fn, done);
+                -> this.mod.load(slot, g"bp_bit\0");
+            };
+
+            // A bit pointer type is the literal pair (pointer, u64 index)
+            bp_is_ty(IRType* t) -> bool
+            {
+                if (t.kind != LK.STRUCT) { -> false; };
+                if (t.nitems != 2) { -> false; };
+                -> t.items[0].kind == LK.PTR & t.items[1].kind == LK.INT & t.items[1].width == 64;
+            };
+
+            // True for a bit pointer value or the address of one
+            bp_is(IRValue* v) -> bool
+            {
+                if (v == (IRValue*)0) { -> false; };
+                if (this.bp_is_ty(v.ty)) { -> true; };
+                if (v.ty.kind == LK.PTR) { -> this.bp_is_ty(v.ty.elem); };
+                -> false;
+            };
+
+            bp_norm(IRValue* v) -> IRValue*
+            {
+                if (v.ty.kind == LK.PTR) { -> this.mod.load(v, g"bp_val\0"); };
+                -> v;
+            };
+
+            // The bit index of a bit pointer, as a u64
+            bp_idx(IRValue* v) -> IRValue* -> this.mod.extractvalue(this.bp_norm(v), 1, g"bp_index\0");
+
+            // px++ px-- ++px --px
+            bp_incdec(Node* n, IRValue* v, int op, bool post) -> IRValue*
+            {
+                LVar* lv;
+                IRValue* old;
+                IRValue* nv;
+                if (n.a.kind != NodeKind.IDENTIFIER) { this.unsup(n, g"increment of a bit pointer expression\0"); -> (IRValue*)0; };
+                lv = this.find_var(n.a.text);
+                if (lv == (LVar*)0) { this.unsup(n, g"increment of a bit pointer expression\0"); -> (IRValue*)0; };
+                old = this.bp_norm(v);
+                if (op == Operator.INCREMENT) { nv = this.bp_step(old, this.mod.c_int(this.t_i64, (i64)1), Operator.ADD); };
+                if (op == Operator.DECREMENT) { nv = this.bp_step(old, this.mod.c_int(this.t_i64, (i64)1), Operator.SUB); };
+                this.mod.store(nv, lv.ptr);
+                if (post) { -> old; };
+                -> nv;
+            };
+
+            // p + n and p - n move the index
+            bp_step(IRValue* v, IRValue* k, int op) -> IRValue*
+            {
+                IRValue* bp = this.bp_norm(v);
+                IRValue* i = this.mod.extractvalue(bp, 1, g"bp_index\0");
+                if (k.ty.width < 64) { k = this.mod.cast(g"sext\0", k, this.t_i64, (byte*)0); };
+                if (k.ty.width > 64) { k = this.mod.cast(g"trunc\0", k, this.t_i64, (byte*)0); };
+                if (op == Operator.ADD) { i = this.mod.binop(g"add\0", i, k, g"bp_add\0"); };
+                if (op == Operator.SUB) { i = this.mod.binop(g"sub\0", i, k, g"bp_sub\0"); };
+                -> this.mod.insertvalue(bp, i, 1, g"bp_moved\0");
+            };
+
+            // Casts from a bit pointer: to an integer gives the index, to a byte pointer the address of the
+            // byte holding the bit, to another bit pointer retypes the origin
+            bp_cast(IRValue* v, IRType* tt, Node* n) -> IRValue*
+            {
+                IRValue* bp = this.bp_norm(v);
+                IRValue* o = this.mod.extractvalue(bp, 0, g"bp_origin\0");
+                IRValue* i = this.mod.extractvalue(bp, 1, g"bp_index\0");
+                IRValue* b;
+                IRValue* pair;
+                if (tt.kind == LK.INT)
+                {
+                    if (tt.width < 64) { -> this.mod.cast(g"trunc\0", i, tt, g"bp_to_int\0"); };
+                    if (tt.width > 64) { -> this.mod.cast(g"zext\0", i, tt, g"bp_to_int\0"); };
+                    -> i;
+                };
+                if (tt.kind == LK.PTR)
+                {
+                    b = this.mod.cast(g"bitcast\0", o, this.t_i8p, g"bp_bytes\0");
+                    b = this.mod.gep_ptr(b, this.mod.binop(g"lshr\0", i, this.mod.c_int(this.t_i64, (i64)3), (byte*)0), true, g"bp_byte\0");
+                    if (lt_eq(tt, this.t_i8p)) { -> b; };
+                    -> this.mod.cast(g"bitcast\0", b, tt, g"bp_to_ptr\0");
+                };
+                if (this.bp_is_ty(tt))
+                {
+                    if (!lt_eq(o.ty, tt.items[0])) { o = this.mod.cast(g"bitcast\0", o, tt.items[0], g"bp_retype\0"); };
+                    pair = this.mod.c_undef(tt);
+                    pair = this.mod.insertvalue(pair, o, 0, g"bp_o\0");
+                    -> this.mod.insertvalue(pair, i, 1, g"bp_i\0");
+                };
+                this.unsup(n, g"cast of a bit pointer\0");
+                -> (IRValue*)0;
+            };
+
+            // A pointer cast to a bit pointer: bit 0 of the object it points at
+            bp_from_ptr(IRValue* v, IRType* tt) -> IRValue*
+            {
+                IRValue* pair = this.mod.c_undef(tt);
+                if (!lt_eq(v.ty, tt.items[0])) { v = this.mod.cast(g"bitcast\0", v, tt.items[0], g"bp_retype\0"); };
+                pair = this.mod.insertvalue(pair, v, 0, g"bp_o\0");
+                -> this.mod.insertvalue(pair, this.mod.c_int(this.t_i64, (i64)0), 1, g"bp_i\0");
+            };
+
+            // `*p: the bit as an i8
+            x_bitptr_deref(Node* n) -> IRValue*
+            {
+                IRValue* bp = this.bp_value(this.visit(n.a), n);
+                IRValue* v;
+                IRValue* b;
+                if (this.bad | bp == (IRValue*)0) { -> (IRValue*)0; };
+                if (bp.ty.items[0].elem.kind == LK.STRUCT | bp.ty.items[0].elem.kind == LK.ISTRUCT) { -> this.bp_struct(bp, (IRValue*)0, n); };
+                if (!this.bp_locate(bp, n)) { -> (IRValue*)0; };
+                v = this.mod.load(this.bpe, g"bp_load\0");
+                b = this.mod.binop(g"and\0", this.mod.binop(g"lshr\0", v, this.bps, g"bp_shr\0"), this.mod.c_int(this.bpt, (i64)1), g"bp_and\0");
+                if (this.bpt.width > 8) { -> this.mod.cast(g"trunc\0", b, this.t_i8, g"bp_bit8\0"); };
+                if (this.bpt.width < 8) { -> this.mod.cast(g"zext\0", b, this.t_i8, g"bp_bit8\0"); };
+                -> b;
+            };
+
+            // `*p = v: sets the bit to whether v is not zero, the other bits stay
+            x_bitptr_assign(Node* n) -> IRValue*
+            {
+                IRValue* bp = this.bp_value(this.visit(n.a.a), n);
+                IRValue* val;
+                IRValue* old;
+                IRValue* mask;
+                IRValue* nz;
+                IRValue* nb;
+                IRValue* res;
+                if (this.bad | bp == (IRValue*)0) { -> (IRValue*)0; };
+                val = this.visit(n.b);
+                if (this.bad) { -> (IRValue*)0; };
+                if (val == (IRValue*)0) { this.unsup(n, g"void assignment value\0"); -> (IRValue*)0; };
+                if (val.ty.kind != LK.INT) { this.unsup(n, g"a bit can only be assigned an integer\0"); -> (IRValue*)0; };
+                if (bp.ty.items[0].elem.kind == LK.STRUCT | bp.ty.items[0].elem.kind == LK.ISTRUCT)
+                {
+                    this.bp_struct(bp, this.mod.icmp(g"ne\0", val, this.mod.c_int(val.ty, (i64)0), (byte*)0), n);
+                    -> val;
+                };
+                if (!this.bp_locate(bp, n)) { -> (IRValue*)0; };
+                old = this.mod.load(this.bpe, g"bp_old\0");
+                mask = this.mod.binop(g"shl\0", this.mod.c_int(this.bpt, (i64)1), this.bps, g"bp_mask\0");
+                old = this.mod.binop(g"and\0", old, this.mod.binop(g"xor\0", mask, this.mod.c_int(this.bpt, (i64)0 - (i64)1), (byte*)0), g"bp_clr\0");
+                nz = this.mod.icmp(g"ne\0", val, this.mod.c_int(val.ty, (i64)0), g"bp_nz\0");
+                nb = nz;
+                if (this.bpt.width > 1) { nb = this.mod.cast(g"zext\0", nz, this.bpt, g"bp_nz_t\0"); };
+                res = this.mod.binop(g"or\0", old, this.mod.binop(g"shl\0", nb, this.bps, g"bp_new\0"), g"bp_res\0");
+                this.mod.store(res, this.bpe);
+                -> val;
+            };
+
+            // @x[`n]: the bit pointer (address of x, bit index n)
+            x_bitptr_addr(Node* n) -> IRValue*
+            {
+                Node* e = n.a;
+                Node* tmp = node_new(NodeKind.ADDRESS_OF, n.line, n.col);
+                IRValue* origin;
+                IRValue* iv;
+                IRValue* pair;
+                IRType** it;
+                tmp.a = e.a;
+                origin = this.x_addrof(tmp);
+                tmp.a = (Node*)0;
+                node_free(tmp);
+                if (this.bad | origin == (IRValue*)0) { -> (IRValue*)0; };
+                iv = this.visit(e.b);
+                if (this.bad) { -> (IRValue*)0; };
+                if (iv == (IRValue*)0) { this.unsup(n, g"void bit index\0"); -> (IRValue*)0; };
+                if (iv.ty.kind != LK.INT) { this.unsup(n, g"bit index must be an integer\0"); -> (IRValue*)0; };
+                if (iv.ty.width < 64) { iv = this.mod.cast(g"zext\0", iv, this.t_i64, g"bp_idx_ext\0"); };
+                if (iv.ty.width > 64) { iv = this.mod.cast(g"trunc\0", iv, this.t_i64, g"bp_idx_trunc\0"); };
+                if (origin.ty.kind != LK.PTR) { this.unsup(n, g"bit pointer origin\0"); -> (IRValue*)0; };
+                if (origin.ty.elem.kind != LK.INT) { this.unsup(n, g"a bit pointer must point into an integer\0"); -> (IRValue*)0; };
+                it = (IRType**)fmalloc((u64)2 * (u64)((sizeof(IRType*) + 7) / 8));
+                this.keep((void*)it);
+                it[0] = origin.ty;
+                it[1] = this.t_i64;
+                pair = this.mod.c_undef(this.mod.t_struct(it, 2));
+                pair = this.mod.insertvalue(pair, origin, 0, g"bp_o\0");
+                -> this.mod.insertvalue(pair, iv, 1, g"bp_i\0");
+            };
+
             x_addrof(Node* n) -> IRValue*
             {
                 Node* e = n.a;
+                if (e.kind == NodeKind.BIT_INDEX_ACCESS) { -> this.x_bitptr_addr(n); };
                 IRValue* v, tmp, fv;
                 LVar* lv;
                 switch (e.kind == NodeKind.LITERAL)
@@ -18502,6 +19598,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     default
                                                     {
                                                         st = v.ty;
+                                                        if (this.bp_is(v)) { -> this.bp_cast(v, tt, n); };
+                                                        if (this.bp_is_ty(tt) & st.kind == LK.PTR) { -> this.bp_from_ptr(v, tt); };
                                                         switch (lt_eq(st, tt))
                                                         {
                                                             case (true) {
@@ -22028,6 +23126,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             default
                             {
                                 k = n.kind;
+                                if (k == NodeKind.BIT_POINTER_DEREF) { -> this.x_bitptr_deref(n); };
                                 switch (k == NodeKind.COMPTIME_BLOCK | k == NodeKind.EMIT_IDEKA | k == NodeKind.IDEKAVM_BLOCK)
                                 {
                                     case (true) { -> this.ct_visit(n); }
@@ -22689,6 +23788,17 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             slot = this.mod.alloca(a.ty, this.sc.mem);
                             slot.spec = p.ts;
                             a.spec = p.ts;
+                            switch (p.ts != (TypeSpec*)0 & a.ty.kind == LK.PTR)
+                            {
+                                case (true) {
+                                    switch ((p.ts.flags `& TS_TIED) != 0)
+                                    {
+                                        case (true) { a.flags = a.flags `| VF_NOALIAS; }
+                                        default {};
+                                    };
+                                }
+                                default {};
+                            };
                             this.mod.store(a, slot);
                             this.define_var(pname, slot, p.ts);
                             switch (p.ts != (TypeSpec*)0)
@@ -22735,7 +23845,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                     this.mod.ret_void();
                                                 }
                                                 default {
-                                                    switch (this.mod.cur_block().lines.len == 0)
+                                                    bool emp = true;
+                                                    switch (this.mod.cur_block().insts != (PtrVec*)0)
+                                                    {
+                                                        case (true) { emp = this.mod.cur_block().insts.len == 0; }
+                                                        default {};
+                                                    };
+                                                    switch (emp)
                                                     {
                                                         case (true) { this.mod.unreachable(); }
                                                         default { this.unsup(fd, g"function must end with return\0"); };
@@ -23727,6 +24843,41 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 ->;
             };
 
+            // Emitted text is parsed on its own, so its nodes carry the line of that text. The passes that
+            // follow order the functions by line, so the nodes take the line of the block that emitted them.
+            ct_relocate(Node* n, int line) -> void
+            {
+                int s, i;
+                NodeVec* v;
+                if (n == (Node*)0) { ->; };
+                n.line = line;
+                this.ct_relocate(n.a, line);
+                this.ct_relocate(n.b, line);
+                this.ct_relocate(n.c, line);
+                this.ct_relocate(n.d, line);
+                this.ct_relocate(n.e, line);
+                while (s < 6)
+                {
+                    if (s == 0) { v = n.l0; }
+                    elif (s == 1) { v = n.l1; }
+                    elif (s == 2) { v = n.l2; }
+                    elif (s == 3) { v = n.l3; }
+                    elif (s == 4) { v = n.l4; }
+                    else { v = n.l5; };
+                    if (v != (NodeVec*)0)
+                    {
+                        i = 0;
+                        while (i < v.len)
+                        {
+                            this.ct_relocate(v.items[i], line);
+                            i++;
+                        };
+                    };
+                    s++;
+                };
+                ->;
+            };
+
             // Parses emitted text with a fresh lexer and parser, as the base compiler does, and
             // appends its statements to out. The lexer and parser live until the code generator ends.
             ct_parse(Node* at, byte* text, PtrVec* out) -> bool
@@ -23739,6 +24890,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 Buf eb;
                 FvmBuf mb;
                 int k;
+                int first = out.len;
                 this.keep((void*)t);
                 sl.__init(t, n);
                 pv_push(this.ct_lex, (void*)sl);
@@ -23766,6 +24918,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         k++;
                     };
                     sp.pending.len = 0;
+                };
+                k = first;
+                while (k < out.len)
+                {
+                    this.ct_relocate((Node*)out.items[k], at.line);
+                    k++;
                 };
                 if (sp.failed)
                 {
@@ -24235,6 +25393,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 pv_push(this.ct_cgs, (void*)c);
                 c.lay_copy_from(@vm.layouts);
                 c.pstmts = this.ct_pstmts;
+    // only the program before this block is visible to it
+    i = 0;
+    while (this.ct_pstmts != (NodeVec*)0 & i < this.ct_pstmts.len)
+    {
+        if (this.ct_pstmts.items[i] == n) { c.pbound = i; };
+        i++;
+    };
                 i = 0;
                 while (i < this.ct_enums.len)
                 {
@@ -24564,12 +25729,15 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 i = 0;
                 standard::io::console::println(g"[AST] Begining codegen for IDEKA program ...\0");
+                standard::io::console::flush();
                 standard::io::console::print(g"[AST] Total statements in AST: \0");
                 standard::io::console::println(n);
                 standard::io::console::print(g"[AST] Namespace definitions: \0");
                 standard::io::console::println(nns);
                 standard::io::console::println(g"[AST] Pass 1: Processing using statements...\0");
+                standard::io::console::flush();
                 standard::io::console::println(g"[AST] Pass 2: Processing not using statements...\0");
+                standard::io::console::flush();
                 while (i < n)
                 {
                     s = node_child(prog, 0, i);
@@ -24586,6 +25754,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 n = node_count(prog, 0);
                 i = 0;
                 standard::io::console::println(g"[AST] Pre-pass: Registering all object types and extern blocks...\0");
+                standard::io::console::flush();
                 while (i < n)
                 {
                     this.collect_consts(node_child(prog, 0, i), root);
@@ -24649,6 +25818,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 i = 0;
                 standard::io::console::println(g"[AST] Pass 3: Processing all other statements...\0");
+                standard::io::console::flush();
                 while (i < n)
                 {
                     this.cur_stmt = i;
@@ -24684,6 +25854,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 ffree(root);
                 standard::io::console::println(g"[AST] Pass 4: Re-emitting pending bodies...\0");
+                standard::io::console::flush();
                 this.ct_finish();
                 -> this.main_stubs();
             };

@@ -449,6 +449,12 @@ class PointerDeref(Expression):
     pointer: Expression
 
 
+@dataclass
+class BitPointerDeref(Expression):
+    """`*p: the single bit a bit pointer points to"""
+    pointer: Expression
+
+
 
 @dataclass
 class AddressOf(Expression):
@@ -1173,10 +1179,11 @@ class StructDef(ASTNode):
     vtable: Optional[StructVTable] = None
     template_params: List[str] = field(default_factory=list)
     comptime_blocks: List = field(default_factory=list)  # (insert_index, ComptimeBlock) pairs
+    is_c_layout: bool = False  # cstruct: C ABI layout
     
     def calculate_vtable(self, module) -> 'StructVTable':
             """Calculate struct layout and generate TLD."""
-            vtable = StructTypeHandler.calculate_vtable(self.members, module)
+            vtable = StructTypeHandler.calculate_vtable(self.members, module, self.is_c_layout)
             vtable.struct_name = self.name
             #print(f"DEBUG calculate_vtable: Created vtable for '{self.name}' with field_types={vtable.field_types}")
             return vtable

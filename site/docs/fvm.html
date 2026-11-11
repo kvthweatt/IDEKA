@@ -1,0 +1,1388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fvm - IDEKA Documentation</title>
+<meta name="description" content="IDEKA programming language documentation: Fvm">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400..800&display=swap" rel="stylesheet">
+<style>
+:root {
+    --black:    #050608;
+    --dark:     #080a0f;
+    --panel:    #0b0e16;
+    --border:   #0f1520;
+    --border2:  #1a2235;
+    --blue:     #00aaff;
+    --blue-dim: #0066bb;
+    --blue-glow:#00aaff44;
+    --blue-soft:#00aaff12;
+    --text:     #c8d4e8;
+    --text-dim: #5a6880;
+    --text-mute:#2a3445;
+    --mono:     'Space Mono', monospace;
+    --sans:     'DM Sans', sans-serif;
+    --display:  'Syne', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: var(--black);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 0 40px; }
+
+/* Nav */
+nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    height: 64px;
+    padding: 0 40px;
+    background: rgba(5,6,8,0.92);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    gap: 32px;
+}
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    flex-shrink: 0;
+}
+.nav-logo-mark { width: 26px; height: 26px; }
+.nav-logo-text {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.06em;
+}
+.nav-links {
+    display: flex;
+    list-style: none;
+    gap: 28px;
+}
+.nav-links a {
+    font-size: 13px;
+    color: var(--text-dim);
+    text-decoration: none;
+    letter-spacing: 0.02em;
+    transition: color 0.15s;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-spacer { flex: 1; }
+.nav-cta {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--blue);
+    background: transparent;
+    border: 1px solid var(--blue-dim);
+    padding: 7px 16px;
+    border-radius: 2px;
+    text-decoration: none;
+    transition: background 0.2s, box-shadow 0.2s;
+}
+.nav-cta:hover {
+    background: var(--blue-soft);
+    box-shadow: 0 0 20px var(--blue-glow);
+    text-decoration: none;
+}
+.nav-hamburger {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    width: 36px; height: 36px;
+    padding: 6px;
+    background: none; border: none;
+    cursor: pointer; flex-shrink: 0;
+}
+.nav-hamburger span {
+    display: block; height: 1.5px;
+    background: var(--text-dim); border-radius: 2px;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+    transform-origin: center;
+}
+.nav-hamburger.open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); background: var(--text); }
+.nav-hamburger.open span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+.nav-hamburger.open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); background: var(--text); }
+.nav-mobile-menu {
+    display: none;
+    flex-direction: column;
+    position: fixed;
+    top: 64px; left: 0; right: 0;
+    background: rgba(5,6,8,0.97);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border2);
+    z-index: 99;
+    transform: translateY(-8px); opacity: 0;
+    pointer-events: none;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+}
+.nav-mobile-menu.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
+.nav-mobile-link {
+    display: flex; align-items: center;
+    padding: 16px 24px; font-size: 13px; font-weight: 500;
+    color: var(--text-dim); text-decoration: none;
+    border-bottom: 1px solid var(--border);
+    transition: color 0.15s, background 0.15s;
+}
+.nav-mobile-link:last-child { border-bottom: none; }
+.nav-mobile-link:active { background: var(--panel); color: var(--text); }
+.nav-mobile-link.cta {
+    color: var(--blue); font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+
+/* Footer */
+footer {
+    border-top: 1px solid var(--border);
+    padding: 28px 0;
+    background: var(--dark);
+}
+.footer-inner {
+    display: flex; align-items: center; gap: 20px;
+    max-width: 1200px; margin: 0 auto; padding: 0 40px;
+}
+.footer-logo { text-decoration: none; }
+.footer-sep {
+    width: 1px; height: 18px;
+    background: var(--border2);
+}
+.footer-copy { font-size: 12px; color: var(--text-mute); }
+.footer-links {
+    display: flex; gap: 20px; margin-left: auto;
+}
+.footer-links a {
+    font-size: 12px; color: var(--text-mute);
+    text-decoration: none; transition: color 0.15s;
+}
+.footer-links a:hover { color: var(--text); }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: var(--black); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+@media (max-width: 900px) {
+    nav { padding: 0 20px; gap: 16px; }
+    .nav-links { display: none; }
+    .nav-hamburger { display: flex; }
+    .nav-mobile-menu { display: flex; }
+    .footer-inner { padding: 0 20px; flex-wrap: wrap; gap: 12px; }
+    .footer-sep { display: none; }
+    .footer-links { margin-left: 0; }
+}
+
+
+/* ── Doc page layout ─────────────────────────────────────────────────── */
+.doc-layout {
+    display: flex;
+    min-height: calc(100vh - 64px);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px;
+    gap: 0;
+}
+
+.doc-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 64px;
+    height: calc(100vh - 64px);
+    overflow-y: auto;
+    padding: 32px 0 32px 0;
+    border-right: 1px solid var(--border);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border2) transparent;
+}
+
+.doc-sidebar::-webkit-scrollbar { width: 3px; }
+.doc-sidebar::-webkit-scrollbar-thumb { background: var(--border2); }
+
+.doc-sidebar-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    padding: 0 24px;
+    margin-bottom: 12px;
+}
+
+.doc-toc-link {
+    display: block;
+    padding: 4px 24px;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-decoration: none;
+    line-height: 1.5;
+    transition: color 0.15s;
+    border-left: 2px solid transparent;
+}
+.doc-toc-link:hover { color: var(--text); }
+.doc-toc-link.active { color: var(--blue); border-left-color: var(--blue); }
+.doc-toc-link.toc-h1 { padding-left: 24px; font-weight: 600; color: var(--text); font-size: 12px; }
+.doc-toc-link.toc-h2 { padding-left: 24px; }
+.doc-toc-link.toc-h3 { padding-left: 38px; font-size: 11px; }
+.doc-toc-link.toc-h4 { padding-left: 52px; font-size: 11px; color: var(--text-mute); }
+
+.doc-content {
+    flex: 1;
+    min-width: 0;
+    padding: 40px 0 80px 48px;
+    max-width: 860px;
+}
+
+/* ── Doc typography ──────────────────────────────────────────────────── */
+.doc-h1 {
+    font-family: var(--display);
+    font-size: clamp(26px, 4vw, 36px);
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.02em;
+    margin: 0 0 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border2);
+}
+.doc-h2 {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.02em;
+    margin: 40px 0 12px;
+    padding-top: 8px;
+}
+.doc-h3 {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.04em;
+    margin: 28px 0 8px;
+}
+.doc-h4 {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    margin: 20px 0 6px;
+    text-transform: uppercase;
+}
+.doc-h5, .doc-h6 {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    margin: 16px 0 4px;
+}
+
+.doc-p {
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+}
+
+.doc-p code, .doc-ul code, .doc-ol code, li code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--blue);
+    background: var(--blue-soft);
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+
+.doc-ul, .doc-ol {
+    margin: 0 0 14px 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.doc-hr {
+    border: none;
+    border-top: 1px solid var(--border2);
+    margin: 32px 0;
+}
+
+.doc-blockquote {
+    border-left: 3px solid var(--blue-dim);
+    padding: 8px 16px;
+    margin: 16px 0;
+    background: var(--blue-soft);
+    color: var(--text-dim);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.doc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--mono);
+    margin: 16px 0 24px;
+}
+.doc-table th {
+    background: var(--dark);
+    color: var(--blue);
+    padding: 8px 12px;
+    text-align: left;
+    border: 1px solid var(--border2);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.doc-table td {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    vertical-align: top;
+}
+.doc-table tr:nth-child(even) td { background: var(--dark); }
+
+/* ── Code blocks ─────────────────────────────────────────────────────── */
+.doc-code-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 12px 0 20px;
+}
+.doc-code-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--dark);
+    border-bottom: 1px solid var(--border);
+}
+.code-dot { width: 9px; height: 9px; border-radius: 50%; }
+.code-dot-r { background: #3a1c1c; }
+.code-dot-y { background: #2e2a12; }
+.code-dot-g { background: #122e18; }
+.code-lang {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-mute);
+    margin-left: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.doc-pre {
+    margin: 0;
+    padding: 18px 22px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text);
+    overflow-x: auto;
+    background: transparent;
+}
+.doc-pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+/* ── Syntax highlight spans ──────────────────────────────────────────── */
+.ck-kw  { color: #00aaff; font-weight: 700; }
+.ck-ty  { color: #68c4e8; }
+.ck-str { color: #7ec68a; }
+.ck-num { color: #c0956e; }
+.ck-cmt { color: #3a4a5a; font-style: italic; }
+.ck-pp  { color: #a07bd0; }
+
+/* ── Doc index page ──────────────────────────────────────────────────── */
+.doc-index-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 32px;
+}
+.doc-index-card {
+    background: var(--dark);
+    padding: 28px 24px;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: background 0.2s;
+    position: relative;
+}
+.doc-index-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: transparent;
+    transition: background 0.25s;
+}
+.doc-index-card:hover { background: var(--panel); }
+.doc-index-card:hover::after { background: var(--blue); }
+.doc-index-card-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+}
+.doc-index-card-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.02em;
+}
+.doc-index-card-arrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    margin-top: auto;
+    padding-top: 8px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+.doc-index-card:hover .doc-index-card-arrow { opacity: 1; }
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .doc-sidebar { display: none; }
+    .doc-content { padding: 24px 0 60px; }
+    .doc-layout { padding: 0 18px; }
+}
+
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">
+    <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+      <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+      <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+      <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+    </svg>
+    <span class="nav-logo-text">IDEKA</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs/">Docs</a></li>
+    <li><a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a></li>
+    <li><a href="https://IDEKAspl.org/ide" target="_blank">Try Online</a></li>
+  </ul>
+  <div class="nav-spacer"></div>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-cta">GitHub</a>
+  <button class="nav-hamburger" id="nav-hamburger" aria-label="Menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-mobile-menu" id="nav-mobile-menu" aria-hidden="true">
+  <a href="/" class="nav-mobile-link">Home</a>
+  <a href="/docs/" class="nav-mobile-link">Docs</a>
+  <a href="https://discord.gg/RAHjbYuNUc" target="_blank" class="nav-mobile-link">Discord</a>
+  <a href="https://IDEKAspl.org/ide" target="_blank" class="nav-mobile-link">Try Online</a>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-mobile-link cta">GitHub &rarr;</a>
+</div>
+
+<div class="doc-layout">
+  <aside class="doc-sidebar">
+    <div class="doc-sidebar-title">On this page</div>
+    <a href="#IDEKA-virtual-machine-fvm-complete-reference" class="doc-toc-link toc-h1">IDEKA Virtual Machine (FVM) — Complete Reference</a>
+<a href="#table-of-contents" class="doc-toc-link toc-h2">Table of Contents</a>
+<a href="#1-overview" class="doc-toc-link toc-h2">1. Overview</a>
+<a href="#2-architecture" class="doc-toc-link toc-h2">2. Architecture</a>
+<a href="#3-getting-started" class="doc-toc-link toc-h2">3. Getting Started</a>
+<a href="#running-a-fvm-file-directly" class="doc-toc-link toc-h3">Running a .fvm file directly</a>
+<a href="#embedding-the-vm-in-python" class="doc-toc-link toc-h3">Embedding the VM in Python</a>
+<a href="#optional-integrations" class="doc-toc-link toc-h3">Optional integrations</a>
+<a href="#4-the-fvm-file-format" class="doc-toc-link toc-h2">4. The .fvm File Format</a>
+<a href="#directives" class="doc-toc-link toc-h3">Directives</a>
+<a href="#locals-n" class="doc-toc-link toc-h4">`locals `</a>
+<a href="#func-name-endfunc" class="doc-toc-link toc-h4">`func ` / `endfunc`</a>
+<a href="#struct-name-endian-totalbytesize-totalbits-endstruct" class="doc-toc-link toc-h4">`struct    ` / `endstruct`</a>
+<a href="#instruction-lines" class="doc-toc-link toc-h3">Instruction lines</a>
+<a href="#value-token-syntax" class="doc-toc-link toc-h3">Value token syntax</a>
+<a href="#5-type-system-ttag" class="doc-toc-link toc-h2">5. Type System (TTag)</a>
+<a href="#integer-width-semantics" class="doc-toc-link toc-h3">Integer width semantics</a>
+<a href="#6-stack-values-val" class="doc-toc-link toc-h2">6. Stack Values (Val)</a>
+<a href="#7-instruction-reference-op" class="doc-toc-link toc-h2">7. Instruction Reference (Op)</a>
+<a href="#stack-operations" class="doc-toc-link toc-h3">Stack Operations</a>
+<a href="#arithmetic-operations" class="doc-toc-link toc-h3">Arithmetic Operations</a>
+<a href="#bitwise-operations" class="doc-toc-link toc-h3">Bitwise Operations</a>
+<a href="#comparison-operations" class="doc-toc-link toc-h3">Comparison Operations</a>
+<a href="#logic-operations" class="doc-toc-link toc-h3">Logic Operations</a>
+<a href="#8-memory-model" class="doc-toc-link toc-h2">8. Memory Model</a>
+<a href="#memory-instructions" class="doc-toc-link toc-h3">Memory Instructions</a>
+<a href="#9-control-flow-functions" class="doc-toc-link toc-h2">9. Control Flow &amp; Functions</a>
+<a href="#jumps" class="doc-toc-link toc-h3">Jumps</a>
+<a href="#function-calls" class="doc-toc-link toc-h3">Function Calls</a>
+<a href="#locals-and-globals" class="doc-toc-link toc-h3">Locals and Globals</a>
+<a href="#10-exception-handling" class="doc-toc-link toc-h2">10. Exception Handling</a>
+<a href="#11-structs-and-arrays" class="doc-toc-link toc-h2">11. Structs and Arrays</a>
+<a href="#struct-operations" class="doc-toc-link toc-h3">Struct Operations</a>
+<a href="#enum-operations" class="doc-toc-link toc-h3">Enum Operations</a>
+<a href="#array-operations" class="doc-toc-link toc-h3">Array Operations</a>
+<a href="#12-type-introspection" class="doc-toc-link toc-h2">12. Type Introspection</a>
+<a href="#13-file-io" class="doc-toc-link toc-h2">13. File I/O</a>
+<a href="#14-foreign-function-interface-ffi" class="doc-toc-link toc-h2">14. Foreign Function Interface (FFI)</a>
+<a href="#ffi-instructions" class="doc-toc-link toc-h3">FFI Instructions</a>
+<a href="#extern-declarations" class="doc-toc-link toc-h3">Extern Declarations</a>
+<a href="#argument-marshalling" class="doc-toc-link toc-h3">Argument marshalling</a>
+<a href="#15-inline-assembly-inlineasm" class="doc-toc-link toc-h2">15. Inline Assembly (INLINE_ASM)</a>
+<a href="#syntax" class="doc-toc-link toc-h3">Syntax</a>
+<a href="#operand-placeholders" class="doc-toc-link toc-h3">Operand placeholders</a>
+<a href="#external-calls" class="doc-toc-link toc-h3">External calls</a>
+<a href="#stack-frame" class="doc-toc-link toc-h3">Stack frame</a>
+<a href="#example" class="doc-toc-link toc-h3">Example</a>
+<a href="#16-compiler-built-ins" class="doc-toc-link toc-h2">16. Compiler Built-ins</a>
+<a href="#console-io" class="doc-toc-link toc-h3">Console I/O</a>
+<a href="#file-io" class="doc-toc-link toc-h3">File I/O</a>
+<a href="#debugging-and-diagnostics" class="doc-toc-link toc-h3">Debugging and Diagnostics</a>
+<a href="#imports-and-packages" class="doc-toc-link toc-h3">Imports and Packages</a>
+<a href="#17-boundary-crossing-emit-operations" class="doc-toc-link toc-h2">17. Boundary Crossing — Emit Operations</a>
+<a href="#emitideka-operand-format" class="doc-toc-link toc-h3">EMITIDEKA operand format</a>
+<a href="#18-string-operations" class="doc-toc-link toc-h2">18. String Operations</a>
+<a href="#19-type-conversion" class="doc-toc-link toc-h2">19. Type Conversion</a>
+<a href="#20-diagnostics" class="doc-toc-link toc-h2">20. Diagnostics</a>
+<a href="#21-python-api" class="doc-toc-link toc-h2">21. Python API</a>
+<a href="#idkvm" class="doc-toc-link toc-h3">`IDEKAVM`</a>
+<a href="#parsefvmsource" class="doc-toc-link toc-h3">`parse_fvm_source`</a>
+<a href="#serialisefvm" class="doc-toc-link toc-h3">`serialise_fvm`</a>
+<a href="#vmheap" class="doc-toc-link toc-h3">`VMHeap`</a>
+<a href="#errors" class="doc-toc-link toc-h3">Errors</a>
+<a href="#22-serialisation-and-deserialisation" class="doc-toc-link toc-h2">22. Serialisation and Deserialisation</a>
+<a href="#value-serialisation-serialiseval" class="doc-toc-link toc-h3">Value serialisation (`_serialise_val`)</a>
+<a href="#instruction-serialisation-serialiseinstr" class="doc-toc-link toc-h3">Instruction serialisation (`_serialise_instr`)</a>
+<a href="#file-layout-output-of-serialisefvm" class="doc-toc-link toc-h3">File layout (output of `serialise_fvm`)</a>
+<a href="#23-error-handling" class="doc-toc-link toc-h2">23. Error Handling</a>
+<a href="#24-examples" class="doc-toc-link toc-h2">24. Examples</a>
+<a href="#hello-world" class="doc-toc-link toc-h3">Hello world</a>
+<a href="#arithmetic-and-locals" class="doc-toc-link toc-h3">Arithmetic and locals</a>
+<a href="#defining-and-calling-a-function" class="doc-toc-link toc-h3">Defining and calling a function</a>
+<a href="#using-a-struct" class="doc-toc-link toc-h3">Using a struct</a>
+<a href="#reading-a-file-at-comptime" class="doc-toc-link toc-h3">Reading a file at comptime</a>
+<a href="#exception-handling" class="doc-toc-link toc-h3">Exception handling</a>
+<a href="#ffi-call-to-strlen" class="doc-toc-link toc-h3">FFI call to strlen</a>
+<a href="#emitting-a-constant-to-the-compiler" class="doc-toc-link toc-h3">Emitting a constant to the compiler</a>
+  </aside>
+  <main class="doc-content">
+    <h1 id="IDEKA-virtual-machine-fvm-complete-reference" class="doc-h1">IDEKA Virtual Machine (FVM) — Complete Reference</h1>
+<p class="doc-p"><strong>Source file:</strong> <code>fvm.py</code>   <strong>Copyright:</strong> 2026 Karac V. Thweatt   <strong>Role:</strong> Experimental comptime execution backend for the IDEKA language compiler.</p>
+<hr class="doc-hr">
+<h2 id="table-of-contents" class="doc-h2">Table of Contents</h2>
+<ol class="doc-ol">
+<li><a href="#1-overview">Overview</a></li>
+<li><a href="#2-architecture">Architecture</a></li>
+<li><a href="#3-getting-started">Getting Started</a></li>
+<li><a href="#4-the-fvm-file-format">The .fvm File Format</a></li>
+<li><a href="#5-type-system-ttag">Type System (TTag)</a></li>
+<li><a href="#6-stack-values-val">Stack Values (Val)</a></li>
+<li><a href="#7-instruction-reference-op">Instruction Reference (Op)</a></li>
+<li><a href="#8-memory-model">Memory Model</a></li>
+<li><a href="#9-control-flow--functions">Control Flow & Functions</a></li>
+<li><a href="#10-exception-handling">Exception Handling</a></li>
+<li><a href="#11-structs-and-arrays">Structs and Arrays</a></li>
+<li><a href="#12-type-introspection">Type Introspection</a></li>
+<li><a href="#13-file-io">File I/O</a></li>
+<li><a href="#14-foreign-function-interface-ffi">Foreign Function Interface (FFI)</a></li>
+<li><a href="#15-inline-assembly-inline_asm">Inline Assembly (INLINE_ASM)</a></li>
+<li><a href="#16-compiler-built-ins">Compiler Built-ins</a></li>
+<li><a href="#17-boundary-crossing--emit-operations">Boundary Crossing — Emit Operations</a></li>
+<li><a href="#18-string-operations">String Operations</a></li>
+<li><a href="#19-type-conversion">Type Conversion</a></li>
+<li><a href="#20-diagnostics">Diagnostics</a></li>
+<li><a href="#21-python-api">Python API</a></li>
+<li><a href="#22-serialisation-and-deserialisation">Serialisation and Deserialisation</a></li>
+<li><a href="#23-error-handling">Error Handling</a></li>
+<li><a href="#24-examples">Examples</a></li>
+</ol>
+<hr class="doc-hr">
+<h2 id="1-overview" class="doc-h2">1. Overview</h2>
+<p class="doc-p">The IDEKA Virtual Machine (FVM) is a stack-based bytecode interpreter that executes <strong>comptime</strong> (compile-time) code for the IDEKA programming language. It is not a general-purpose runtime — it runs during the compiler's compilation phase to evaluate constant expressions, generate code fragments, perform metaprogramming, and interact with the host system (file I/O, FFI, inline assembly) before the final program is emitted.</p>
+<p class="doc-p"><strong>Key characteristics:</strong></p>
+<ul class="doc-ul">
+<li><strong>Stack-based</strong> — all operand passing and results use a value stack.</li>
+<li><strong>Typed values</strong> — every value on the stack carries a type tag (<code>TTag</code>).</li>
+<li><strong>Comptime only</strong> — the VM is invoked by the compiler, not at program runtime.</li>
+<li><strong>Boundary crossing</strong> — instructions like <code>EMIT_CONST</code>, <code>EMIT_GLOBAL</code>, <code>EMITIDEKA</code> pass computed values back to the compiler's code-generation layer.</li>
+<li><strong>FFI and inline ASM</strong> — comptime code can load native libraries and execute x86-64 AT&T assembly snippets at compile time.</li>
+<li><strong>Watchdog</strong> — a 5-minute execution timeout prevents infinite comptime loops from hanging the compiler.</li>
+<li><strong>16 MB heap</strong> — a private bump-allocator heap is available for comptime memory operations.</li>
+</ul>
+<hr class="doc-hr">
+<h2 id="2-architecture" class="doc-h2">2. Architecture</h2>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>┌──────────────────────────────────────────────────────────┐
+│                       IDEKAVM                             │
+│                                                          │
+│  ┌─────────┐  ┌──────────────┐  ┌────────────────────┐  │
+│  │  Stack  │  │  Call Frames │  │  VMHeap (<span class="ck-num">16</span> MB)    │  │
+│  │ List[Val│  │ List[CallFrm]│  │  bump + free-list  │  │
+│  └─────────┘  └──────────────┘  └────────────────────┘  │
+│                                                          │
+│  ┌──────────────────┐  ┌──────────────────────────────┐  │
+│  │  _functions dict │  │  _globals dict               │  │
+│  │  name-&gt;List[Instr│  │  cross-frame <span class="ck-kw">comptime</span> vars   │  │
+│  └──────────────────┘  └──────────────────────────────┘  │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  emit_results  [ (<span class="ck-str">&#x27;const&#x27;</span>, val), (<span class="ck-str">&#x27;IDEKA&#x27;</span>, src) ] │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+         ↑  parse_fvm_source()
+         │
+    .fvm text file</code></pre>
+</div>
+<p class="doc-p"><strong>Core classes:</strong></p>
+<table class="doc-table"><thead><tr><th>Class</th><th>Purpose</th></tr></thead><tbody><tr><td><code>IDEKAVM</code></td><td>The interpreter — holds stack, heap, frames, and all execution logic.</td></tr><tr><td><code>VMHeap</code></td><td>16 MB bump-allocator with a type-tag map and a free list.</td></tr><tr><td><code>CallFrame</code></td><td>A function activation record — instruction pointer, locals array, exception handler stack.</td></tr><tr><td><code>Val</code></td><td>A typed value on the VM stack (tag + data + optional meta dict).</td></tr><tr><td><code>Instr</code></td><td>A single decoded instruction (opcode + operand list + source line).</td></tr><tr><td><code>StructLayout</code></td><td>Cached field layout for a IDEKA struct type (names, tags, byte offsets, sizes).</td></tr><tr><td><code>Op</code></td><td>Enum of all opcodes.</td></tr><tr><td><code>TTag</code></td><td>Enum of all type tags.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="3-getting-started" class="doc-h2">3. Getting Started</h2>
+<h3 id="running-a-fvm-file-directly" class="doc-h3">Running a .fvm file directly</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>python fvm.py &lt;program.fvm&gt;</code></pre>
+</div>
+<p class="doc-p">The CLI parses the file, creates a <code>IDEKAVM</code>, registers all <code>func</code> blocks, and executes the main instruction block. Any <code>emit_results</code> are printed to stdout.</p>
+<h3 id="embedding-the-vm-in-python" class="doc-h3">Embedding the VM in Python</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">from</span> fvm <span class="ck-kw">import</span> IDEKAVM, parse_fvm_source, VMError
+
+source = open(<span class="ck-str">&quot;my_program.fvm&quot;</span>).read()
+instructions, local_count, functions, struct_layouts = parse_fvm_source(source)
+
+vm = IDEKAVM(struct_layouts=struct_layouts)
+
+<span class="ck-kw">for</span> name, instrs <span class="ck-kw">in</span> functions.items():
+    vm.register_function(name, instrs)
+
+<span class="ck-kw">try</span>:
+    result = vm.execute(instructions, local_count)
+except VMError as e:
+    print(f<span class="ck-str">&quot;Runtime error: {e}&quot;</span>)
+
+<span class="ck-pp">#</span> Inspect emit results <span class="ck-kw">from</span> boundary-crossing opcodes:
+<span class="ck-kw">for</span> entry <span class="ck-kw">in</span> vm.emit_results:
+    print(entry)</code></pre>
+</div>
+<h3 id="optional-integrations" class="doc-h3">Optional integrations</h3>
+<p class="doc-p">The CLI auto-detects and loads two optional companion modules:</p>
+<ul class="doc-ul">
+<li><strong><code>fvmcodegen</code></strong> — provides <code>FVMCodegen</code>, injected as <code>vm._codegen_class</code> for <code>compiler.import.*</code> operations.</li>
+<li><strong><code>fmacros</code></strong> — provides <code>build_compiler_macros()</code>, populating <code>vm._compiler_constants</code> with preprocessor <code>#def</code> constants.</li>
+</ul>
+<hr class="doc-hr">
+<h2 id="4-the-fvm-file-format" class="doc-h2">4. The .fvm File Format</h2>
+<p class="doc-p">A <code>.fvm</code> file is a plain UTF-8 text file. Lines beginning with <code>#</code> (after stripping leading whitespace) are comments. Blank lines are ignored.</p>
+<h3 id="directives" class="doc-h3">Directives</h3>
+<h4 id="locals-n" class="doc-h4"><code>locals &lt;N&gt;</code></h4>
+<p class="doc-p">Declares that the top-level block uses <code>N</code> local variable slots. Must appear before any instructions at the top level.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>locals <span class="ck-num">4</span></code></pre>
+</div>
+<h4 id="func-name-endfunc" class="doc-h4"><code>func &lt;name&gt;</code> / <code>endfunc</code></h4>
+<p class="doc-p">Defines a named comptime function. Instructions between <code>func</code> and <code>endfunc</code> form the function body.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>func add_one
+    LOCAL_GET <span class="ck-num">0</span>
+    PUSH <span class="ck-ty">int</span>:<span class="ck-num">1</span>
+    ADD
+    RET
+endfunc</code></pre>
+</div>
+<h4 id="struct-name-endian-totalbytesize-totalbits-endstruct" class="doc-h4"><code>struct &lt;name&gt; &lt;endian&gt; &lt;total_byte_size&gt; &lt;total_bits&gt;</code> / <code>endstruct</code></h4>
+<p class="doc-p">Declares a struct layout used by <code>STRUCT_NEW</code>, <code>STRUCT_LOAD</code>, <code>STRUCT_STORE</code>.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">struct</span> Point little <span class="ck-num">8</span> <span class="ck-num">0</span>
+    field x <span class="ck-ty">int</span> <span class="ck-num">0</span> <span class="ck-num">4</span>
+    field y <span class="ck-ty">int</span> <span class="ck-num">4</span> <span class="ck-num">4</span>
+endstruct</code></pre>
+</div>
+<p class="doc-p">Each <code>field</code> line has the format:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>field &lt;name&gt; &lt;type_tag&gt; &lt;byte_offset&gt; &lt;byte_size&gt;</code></pre>
+</div>
+<h3 id="instruction-lines" class="doc-h3">Instruction lines</h3>
+<p class="doc-p">Each instruction line has the form:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>OPCODE [operand1] [operand2] ...</code></pre>
+</div>
+<p class="doc-p">Operands are space-separated. Quoted strings may contain spaces.</p>
+<h3 id="value-token-syntax" class="doc-h3">Value token syntax</h3>
+<p class="doc-p">Values appear as operands to <code>PUSH</code> and are also used in serialised <code>.fvm</code> files.</p>
+<table class="doc-table"><thead><tr><th>Syntax</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int:42</code></td><td>Signed 32-bit integer</td></tr><tr><td><code>uint:100</code></td><td>Unsigned 32-bit integer</td></tr><tr><td><code>long:-1</code></td><td>Signed 64-bit integer</td></tr><tr><td><code>ulong:0xFF</code></td><td>Unsigned 64-bit integer (hex OK)</td></tr><tr><td><code>float:3.14</code></td><td>32-bit float</td></tr><tr><td><code>double:2.718</code></td><td>64-bit double</td></tr><tr><td><code>bool:true</code> / <code>bool:1</code></td><td>Boolean</td></tr><tr><td><code>bool:false</code> / <code>bool:0</code></td><td>Boolean</td></tr><tr><td><code>byte:0x41</code></td><td>Unsigned 8-bit integer</td></tr><tr><td><code>char:65</code></td><td>Character (8-bit)</td></tr><tr><td><code>ptr:0</code></td><td>Pointer (heap offset)</td></tr><tr><td><code>bytes:&quot;hello\n&quot;</code></td><td>Raw byte string (UTF-8, escape sequences supported)</td></tr><tr><td><code>&quot;hello&quot;</code></td><td>Shorthand for <code>bytes:&quot;hello&quot;</code></td></tr><tr><td><code>void:0</code></td><td>Void value</td></tr></tbody></table>
+<p class="doc-p"><strong>PTR meta bracket</strong> (for round-tripping struct pointers):</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>ptr:<span class="ck-num">29</span>[struct_type=Point,stack_slot,x:<span class="ck-num">0</span>,y:<span class="ck-num">32</span>]</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="5-type-system-ttag" class="doc-h2">5. Type System (TTag)</h2>
+<p class="doc-p">Every <code>Val</code> carries one of the following type tags:</p>
+<table class="doc-table"><thead><tr><th>TTag</th><th>IDEKA Type</th><th>Python Representation</th></tr></thead><tbody><tr><td><code>INT</code></td><td><code>int</code> (i32)</td><td><code>int</code></td></tr><tr><td><code>UINT</code></td><td><code>uint</code> (u32)</td><td><code>int</code></td></tr><tr><td><code>LONG</code></td><td><code>long</code> (i64)</td><td><code>int</code></td></tr><tr><td><code>ULONG</code></td><td><code>ulong</code> (u64)</td><td><code>int</code></td></tr><tr><td><code>FLOAT</code></td><td><code>float</code> (f32)</td><td><code>float</code></td></tr><tr><td><code>DOUBLE</code></td><td><code>double</code> (f64)</td><td><code>float</code></td></tr><tr><td><code>BOOL</code></td><td><code>bool</code></td><td><code>int</code> (0 or 1)</td></tr><tr><td><code>BYTE</code></td><td><code>byte</code> (u8)</td><td><code>int</code></td></tr><tr><td><code>CHAR</code></td><td><code>char</code> (u8)</td><td><code>int</code></td></tr><tr><td><code>DATA</code></td><td><code>data&lt;N&gt;</code> (arbitrary bit-width)</td><td><code>int</code></td></tr><tr><td><code>PTR</code></td><td>pointer</td><td><code>int</code> (heap offset or OS address)</td></tr><tr><td><code>VOID</code></td><td><code>void</code></td><td><code>0</code></td></tr><tr><td><code>STRUCT</code></td><td>struct value</td><td><code>str</code> (type name), fields in <code>meta[&#x27;fields&#x27;]</code></td></tr><tr><td><code>ENUM</code></td><td>enum value</td><td><code>int</code> or <code>str</code> discriminant</td></tr><tr><td><code>ARRAY</code></td><td>array value</td><td><code>int</code> (count), elements in <code>meta[&#x27;elements&#x27;]</code></td></tr><tr><td><code>BYTES</code></td><td>raw byte buffer</td><td><code>bytes</code> or <code>bytearray</code></td></tr><tr><td><code>FFI_LIB</code></td><td>loaded native library</td><td><code>str</code> (library path)</td></tr><tr><td><code>FFI_SYM</code></td><td>symbol in a native library</td><td>ctypes callable</td></tr><tr><td><code>FILE</code></td><td>open file handle</td><td><code>int</code> (handle ID)</td></tr></tbody></table>
+<h3 id="integer-width-semantics" class="doc-h3">Integer width semantics</h3>
+<p class="doc-p">Arithmetic and bitwise results are wrapped to the bit width implied by the value's <code>TTag</code>:</p>
+<ul class="doc-ul">
+<li><code>INT</code> / <code>UINT</code> → 32-bit (<code>i32</code> / <code>u32</code>)</li>
+<li><code>LONG</code> / <code>ULONG</code> → 64-bit (<code>i64</code> / <code>u64</code>)</li>
+<li><code>BYTE</code> / <code>CHAR</code> / <code>BOOL</code> → 8-bit</li>
+<li><code>DATA</code> → uses the <code>bits</code> field in <code>meta</code></li>
+</ul>
+<p class="doc-p">This matches IDEKA's fixed-width integer overflow semantics.</p>
+<hr class="doc-hr">
+<h2 id="6-stack-values-val" class="doc-h2">6. Stack Values (Val)</h2>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>@dataclass
+class Val:
+    tag:  TTag
+    <span class="ck-kw">data</span>: Any
+    meta: Dict[str, Any] = {}</code></pre>
+</div>
+<p class="doc-p">The <code>meta</code> dict carries optional auxiliary information:</p>
+<table class="doc-table"><thead><tr><th>Key</th><th>Used by</th><th>Meaning</th></tr></thead><tbody><tr><td><code>struct_type</code></td><td>STRUCT</td><td>Name of the IDEKA struct type</td></tr><tr><td><code>fields</code></td><td>STRUCT</td><td><code>dict[str, Val]</code> — field values</td></tr><tr><td><code>stack_slot</code></td><td>PTR</td><td>Flag: pointer addresses a frame local slot</td></tr><tr><td><code>field_bit_offsets</code></td><td>PTR/STRUCT</td><td><code>dict[str, int]</code> — bit offsets of fields</td></tr><tr><td><code>elem_type</code></td><td>ARRAY/PTR</td><td>Element type name string</td></tr><tr><td><code>count</code></td><td>ARRAY/PTR</td><td>Number of elements</td></tr><tr><td><code>elem_size</code></td><td>ARRAY</td><td>Size of each element in bytes</td></tr><tr><td><code>elements</code></td><td>ARRAY</td><td><code>list[Val]</code> — element values</td></tr><tr><td><code>sym_name</code></td><td>FFI_SYM</td><td>Symbol name string</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="7-instruction-reference-op" class="doc-h2">7. Instruction Reference (Op)</h2>
+<h3 id="stack-operations" class="doc-h3">Stack Operations</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>PUSH</code></td><td><code>value</code></td><td><code>-- val</code></td><td>Push a typed literal value onto the stack.</td></tr><tr><td><code>POP</code></td><td></td><td><code>val --</code></td><td>Discard the top stack value.</td></tr><tr><td><code>DUP</code></td><td></td><td><code>a -- a a</code></td><td>Duplicate the top value.</td></tr><tr><td><code>SWAP</code></td><td></td><td><code>a b -- b a</code></td><td>Swap the top two values.</td></tr><tr><td><code>ROT</code></td><td></td><td><code>a b c -- b c a</code></td><td>Rotate the top three values: third rises to top.</td></tr><tr><td><code>OVER</code></td><td></td><td><code>a b -- a b a</code></td><td>Copy the second-from-top onto the stack.</td></tr></tbody></table>
+<h3 id="arithmetic-operations" class="doc-h3">Arithmetic Operations</h3>
+<p class="doc-p">All binary arithmetic ops pop two values and push the result, preserving the type tag of the first (left) operand and wrapping to its integer bit width.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>ADD</code></td><td><code>a b -- a+b</code></td><td>Addition.</td></tr><tr><td><code>SUB</code></td><td><code>a b -- a-b</code></td><td>Subtraction.</td></tr><tr><td><code>MUL</code></td><td><code>a b -- a*b</code></td><td>Multiplication.</td></tr><tr><td><code>DIV</code></td><td><code>a b -- a/b</code></td><td>Division (integer truncation for integer types; raises <code>VMError</code> on divide-by-zero).</td></tr><tr><td><code>MOD</code></td><td><code>a b -- a%b</code></td><td>Modulo.</td></tr><tr><td><code>NEG</code></td><td><code>a -- -a</code></td><td>Unary negation.</td></tr><tr><td><code>POW</code></td><td><code>a b -- a**b</code></td><td>Exponentiation.</td></tr><tr><td><code>ABS</code></td><td>`a -- \</td><td>a\</td><td>`</td><td>Absolute value.</td></tr><tr><td><code>MIN</code></td><td><code>a b -- min(a,b)</code></td><td>Minimum of two values.</td></tr><tr><td><code>MAX</code></td><td><code>a b -- max(a,b)</code></td><td>Maximum of two values.</td></tr><tr><td><code>CLAMP</code></td><td><code>val lo hi -- clamped</code></td><td>Clamp <code>val</code> to <code>[lo, hi]</code>. Pops <code>hi</code> first, then <code>lo</code>, then <code>val</code>.</td></tr></tbody></table>
+<p class="doc-p"><strong>Special:</strong> <code>BYTES + int</code> → pointer arithmetic. When adding an integer offset to a <code>BYTES</code> value, the bytes are pinned in native memory and a <code>PTR</code> to <code>bytes_base + offset</code> is returned. This enables C-style string/buffer pointer arithmetic.</p>
+<h3 id="bitwise-operations" class="doc-h3">Bitwise Operations</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>BAND</code></td><td></td><td><code>a b -- a&amp;b</code></td><td>Bitwise AND.</td></tr><tr><td><code>BOR</code></td><td></td><td>`a b -- a\</td><td>b`</td><td>Bitwise OR.</td></tr><tr><td><code>BXOR</code></td><td></td><td><code>a b -- a^b</code></td><td>Bitwise XOR.</td></tr><tr><td><code>BNOT</code></td><td></td><td><code>a -- ~a</code></td><td>Bitwise NOT (complement).</td></tr><tr><td><code>SHL</code></td><td></td><td><code>a b -- a&lt;&lt;b</code></td><td>Shift left.</td></tr><tr><td><code>SHR</code></td><td></td><td><code>a b -- a&gt;&gt;b</code></td><td>Shift right (arithmetic for signed types).</td></tr><tr><td><code>ROTL</code></td><td><code>width</code></td><td><code>a -- rotl(a,width)</code></td><td>Rotate left within <code>width</code> bits.</td></tr><tr><td><code>ROTR</code></td><td><code>width</code></td><td><code>a -- rotr(a,width)</code></td><td>Rotate right within <code>width</code> bits.</td></tr><tr><td><code>BITREV</code></td><td><code>width</code></td><td><code>a -- bitrev(a,width)</code></td><td>Reverse bits within <code>width</code> bits.</td></tr><tr><td><code>POPCOUNT</code></td><td></td><td><code>a -- popcount(a)</code></td><td>Count set bits (operates on low 64 bits).</td></tr><tr><td><code>CLZ</code></td><td><code>width</code></td><td><code>a -- clz(a,width)</code></td><td>Count leading zeros within <code>width</code> bits.</td></tr><tr><td><code>CTZ</code></td><td><code>width</code></td><td><code>a -- ctz(a,width)</code></td><td>Count trailing zeros within <code>width</code> bits.</td></tr></tbody></table>
+<h3 id="comparison-operations" class="doc-h3">Comparison Operations</h3>
+<p class="doc-p">All comparisons pop two values and push a <code>BOOL</code> (1 or 0).</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Description</th></tr></thead><tbody><tr><td><code>CMP_EQ</code></td><td>Equal (<code>==</code>)</td></tr><tr><td><code>CMP_NE</code></td><td>Not equal (<code>!=</code>)</td></tr><tr><td><code>CMP_LT</code></td><td>Less than (<code>&lt;</code>)</td></tr><tr><td><code>CMP_LE</code></td><td>Less than or equal (<code>&lt;=</code>)</td></tr><tr><td><code>CMP_GT</code></td><td>Greater than (<code>&gt;</code>)</td></tr><tr><td><code>CMP_GE</code></td><td>Greater than or equal (<code>&gt;=</code>)</td></tr></tbody></table>
+<h3 id="logic-operations" class="doc-h3">Logic Operations</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>AND</code></td><td><code>a b -- bool(a and b)</code></td><td>Logical AND (truthy check).</td></tr><tr><td><code>OR</code></td><td><code>a b -- bool(a or b)</code></td><td>Logical OR (truthy check).</td></tr><tr><td><code>NOT</code></td><td><code>a -- bool(not a)</code></td><td>Logical NOT.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="8-memory-model" class="doc-h2">8. Memory Model</h2>
+<p class="doc-p">The FVM has two memory spaces:</p>
+<p class="doc-p"><strong>1. VM Heap</strong> — a private 16 MB <code>bytearray</code> managed by <code>VMHeap</code>. Allocations use a bump-pointer with a free list for reuse. Pointer values into this heap are small integers (byte offsets). The null pointer is offset 0; allocations start at offset 8.</p>
+<p class="doc-p"><strong>2. OS memory</strong> — native addresses from <code>extern</code> calls (e.g. <code>malloc</code>), FFI, or pinned BYTES buffers. These are tracked in <code>_os_ptrs</code> and accessed via <code>ctypes</code>.</p>
+<h3 id="memory-instructions" class="doc-h3">Memory Instructions</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>ALLOC</code></td><td></td><td><code>size -- ptr</code></td><td>Pop integer byte size, allocate that many bytes on the VM heap, push the pointer offset.</td></tr><tr><td><code>FREE</code></td><td></td><td><code>ptr --</code></td><td>Pop a pointer and return its allocation to the free list.</td></tr><tr><td><code>LOAD</code></td><td><code>ttag byte_size</code></td><td><code>ptr -- val</code></td><td>Pop a pointer, read <code>byte_size</code> bytes from the VM heap (or OS memory), and push a <code>Val</code> with tag <code>ttag</code>.</td></tr><tr><td><code>STORE</code></td><td><code>ttag byte_size</code></td><td><code>val ptr --</code></td><td>Pop a pointer and a value, serialise the value to <code>byte_size</code> bytes, and write to memory.</td></tr><tr><td><code>OFFSET</code></td><td></td><td><code>ptr n -- ptr+n</code></td><td>Add integer <code>n</code> to pointer <code>ptr</code> (pointer arithmetic).</td></tr></tbody></table>
+<p class="doc-p"><strong><code>LOCAL_DEREF</code></strong> — pop a <code>PTR(slot)</code> or OS address, push the value it points to. If the address is an OS pointer, reads one byte. If it is a slot index, returns <code>locals[slot]</code>.</p>
+<p class="doc-p"><strong><code>LOCAL_DEREF_SET</code></strong> — pop a value and a pointer, store the value at the pointer location.</p>
+<hr class="doc-hr">
+<h2 id="9-control-flow-functions" class="doc-h2">9. Control Flow & Functions</h2>
+<h3 id="jumps" class="doc-h3">Jumps</h3>
+<p class="doc-p">All jump addresses are zero-based instruction indices within the current function's instruction list.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>JMP</code></td><td><code>addr</code></td><td></td><td>Unconditional jump to instruction <code>addr</code>.</td></tr><tr><td><code>JIF</code></td><td><code>addr</code></td><td><code>cond --</code></td><td>Pop <code>cond</code>; jump to <code>addr</code> if <code>cond</code> is truthy.</td></tr><tr><td><code>JNF</code></td><td><code>addr</code></td><td><code>cond --</code></td><td>Pop <code>cond</code>; jump to <code>addr</code> if <code>cond</code> is falsy.</td></tr><tr><td><code>JTABLE</code></td><td><code>default addr0 addr1 ...</code></td><td><code>idx --</code></td><td>Pop integer index; jump to <code>addrs[idx]</code>, or <code>default</code> if out of range.</td></tr><tr><td><code>HALT</code></td><td></td><td></td><td>Stop execution. The top-of-stack value becomes the return value of <code>execute()</code>. Clears all frames.</td></tr><tr><td><code>RET</code></td><td></td><td></td><td>Return from the current function frame. The return value is whatever is on top of the stack.</td></tr></tbody></table>
+<h3 id="function-calls" class="doc-h3">Function Calls</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>CALL</code></td><td><code>name argc</code></td><td><code>argN .. arg1 -- retval</code></td><td>Pop <code>argc</code> arguments (last-pushed = first arg), push a new <code>CallFrame</code> for function <code>name</code>, execute it.</td></tr><tr><td><code>CALL_PTR</code></td><td><code>argc</code></td><td><code>name argN .. arg1 -- retval</code></td><td>Pop a <code>BYTES</code> function name string, then call it with <code>argc</code> arguments, same as <code>CALL</code>.</td></tr><tr><td><code>TAIL_SELF</code></td><td><code>argc</code></td><td><code>argN .. arg1 --</code></td><td>Self tail-call optimisation: pop <code>argc</code> args, reload into <code>locals[0..argc-1]</code>, reset <code>ip</code> to 0. No new frame is allocated.</td></tr></tbody></table>
+<p class="doc-p"><strong>Overload resolution:</strong></p>
+<ul class="doc-ul">
+<li>Functions can be registered with arity-encoded names (<code>print__$byte</code>, <code>print__$byte_int</code>) to support overloading. The VM selects the best match by comparing the call's <code>argc</code> against the suffix.</li>
+<li>If multiple overloads match on arity, the VM scores each by <code>TTag</code> compatibility and picks the highest scorer.</li>
+</ul>
+<p class="doc-p"><strong>Namespace-qualified names:</strong></p>
+<p class="doc-p">If <code>name</code> is not found exactly, the VM tries a suffix match against names like <code>standard__datetime__dt_from_unix_ms</code> when calling <code>dt_from_unix_ms</code>.</p>
+<h3 id="locals-and-globals" class="doc-h3">Locals and Globals</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>LOCAL_GET</code></td><td><code>slot</code></td><td><code>-- val</code></td><td>Push <code>locals[slot]</code> of the current frame.</td></tr><tr><td><code>LOCAL_SET</code></td><td><code>slot</code></td><td><code>val --</code></td><td>Pop and store into <code>locals[slot]</code>.</td></tr><tr><td><code>GLOBAL_GET</code></td><td><code>name</code></td><td><code>-- val</code></td><td>Push <code>vm._globals[name]</code> (or <code>int:0</code> if absent).</td></tr><tr><td><code>GLOBAL_SET</code></td><td><code>name</code></td><td><code>val --</code></td><td>Pop and store into <code>vm._globals[name]</code>.</td></tr></tbody></table>
+<p class="doc-p">Globals persist across function calls and across multiple <code>execute()</code> invocations on the same VM instance.</p>
+<hr class="doc-hr">
+<h2 id="10-exception-handling" class="doc-h2">10. Exception Handling</h2>
+<p class="doc-p">The FVM supports comptime try/catch/throw.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>TRY_BEGIN</code></td><td><code>catch_addr</code></td><td></td><td>Register a catch handler at <code>catch_addr</code>. Records the current stack depth.</td></tr><tr><td><code>TRY_END</code></td><td></td><td></td><td>Remove the innermost exception handler (normal exit from a try body).</td></tr><tr><td><code>THROW</code></td><td></td><td><code>val --</code></td><td>Pop a value and raise <code>IDEKAThrowSignal(val)</code>. The VM walks the frame stack looking for a <code>TRY_BEGIN</code> handler. If found, the stack is trimmed to the recorded depth, the thrown value is pushed, and execution jumps to <code>catch_addr</code>. If no handler exists, a <code>VMError</code> is raised.</td></tr></tbody></table>
+<p class="doc-p"><strong>Example pattern:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>TRY_BEGIN <span class="ck-num">10</span>        <span class="ck-pp">#</span> catch_addr = instruction <span class="ck-num">10</span>
+PUSH bytes:<span class="ck-str">&quot;hello&quot;</span>
+THROW               <span class="ck-pp">#</span> throws the string value
+TRY_END
+JMP <span class="ck-num">12</span>              <span class="ck-pp">#</span> skip <span class="ck-kw">catch</span> block
+<span class="ck-pp">#</span> instruction <span class="ck-num">10</span>: <span class="ck-kw">catch</span> handler
+COMPILER_PRINT      <span class="ck-pp">#</span> print the caught exception
+<span class="ck-pp">#</span> instruction <span class="ck-num">12</span>:
+HALT</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="11-structs-and-arrays" class="doc-h2">11. Structs and Arrays</h2>
+<h3 id="struct-operations" class="doc-h3">Struct Operations</h3>
+<p class="doc-p">Struct values are stored as <code>Val(TTag.STRUCT, type_name, meta={&#x27;fields&#x27;: {...}})</code>.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>STRUCT_NEW</code></td><td><code>type_name</code></td><td><code>-- struct_val</code></td><td>Create a zero-initialised struct of the given type. Requires the type to be in <code>struct_layouts</code>.</td></tr><tr><td><code>STRUCT_LOAD</code></td><td><code>field_name</code></td><td><code>struct -- field_val</code></td><td>Pop a struct value, push the value of the named field.</td></tr><tr><td><code>STRUCT_STORE</code></td><td><code>field_name</code></td><td><code>new_val struct -- updated_struct</code></td><td>Pop a value and a struct, return an updated struct with the named field replaced. (Structs are immutable values; <code>STRUCT_STORE</code> produces a new copy.)</td></tr></tbody></table>
+<h3 id="enum-operations" class="doc-h3">Enum Operations</h3>
+<p class="doc-p">Enum values are stored as <code>Val(TTag.ENUM, discriminant)</code>.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>ENUM_NEW</code></td><td><code>type_name</code></td><td><code>-- enum_val</code></td><td>Push a zero enum value with the given type name in meta.</td></tr><tr><td><code>ENUM_LOAD</code></td><td></td><td><code>enum -- int_or_str</code></td><td>Pop an enum, push its integer or string discriminant.</td></tr><tr><td><code>ENUM_STORE</code></td><td></td><td><code>val enum -- updated_enum</code></td><td>Pop an integer or string, pop an enum, push an updated enum with the new discriminant.</td></tr></tbody></table>
+<h3 id="array-operations" class="doc-h3">Array Operations</h3>
+<p class="doc-p">Array values are stored as <code>Val(TTag.ARRAY, count, meta={&#x27;elem_type&#x27;: ..., &#x27;elements&#x27;: [...]})</code>.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>ARRAY_NEW</code></td><td><code>type_name count</code></td><td><code>-- array_val</code></td><td>Allocate an array of <code>count</code> zero-initialised elements of <code>type_name</code>.</td></tr><tr><td><code>ARRAY_LEN</code></td><td></td><td><code>arr -- int</code></td><td>Pop an array, push its element count.</td></tr><tr><td><code>ARRAY_LOAD</code></td><td></td><td><code>arr idx -- elem</code></td><td>Pop an array and an index, push the element at that index. Also supports native pointer indexing (OS and VM heap).</td></tr><tr><td><code>ARRAY_STORE</code></td><td></td><td><code>val idx arr -- updated_arr</code></td><td>Pop a value, index, and array, push an updated array with element <code>[idx]</code> replaced.</td></tr></tbody></table>
+<p class="doc-p"><strong>Native pointer indexing:</strong> if the array value is a <code>PTR</code> (e.g. from <code>ALLOC</code> or <code>extern malloc</code>), <code>ARRAY_LOAD</code> reads one byte at <code>ptr + idx</code>. <code>ARRAY_STORE</code> writes one byte.</p>
+<hr class="doc-hr">
+<h2 id="12-type-introspection" class="doc-h2">12. Type Introspection</h2>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>SIZEOF</code></td><td><code>type_name</code></td><td><code>-- uint</code></td><td>Push the size of the type in <strong>bits</strong> (not bytes).</td></tr><tr><td><code>TYPEOF</code></td><td></td><td><code>val -- val bytes</code></td><td>Peek at the top value, push its TTag name as a <code>BYTES</code> value. Does not consume the original value.</td></tr><tr><td><code>ALIGNOF</code></td><td><code>type_name</code></td><td><code>-- uint</code></td><td>Push the alignment requirement in bytes. For structs, this is the size of the largest field.</td></tr><tr><td><code>ENDIANOF</code></td><td><code>type_name</code></td><td><code>-- bytes</code></td><td>Push <code>bytes:&quot;little&quot;</code> or <code>bytes:&quot;big&quot;</code> depending on the type's declared endianness.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="13-file-io" class="doc-h2">13. File I/O</h2>
+<p class="doc-p">The FVM exposes low-level file handles.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>IO_OPEN</code></td><td><code>path mode -- handle</code></td><td>Pop a mode string and a path string, open the file, push a <code>FILE</code> handle. Mode strings follow Python <code>open()</code> conventions (<code>&quot;r&quot;</code>, <code>&quot;wb&quot;</code>, etc.).</td></tr><tr><td><code>IO_READ</code></td><td><code>handle size -- bytes</code></td><td>Pop a handle and a byte count (<code>0</code> = read all), push the read bytes as a <code>BYTES</code> value.</td></tr><tr><td><code>IO_WRITE</code></td><td><code>handle ptr size --</code></td><td>Pop a handle, a VM heap pointer, and a byte count; write that many bytes from the heap to the file.</td></tr><tr><td><code>IO_CLOSE</code></td><td><code>handle --</code></td><td>Close and release the file handle.</td></tr></tbody></table>
+<p class="doc-p">Higher-level wrappers are also available via the compiler built-ins <code>COMPILER_READFILE</code> and <code>COMPILER_WRITEFILE</code> (see §16).</p>
+<hr class="doc-hr">
+<h2 id="14-foreign-function-interface-ffi" class="doc-h2">14. Foreign Function Interface (FFI)</h2>
+<p class="doc-p">The FVM can load native shared libraries and call their functions at comptime.</p>
+<h3 id="ffi-instructions" class="doc-h3">FFI Instructions</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>FFI_LOAD</code></td><td><code>&quot;lib_path&quot;</code></td><td><code>-- ffi_lib</code></td><td>Load the shared library at the given path using <code>ctypes.CDLL</code>, push an <code>FFI_LIB</code> handle.</td></tr><tr><td><code>FFI_SYM</code></td><td><code>sym_name</code></td><td><code>ffi_lib -- ffi_sym</code></td><td>Pop an <code>FFI_LIB</code>, look up the named symbol, push an <code>FFI_SYM</code> callable.</td></tr><tr><td><code>FFI_CALL</code></td><td><code>argc ret_ttag</code></td><td><code>ffi_sym argN .. arg1 -- result</code></td><td>Pop the symbol and <code>argc</code> arguments, call the native function, push the result with tag <code>ret_ttag</code>.</td></tr><tr><td><code>FFI_FREE</code></td><td></td><td><code>ffi_lib --</code></td><td>Unload the library and discard the handle.</td></tr></tbody></table>
+<h3 id="extern-declarations" class="doc-h3">Extern Declarations</h3>
+<p class="doc-p">The <code>EXTERN_DECL</code> opcode registers a function name so it can be called via <code>CALL</code> without an explicit <code>FFI_LOAD</code>/<code>FFI_SYM</code> cycle. The VM resolves the symbol through explicitly loaded libraries (<code>compiler.fvm.loadlib</code>) and then falls back to the C runtime.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>EXTERN_DECL malloc PTR</code></pre>
+</div>
+<p class="doc-p">Calls to <code>malloc</code> via <code>CALL malloc 1</code> will then dispatch through <code>ctypes</code>.</p>
+<h3 id="argument-marshalling" class="doc-h3">Argument marshalling</h3>
+<table class="doc-table"><thead><tr><th>TTag</th><th>Ctypes type</th></tr></thead><tbody><tr><td><code>INT</code></td><td><code>c_int32</code></td></tr><tr><td><code>UINT</code></td><td><code>c_uint32</code></td></tr><tr><td><code>LONG</code></td><td><code>c_int64</code></td></tr><tr><td><code>ULONG</code></td><td><code>c_uint64</code></td></tr><tr><td><code>FLOAT</code></td><td><code>c_float</code></td></tr><tr><td><code>DOUBLE</code></td><td><code>c_double</code></td></tr><tr><td><code>BOOL</code></td><td><code>c_bool</code></td></tr><tr><td><code>BYTE</code></td><td><code>c_uint8</code></td></tr><tr><td><code>PTR</code></td><td><code>c_void_p</code></td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="15-inline-assembly-inlineasm" class="doc-h2">15. Inline Assembly (INLINE_ASM)</h2>
+<p class="doc-p"><strong>Requires:</strong> <code>keystone-engine</code> (<code>pip install keystone-engine</code>). Only supported on <strong>x86-64</strong> hosts.</p>
+<h3 id="syntax" class="doc-h3">Syntax</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>INLINE_ASM <span class="ck-str">&quot;body&quot;</span> <span class="ck-str">&quot;constraints&quot;</span> n_inputs n_outputs [output_names...]</code></pre>
+</div>
+<ul class="doc-ul">
+<li><strong><code>body</code></strong> — AT&T-syntax x86-64 assembly, with <code>$N</code> operand placeholders.</li>
+<li><strong><code>constraints</code></strong> — currently unused (reserved for future GCC-style constraint strings).</li>
+<li><strong><code>n_inputs</code></strong> — number of input values to pop from the stack.</li>
+<li><strong><code>n_outputs</code></strong> — number of output values to push (currently 0 or 1; output always comes from <code>%rax</code>).</li>
+<li><strong><code>output_names</code></strong> — optional list of global variable names to also store the result into.</li>
+</ul>
+<h3 id="operand-placeholders" class="doc-h3">Operand placeholders</h3>
+<ul class="doc-ul">
+<li><code>$0</code> through <code>$n_outputs-1</code> — output operands (mapped to <code>%rax</code>).</li>
+<li><code>$n_outputs</code> through <code>$n_outputs+n_inputs-1</code> — input operands.</li>
+</ul>
+<p class="doc-p">Input values are loaded into scratch registers (<code>%r10</code>–<code>%r15</code>) via <code>movabsq</code> immediates before the user body runs. The register size is inferred from the instruction mnemonic suffix (<code>l</code>→32-bit, <code>w</code>→16-bit, <code>b</code>→8-bit, else 64-bit).</p>
+<h3 id="external-calls" class="doc-h3">External calls</h3>
+<p class="doc-p"><code>call symbol</code> in the body is automatically resolved to a <code>movabsq $addr, %rax; callq *%rax</code> sequence, searching explicitly loaded libs (via <code>compiler.fvm.loadlib</code>) before falling back to the C runtime.</p>
+<h3 id="stack-frame" class="doc-h3">Stack frame</h3>
+<p class="doc-p">The generated code includes a standard function prologue (<code>pushq %rbp; movq %rsp, %rbp</code>) and epilogue (<code>popq %rbp; retq</code>). Callee-saved scratch registers (<code>%r12</code>–<code>%r15</code>) are preserved if used.</p>
+<h3 id="example" class="doc-h3">Example</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>PUSH <span class="ck-ty">int</span>:<span class="ck-num">42</span>
+INLINE_ASM <span class="ck-str">&quot;movq $1, $0\naddq $1, $0&quot;</span> <span class="ck-str">&quot;&quot;</span> <span class="ck-num">1</span> <span class="ck-num">1</span> result
+<span class="ck-pp">#</span> Pops <span class="ck-num">42</span> as an input, computes rax = rax + <span class="ck-num">42</span> (where rax starts as <span class="ck-num">1</span>), pushes the result.</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="16-compiler-built-ins" class="doc-h2">16. Compiler Built-ins</h2>
+<p class="doc-p">These opcodes implement the <code>compiler.*</code> namespace that IDEKA comptime code uses to interact with the compilation environment.</p>
+<h3 id="console-io" class="doc-h3">Console I/O</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>COMPILER_PRINT</code></td><td><code>val --</code></td><td>Print a value to stdout. Handles <code>BYTES</code>, <code>PTR</code>, <code>CHAR</code>, or any scalar (via <code>str()</code>).</td></tr><tr><td><code>COMPILER_INPUT</code></td><td><code>-- bytes</code></td><td>Read one line from stdin, push as <code>BYTES</code>.</td></tr></tbody></table>
+<h3 id="file-io" class="doc-h3">File I/O</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>COMPILER_READFILE</code></td><td><code>path -- ptr</code></td><td>Read the entire file at <code>path</code> into the VM heap, push a <code>PTR</code> with <code>meta[&#x27;count&#x27;]</code> set to the file size.</td></tr><tr><td><code>COMPILER_WRITEFILE</code></td><td><code>path content flags --</code></td><td>Write <code>content</code> (PTR or BYTES) to <code>path</code>. <code>flags</code> is one of: <code>&quot;r&quot;</code>, <code>&quot;w&quot;</code>, <code>&quot;a&quot;</code>, <code>&quot;rw&quot;</code> (optionally suffixed with <code>t</code> for text mode).</td></tr></tbody></table>
+<h3 id="debugging-and-diagnostics" class="doc-h3">Debugging and Diagnostics</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>COMPILER_FVM_TRACE_BEGIN</code></td><td></td><td>Enable per-instruction tracing to stdout for the next 2000 instructions. Prints opcode, operands, locals, and top-4 stack at each step.</td></tr><tr><td><code>COMPILER_FVM_TRACE_END</code></td><td></td><td>Disable per-instruction tracing.</td></tr><tr><td><code>COMPILER_FVM_SETBP</code></td><td></td><td>Comptime breakpoint: print current function, instruction pointer, all locals, and the full stack to stderr, then pause execution until the user presses Enter.</td></tr><tr><td><code>COMPILER_FVM_DUMP</code></td><td><code>path --</code></td><td>Serialise the current comptime state (all instructions logged so far + functions + struct layouts) to a <code>.fvm</code> file at <code>path</code>.</td></tr></tbody></table>
+<h3 id="imports-and-packages" class="doc-h3">Imports and Packages</h3>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>COMPILER_IMPORT_STDLIB</code></td><td><code>path --</code></td><td>Import a standard library module (resolved relative to the compiler's stdlib root). Requires <code>_codegen_class</code> to be injected.</td></tr><tr><td><code>COMPILER_IMPORT_LOCAL</code></td><td><code>path --</code></td><td>Import a local IDEKA source file (resolved relative to <code>source_file</code>). Requires <code>_codegen_class</code>.</td></tr><tr><td><code>COMPILER_FPM_PACKAGE</code></td><td><code>path --</code></td><td>Install or resolve an FPM (IDEKA Package Manager) package. Requires <code>_codegen_class</code>.</td></tr><tr><td><code>COMPILER_LOADLIB</code></td><td><code>name ext --</code></td><td>Load a native shared library by name and extension (e.g. <code>&quot;mylib&quot;</code> <code>&quot;so&quot;</code>). The library is made available for <code>INLINE_ASM</code> symbol resolution and <code>EXTERN_DECL</code> calls. Platform-specific candidates are tried automatically (<code>lib&lt;name&gt;.&lt;ext&gt;</code>, <code>lib&lt;name&gt;.so</code>, <code>lib&lt;name&gt;.dylib</code>).</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="17-boundary-crossing-emit-operations" class="doc-h2">17. Boundary Crossing — Emit Operations</h2>
+<p class="doc-p">These opcodes pass comptime-computed values back to the compiler's code-generation layer. Results are accumulated in <code>vm.emit_results</code> as a list of tuples.</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Emit entry</th><th>Description</th></tr></thead><tbody><tr><td><code>EMIT_CONST</code></td><td><code>val --</code></td><td><code>(&#x27;const&#x27;, val)</code></td><td>Emit a comptime value as an IR constant.</td></tr><tr><td><code>EMIT_GLOBAL</code></td><td><code>size -- bytes</code></td><td><code>(&#x27;global&#x27;, bytes)</code></td><td>Pop a size, snapshot that many bytes from the VM heap starting at the current bump pointer (or per the operand), emit as a global variable.</td></tr><tr><td><code>EMIT_TYPE</code></td><td><code>val --</code></td><td><code>(&#x27;type&#x27;, val)</code></td><td>Emit a type reference. The value should be a type tag.</td></tr><tr><td><code>EMITIDEKA</code></td><td><code>src_text var_names</code></td><td><code>(&#x27;IDEKA&#x27;, substituted_text)</code></td><td>Substitute comptime local values into <code>src_text</code> using <code>{varname:slot}</code> tokens, then emit the resulting IDEKA source fragment.</td></tr></tbody></table>
+<h3 id="emitideka-operand-format" class="doc-h3">EMITIDEKA operand format</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>EMITIDEKA <span class="ck-str">&quot;const N = {value:0};&quot;</span> value:<span class="ck-num">0</span></code></pre>
+</div>
+<p class="doc-p">Each <code>name:slot</code> pair substitutes the value from <code>locals[slot]</code> into the placeholder <code>{name}</code> in the source text.</p>
+<hr class="doc-hr">
+<h2 id="18-string-operations" class="doc-h2">18. String Operations</h2>
+<p class="doc-p">All string ops work on <code>BYTES</code> values (UTF-8 byte strings).</p>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>STR_LEN</code></td><td><code>bytes -- int</code></td><td>Push the byte length of the top string.</td></tr><tr><td><code>STR_CAT</code></td><td><code>a b -- ab</code></td><td>Concatenate two strings (pushes <code>BYTES</code>).</td></tr><tr><td><code>STR_SLICE</code></td><td><code>str start len -- substr</code></td><td>Pop a string, a start index, and a length; push the substring.</td></tr><tr><td><code>STR_EQ</code></td><td><code>a b -- bool</code></td><td>Push 1 if two strings are equal, else 0.</td></tr><tr><td><code>STR_FIND</code></td><td><code>haystack needle -- int</code></td><td>Pop needle then haystack, push byte offset of first occurrence, or −1 if not found.</td></tr><tr><td><code>INT_TO_STR</code></td><td><code>int -- bytes</code></td><td>Convert an integer to its decimal string representation.</td></tr><tr><td><code>STR_TO_INT</code></td><td><code>bytes -- int</code></td><td>Parse a decimal string to an integer.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="19-type-conversion" class="doc-h2">19. Type Conversion</h2>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Operands</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>CAST</code></td><td><code>ttag [hint]</code></td><td><code>val -- val&#x27;</code></td><td>Convert the top value to the target <code>TTag</code>. Handles numeric widening/narrowing, <code>bool</code>↔numeric, <code>bytes</code>↔numeric (UTF-8 decode/encode), and struct/array identity casts. An optional <code>hint</code> string provides additional context.</td></tr><tr><td><code>BITCAST</code></td><td><code>ttag</code></td><td><code>val -- val&#x27;</code></td><td>Reinterpret the bytes of the top value as the target <code>TTag</code> without converting. E.g. bitcasting <code>float:1.0</code> to <code>uint</code> yields the IEEE 754 bit pattern.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="20-diagnostics" class="doc-h2">20. Diagnostics</h2>
+<table class="doc-table"><thead><tr><th>Opcode</th><th>Stack effect</th><th>Description</th></tr></thead><tbody><tr><td><code>ASSERT</code></td><td><code>val --</code></td><td>Pop a value; if it is falsy, abort with <code>VMError: comptime assertion failed</code>.</td></tr><tr><td><code>WARN</code></td><td><code>str --</code></td><td>Pop a string and print it as a compiler warning to stderr.</td></tr><tr><td><code>PANIC</code></td><td><code>str --</code></td><td>Pop a string and unconditionally abort with <code>VMError</code>.</td></tr></tbody></table>
+<hr class="doc-hr">
+<h2 id="21-python-api" class="doc-h2">21. Python API</h2>
+<h3 id="idkvm" class="doc-h3"><code>IDEKAVM</code></h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>class IDEKAVM:
+    <span class="ck-kw">def</span> __init__(
+        self,
+        struct_layouts: Dict[str, StructLayout] = None,
+        type_sizes:     Dict[str, <span class="ck-ty">int</span>]          = None,
+        heap_size:      <span class="ck-ty">int</span>                     = <span class="ck-num">16</span> * <span class="ck-num">1024</span> * <span class="ck-num">1024</span>,
+        source_file:    str                     = None,
+    ): ...</code></pre>
+</div>
+<table class="doc-table"><thead><tr><th>Parameter</th><th>Description</th></tr></thead><tbody><tr><td><code>struct_layouts</code></td><td>Dict of struct name → <code>StructLayout</code>, pre-populated by the parser or compiler.</td></tr><tr><td><code>type_sizes</code></td><td>Optional override dict of type name → byte size for custom types.</td></tr><tr><td><code>heap_size</code></td><td>Comptime heap size in bytes (default 16 MB).</td></tr><tr><td><code>source_file</code></td><td>Path of the source file being compiled; used to resolve relative imports.</td></tr></tbody></table>
+<p class="doc-p"><strong>Public methods:</strong></p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>vm.register_function(name: str, instructions: List[Instr])</code></pre>
+</div>
+<p class="doc-p">Register a comptime function by name. Must be called before <code>execute()</code> if the instructions call this function.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>vm.execute(instructions: List[Instr], local_count: <span class="ck-ty">int</span> = <span class="ck-num">0</span>) -&gt; Optional[Val]</code></pre>
+</div>
+<p class="doc-p">Execute a flat instruction list as a top-level comptime block. Returns the top-of-stack <code>Val</code> after <code>HALT</code>, or <code>None</code> if the stack is empty.</p>
+<p class="doc-p"><strong>Public attributes after <code>execute()</code>:</strong></p>
+<table class="doc-table"><thead><tr><th>Attribute</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>vm.emit_results</code></td><td><code>List[tuple]</code></td><td>Accumulated emit operations from <code>EMIT_CONST</code>, <code>EMIT_GLOBAL</code>, <code>EMIT_TYPE</code>, <code>EMITIDEKA</code>.</td></tr><tr><td><code>vm.last_locals</code></td><td><code>List[Val]</code></td><td>Snapshot of the top-level frame's locals after the last <code>HALT</code>.</td></tr><tr><td><code>vm.stack</code></td><td><code>List[Val]</code></td><td>The value stack (may be non-empty if <code>HALT</code> was reached mid-stack).</td></tr><tr><td><code>vm._globals</code></td><td><code>dict</code></td><td>Comptime global variables (persist between <code>execute()</code> calls).</td></tr></tbody></table>
+<p class="doc-p"><strong>Injected attributes (optional, set by the host compiler):</strong></p>
+<table class="doc-table"><thead><tr><th>Attribute</th><th>Description</th></tr></thead><tbody><tr><td><code>vm._codegen_class</code></td><td>Compiler's code-generation class, used by <code>compiler.import.*</code>.</td></tr><tr><td><code>vm._compiler_constants</code></td><td>Dict of preprocessor <code>#def</code> constants from <code>fmacros</code>.</td></tr></tbody></table>
+<h3 id="parsefvmsource" class="doc-h3"><code>parse_fvm_source</code></h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> parse_fvm_source(source: str) -&gt; Tuple[
+    List[Instr],
+    <span class="ck-ty">int</span>,
+    Dict[str, List[Instr]],
+    Dict[str, StructLayout],
+]:</code></pre>
+</div>
+<p class="doc-p">Parse a <code>.fvm</code> text file. Returns <code>(instructions, local_count, functions, struct_layouts)</code>.</p>
+<p class="doc-p">Raises <code>FVMParseError</code> with a line number on any syntax error.</p>
+<h3 id="serialisefvm" class="doc-h3"><code>serialise_fvm</code></h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">def</span> serialise_fvm(
+    instructions: List[Instr],
+    local_count:  <span class="ck-ty">int</span>,
+    functions:    Dict[str, List[Instr]],
+    struct_layouts: Dict[str, StructLayout] = None,
+) -&gt; str:</code></pre>
+</div>
+<p class="doc-p">Serialise a set of instructions and function definitions back to <code>.fvm</code> text. This is the inverse of <code>parse_fvm_source()</code>, used by <code>COMPILER_FVM_DUMP</code>.</p>
+<h3 id="vmheap" class="doc-h3"><code>VMHeap</code></h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>class VMHeap:
+    DEFAULT_SIZE = <span class="ck-num">16</span> * <span class="ck-num">1024</span> * <span class="ck-num">1024</span>
+
+    <span class="ck-kw">def</span> alloc(self, byte_size: <span class="ck-ty">int</span>, tag: TTag = TTag.PTR) -&gt; <span class="ck-ty">int</span>: ...
+    <span class="ck-kw">def</span> free(self, ptr: <span class="ck-ty">int</span>): ...
+    <span class="ck-kw">def</span> read(self, ptr: <span class="ck-ty">int</span>, byte_size: <span class="ck-ty">int</span>) -&gt; bytes: ...
+    <span class="ck-kw">def</span> write(self, ptr: <span class="ck-ty">int</span>, <span class="ck-kw">data</span>: bytes): ...
+    <span class="ck-kw">def</span> type_of(self, ptr: <span class="ck-ty">int</span>) -&gt; Optional[TTag]: ...
+    <span class="ck-kw">def</span> snapshot(self, ptr: <span class="ck-ty">int</span>, byte_size: <span class="ck-ty">int</span>) -&gt; bytes: ...</code></pre>
+</div>
+<p class="doc-p">The heap can be accessed directly via <code>vm.heap</code> if needed from Python host code.</p>
+<h3 id="errors" class="doc-h3">Errors</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">python</span>
+  </div>
+  <pre class="doc-pre"><code>class VMError(Exception): ...          <span class="ck-pp">#</span> Runtime errors
+class FVMParseError(Exception):        <span class="ck-pp">#</span> Parse errors; <span class="ck-kw">has</span> .lineno attribute
+    lineno: <span class="ck-ty">int</span>
+class IDEKAThrowSignal(Exception):      <span class="ck-pp">#</span> Raised by THROW; <span class="ck-kw">has</span> .value: Val
+    value: Val</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="22-serialisation-and-deserialisation" class="doc-h2">22. Serialisation and Deserialisation</h2>
+<p class="doc-p">The <code>.fvm</code> format is fully round-trippable. The host compiler uses <code>COMPILER_FVM_DUMP</code> to snapshot comptime state to disk; the CLI can then replay it.</p>
+<h3 id="value-serialisation-serialiseval" class="doc-h3">Value serialisation (<code>_serialise_val</code>)</h3>
+<p class="doc-p">Converts a <code>Val</code> back to a <code>type:value</code> token string. PTR values with meta (struct pointer, array pointer) include a bracketed meta suffix so struct field values and array elements are preserved across serialisation.</p>
+<h3 id="instruction-serialisation-serialiseinstr" class="doc-h3">Instruction serialisation (<code>_serialise_instr</code>)</h3>
+<p class="doc-p">Converts an <code>Instr</code> to a <code>.fvm</code> line (opcode + operands). Handles all opcodes including multi-operand ones (<code>CALL</code>, <code>JTABLE</code>, <code>EMITIDEKA</code>, <code>INLINE_ASM</code>).</p>
+<h3 id="file-layout-output-of-serialisefvm" class="doc-h3">File layout (output of <code>serialise_fvm</code>)</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> Generated by compiler.fvm.dump
+
+<span class="ck-kw">struct</span> PointList little <span class="ck-num">16</span> <span class="ck-num">0</span>
+    field head ptr <span class="ck-num">0</span> <span class="ck-num">8</span>
+    field len <span class="ck-ty">int</span> <span class="ck-num">8</span> <span class="ck-num">4</span>
+endstruct
+
+func compute_sum
+    LOCAL_GET <span class="ck-num">0</span>
+    LOCAL_GET <span class="ck-num">1</span>
+    ADD
+    RET
+endfunc
+
+locals <span class="ck-num">3</span>
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">10</span>
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">20</span>
+CALL compute_sum <span class="ck-num">2</span>
+HALT</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="23-error-handling" class="doc-h2">23. Error Handling</h2>
+<table class="doc-table"><thead><tr><th>Condition</th><th>Error</th></tr></thead><tbody><tr><td>Stack underflow</td><td><code>VMError: Stack underflow</code></td></tr><tr><td>Division by zero</td><td><code>VMError: Division by zero in comptime</code></td></tr><tr><td>Unknown opcode</td><td><code>VMError: Unknown opcode: &lt;name&gt;</code></td></tr><tr><td>Unknown function</td><td><code>VMError: Unknown comptime function: &lt;name&gt;</code></td></tr><tr><td>Ambiguous overload</td><td><code>VMError: Ambiguous comptime function: &lt;name&gt; matches [...]</code></td></tr><tr><td>Heap out-of-memory</td><td><code>VMError: VMHeap: out of memory (requested N, available M)</code></td></tr><tr><td>Heap out-of-bounds</td><td><code>VMError: VMHeap: out-of-bounds access at ptr=N size=M</code></td></tr><tr><td>Invalid free</td><td><code>VMError: VMHeap.free: invalid pointer N</code></td></tr><tr><td>Unhandled throw</td><td><code>VMError: Unhandled comptime throw: &lt;val&gt;</code></td></tr><tr><td>FFI load failure</td><td><code>VMError: FFI_LOAD: &lt;os error&gt;</code></td></tr><tr><td>FFI symbol not found</td><td><code>VMError: FFI_SYM: symbol &lt;name&gt; not found</code></td></tr><tr><td>Extern symbol not resolved</td><td><code>VMError: extern: symbol &lt;name&gt; not found in any loaded library</code></td></tr><tr><td>INLINE_ASM: wrong arch</td><td><code>VMError: INLINE_ASM: x86-64 required at comptime, got &lt;arch&gt;</code></td></tr><tr><td>INLINE_ASM: keystone missing</td><td><code>VMError: INLINE_ASM: keystone-engine is not installed</code></td></tr><tr><td>INLINE_ASM: assembly failed</td><td><code>VMError: INLINE_ASM: assembly failed: &lt;details&gt;</code></td></tr><tr><td>Watchdog timeout</td><td><code>VMError: comptime execution exceeded 300s (N instructions) ...</code></td></tr><tr><td>Parse error</td><td><code>FVMParseError: line N: &lt;message&gt;</code></td></tr></tbody></table>
+<p class="doc-p">The watchdog checks every 50,000 instructions and raises <code>VMError</code> if the 5-minute limit is exceeded. The error message includes the current function name, instruction pointer, locals, and top-6 stack values to assist debugging.</p>
+<hr class="doc-hr">
+<h2 id="24-examples" class="doc-h2">24. Examples</h2>
+<h3 id="hello-world" class="doc-h3">Hello world</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> hello.fvm
+PUSH bytes:<span class="ck-str">&quot;Hello, world!\n&quot;</span>
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<p class="doc-p">Run with:</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>python fvm.py hello.fvm</code></pre>
+</div>
+<h3 id="arithmetic-and-locals" class="doc-h3">Arithmetic and locals</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> compute.fvm
+locals <span class="ck-num">2</span>
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">10</span>
+LOCAL_SET <span class="ck-num">0</span>
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">32</span>
+LOCAL_SET <span class="ck-num">1</span>
+LOCAL_GET <span class="ck-num">0</span>
+LOCAL_GET <span class="ck-num">1</span>
+ADD
+INT_TO_STR
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<p class="doc-p">Output: <code>42</code></p>
+<h3 id="defining-and-calling-a-function" class="doc-h3">Defining and calling a function</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> factorial.fvm
+func factorial
+    <span class="ck-pp">#</span> arg <span class="ck-kw">in</span> locals[<span class="ck-num">0</span>]
+    LOCAL_GET <span class="ck-num">0</span>
+    PUSH <span class="ck-ty">int</span>:<span class="ck-num">1</span>
+    CMP_LE
+    JIF <span class="ck-num">8</span>           <span class="ck-pp">#</span> <span class="ck-kw">if</span> n &lt;= <span class="ck-num">1</span>, jump to instruction <span class="ck-num">8</span>
+    LOCAL_GET <span class="ck-num">0</span>
+    PUSH <span class="ck-ty">int</span>:<span class="ck-num">1</span>
+    SUB
+    CALL factorial <span class="ck-num">1</span>
+    LOCAL_GET <span class="ck-num">0</span>
+    MUL
+    RET
+    <span class="ck-pp">#</span> instruction <span class="ck-num">8</span>: base <span class="ck-kw">case</span>
+    PUSH <span class="ck-ty">int</span>:<span class="ck-num">1</span>
+    RET
+endfunc
+
+locals <span class="ck-num">1</span>
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">10</span>
+CALL factorial <span class="ck-num">1</span>
+INT_TO_STR
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<h3 id="using-a-struct" class="doc-h3">Using a struct</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> struct_demo.fvm
+<span class="ck-kw">struct</span> Vec2 little <span class="ck-num">8</span> <span class="ck-num">0</span>
+    field x <span class="ck-ty">int</span> <span class="ck-num">0</span> <span class="ck-num">4</span>
+    field y <span class="ck-ty">int</span> <span class="ck-num">4</span> <span class="ck-num">4</span>
+endstruct
+
+STRUCT_NEW Vec2
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">3</span>
+STRUCT_STORE x
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">4</span>
+STRUCT_STORE y
+DUP
+STRUCT_LOAD x
+INT_TO_STR
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<h3 id="reading-a-file-at-comptime" class="doc-h3">Reading a file at comptime</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> read_cfg.fvm
+PUSH bytes:<span class="ck-str">&quot;config.txt&quot;</span>
+COMPILER_READFILE
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<h3 id="exception-handling" class="doc-h3">Exception handling</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> exceptions.fvm
+TRY_BEGIN <span class="ck-num">6</span>        <span class="ck-pp">#</span> <span class="ck-kw">catch</span> at instruction <span class="ck-num">6</span>
+PUSH bytes:<span class="ck-str">&quot;something failed&quot;</span>
+THROW
+TRY_END            <span class="ck-pp">#</span> <span class="ck-kw">not</span> reached
+JMP <span class="ck-num">7</span>              <span class="ck-pp">#</span> skip <span class="ck-kw">catch</span> block
+<span class="ck-pp">#</span> instruction <span class="ck-num">6</span>: <span class="ck-kw">catch</span> handler
+PUSH bytes:<span class="ck-str">&quot;Caught: &quot;</span>
+SWAP
+STR_CAT
+COMPILER_PRINT
+<span class="ck-pp">#</span> instruction <span class="ck-num">7</span>:
+HALT</code></pre>
+</div>
+<h3 id="ffi-call-to-strlen" class="doc-h3">FFI call to strlen</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> ffi_strlen.fvm
+FFI_LOAD <span class="ck-str">&quot;libc.so.6&quot;</span>
+FFI_SYM strlen
+PUSH bytes:<span class="ck-str">&quot;hello world&quot;</span>
+FFI_CALL <span class="ck-num">1</span> <span class="ck-ty">uint</span>
+INT_TO_STR
+COMPILER_PRINT
+HALT</code></pre>
+</div>
+<h3 id="emitting-a-constant-to-the-compiler" class="doc-h3">Emitting a constant to the compiler</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#</span> emit_const.fvm
+PUSH <span class="ck-ty">int</span>:<span class="ck-num">256</span>
+EMIT_CONST
+HALT</code></pre>
+</div>
+<p class="doc-p">After <code>execute()</code>, <code>vm.emit_results</code> will contain <code>[(&#x27;const&#x27;, Val(TTag.INT, 256))]</code>.</p>
+  </main>
+</div>
+
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <a href="/" class="nav-logo footer-logo">
+        <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+          <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+          <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+          <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+        </svg>
+        <span class="nav-logo-text">IDEKA</span>
+      </a>
+      <div class="footer-sep"></div>
+      <span class="footer-copy">&copy; Karac Von Thweatt. All rights reserved.</span>
+      <div class="footer-links">
+        <a href="https://github.com/kvthweatt/IDEKALang" target="_blank">GitHub</a>
+        <a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+
+// Active TOC link on scroll
+(function() {
+    const links = document.querySelectorAll('.doc-toc-link');
+    if (!links.length) return;
+    const headings = Array.from(document.querySelectorAll(
+        '.doc-content h1[id],h2[id],h3[id],h4[id]'
+    ));
+    function onScroll() {
+        const scrollY = window.scrollY + 90;
+        let active = null;
+        for (const h of headings) {
+            if (h.offsetTop <= scrollY) active = h.id;
+        }
+        links.forEach(l => {
+            const href = l.getAttribute('href');
+            l.classList.toggle('active', href === '#' + active);
+        });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+})();
+
+// Hamburger
+(function() {
+    const btn  = document.getElementById('nav-hamburger');
+    const menu = document.getElementById('nav-mobile-menu');
+    if (!btn || !menu) return;
+    function toggle(open) {
+        btn.classList.toggle('open', open);
+        menu.classList.toggle('open', open);
+        btn.setAttribute('aria-expanded', String(open));
+        menu.setAttribute('aria-hidden', String(!open));
+    }
+    btn.addEventListener('click', () => toggle(!btn.classList.contains('open')));
+    menu.querySelectorAll('.nav-mobile-link').forEach(l => l.addEventListener('click', () => toggle(false)));
+    document.addEventListener('click', e => {
+        if (btn.classList.contains('open') && !btn.contains(e.target) && !menu.contains(e.target))
+            toggle(false);
+    });
+})();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "IDEKA.lang",
+  "publisher": "IDEKA",
+  "displayName": "IDEKA Language Support",
+  "description": "Syntax highlighting and language support for IDEKA",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "IDEKA",
+      "aliases": ["IDEKA", "IDEKA"],
+      "extensions": [".idk"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "IDEKA",
+      "scopeName": "source.IDEKA",
+      "path": "./syntaxes/IDEKA.tmLanguage.json"
+    }]
+  }
+}

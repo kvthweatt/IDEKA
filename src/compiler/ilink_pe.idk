@@ -605,7 +605,7 @@ namespace IDEKA
                 L.s_grp[gs] = pe_group(nm, L.s_chars[gs]);
                 L.s_goff[gs] = 0;
                 L.s_rva[gs] = 0;
-                if (L.s_grp[gs] >= 0 & L.s_grp[gs] != 5 & L.s_rawsize[gs] > 0 & L.s_rawptr[gs] + L.s_rawsize[gs] > n) { -> pe_fail(L, "section outside the file\0"); };
+                if (L.s_grp[gs] >= 0 & L.s_grp[gs] != 3 & L.s_grp[gs] != 5 & L.s_rawsize[gs] > 0 & L.s_rawptr[gs] + L.s_rawsize[gs] > n) { -> pe_fail(L, "section outside the file\0"); };
                 i++;
             };
             i = 0;

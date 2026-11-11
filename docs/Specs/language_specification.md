@@ -942,7 +942,7 @@ An interface takes effect when it is attached to an object, after the closing br
 object Client { /// ... /// } : Database(this, Store);
 ```
 
-The arguments bind to the interface roles in declaration order: `Database(this, Store)` binds `A` to `Client` (`this`) and `B` to `Store`. Several interfaces may be attached by separating them with commas: `} : Database(this, Store), Audit(this, Log);`.
+The arguments bind to the interface roles in declaration order: `Database(this, Store)` binds `A` to `Client` (`this`) and `B` to `Store`. Several interfaces may be attached by separating them with commas: `} : Database(this, Store), Audit(this, Log);`. Attaching with the wrong argument order is a compile error if the resulting role bindings violate trait constraints.
 
 When an interface is attached, the compiler:
 
@@ -1002,7 +1002,7 @@ sink.write(src.peek());
 // Interface violation: return value of 'Source.peek' is not permitted to be passed as an argument into 'Sink'
 ```
 
-The check looks at arguments that are direct method calls on a named variable (`src.read()`). A value first stored in a variable and then passed is not tracked.
+The check looks at arguments that are direct method calls on a named variable (`src.read()`). A value first stored in a variable and then passed is tracked as well.
 
 ### `A -> B` - return-to permission
 
@@ -1039,7 +1039,6 @@ interface Database(A: Connectable, B: Queryable)
 {
     A : B
     {
-        connect()    -> bool,
         disconnect() -> void
     };
 

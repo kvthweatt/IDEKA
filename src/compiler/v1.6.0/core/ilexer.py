@@ -191,6 +191,7 @@ class TokenType(Enum):
     BACKTICK = auto()       # `
     # Logical
     BITNOT_OP = auto()      # `!
+    BITSTAR = auto()        # `*  bit pointer declarator and dereference
     BITAND_OP = auto()      # `&
     BITOR_OP = auto()       # `|
     BITNAND_OP = auto()     # `!&
@@ -306,6 +307,7 @@ triple_char_tokens = {
 } | triple_binary_tokens
 
 double_binary_tokens = {
+    '`*': TokenType.BITSTAR,
     '`!': TokenType.BITNOT_OP,
     '`&': TokenType.BITAND_OP,
     '`|': TokenType.BITOR_OP
@@ -618,6 +620,7 @@ class IDEKALexer:
             'sizeof': TokenType.SIZEOF,
             'stack': TokenType.STACK,
             'struct': TokenType.STRUCT,
+            'cstruct': TokenType.STRUCT,
             'switch': TokenType.SWITCH,
             'this': TokenType.THIS,
             'throw': TokenType.THROW,

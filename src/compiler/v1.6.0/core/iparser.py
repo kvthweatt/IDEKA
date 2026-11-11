@@ -3952,8 +3952,24 @@ class IDEKAParser:
     
     def struct_def(self) -> Union[StructDef, List[StructDef]]:
         """
-        struct_def -> 'struct' IDENTIFIER (',' IDENTIFIER)* (';' | '{' struct_member* '}')
+        struct_def -> ('struct' | 'cstruct') IDENTIFIER (',' IDENTIFIER)* (';' | '{' struct_member* '}')
+        A 'cstruct' lays its fields out with the C ABI (natural alignment, tail padding).
         """
+        is_c = self.current_token.value == 'cstruct'
+        result = self._struct_def_impl()
+        if is_c:
+            defs = result if isinstance(result, list) else [result]
+            for d in defs:
+                if d is not None:
+                    d.is_c_layout = True
+            if result is None and getattr(self, '_last_template_registered', None):
+                info = self._templates.lookup(self._last_template_registered)
+                node = getattr(info, 'node', None)
+                if node is not None:
+                    node.is_c_layout = True
+        return result
+
+    def _struct_def_impl(self) -> Union[StructDef, List[StructDef]]:
         tok = self.current_token
         self.consume(TokenType.STRUCT)
         name = self.consume(TokenType.IDENTIFIER).value
@@ -5538,6 +5554,14 @@ class IDEKAParser:
         ).set_location(tok.line, tok.column)
     
     def type_spec(self) -> TypeSystem:
+        ts = self._type_spec_impl()
+        if self.expect(TokenType.BITSTAR):
+            self.advance()
+            import dataclasses as _dc
+            ts = _dc.replace(ts, is_bit_pointer=True)
+        return ts
+
+    def _type_spec_impl(self) -> TypeSystem:
         """
         type_spec -> ('global'|'local'|'heap'|'stack'|'register')? ('const')? ('volatile')? ('signed'|'unsigned')? ('~')? base_type alignment? array_spec? pointer_spec?
         array_spec -> ('[' expression? ']')+
@@ -8641,6 +8665,12 @@ class IDEKAParser:
             self.advance()
             operand = self.cast_expression()
             return UnaryOp(operator, operand).set_location(tok.line, tok.column)
+        elif self.expect(TokenType.BITSTAR):
+            # Bit pointer dereference operator
+            tok = self.current_token
+            self.advance()
+            operand = self.cast_expression()
+            return BitPointerDeref(operand).set_location(tok.line, tok.column)
         elif self.expect(TokenType.MULTIPLY):
             # Pointer dereference operator
             tok = self.current_token

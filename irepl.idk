@@ -1,0 +1,1699 @@
+// Author: Karac V. Thweatt
+//
+// irepl.idk - IDEKA REPL (port of irepl.py)
+//
+// Interactive read-eval-print loop powered by the IDEKA VM. Input is collected with a raw
+// terminal multi-line editor: ENTER inserts a new line (indented like the previous one) and
+// CTRL+ENTER (the byte 0x0A, same as CTRL+J) compiles and runs the buffer. The input is wrapped
+// in a comptime block, parsed, compiled by IDKVMCodegen and executed on the persistent IDEKAVM,
+// the way icodegen.idk runs a comptime block (ct_run).
+//
+// Linux uses termios through ioctl, Windows uses the Win32 console API.
+
+module IDEKA_REPL
+{
+    #import <standard.idk>;
+    #import <runtime/ffifio.idk>;
+#ifdef __WINDOWS__
+    #import <console.idk>;
+#endif;
+    #import "src/compiler/ivmcodegen.idk";
+    #import "src/compiler/iparser.idk";
+    #import "src/compiler/ipreprocess.idk";
+
+    using standard::io::console;
+    using IDEKA::ast;
+    using IDEKA::lexer;
+    using IDEKA::preprocessor;
+    using IDEKA::parser;
+    using IDEKA::IDKVM;
+    using IDEKA::idkvmcodegen;
+
+#ifdef __LINUX__
+    extern
+    {
+        def !!
+            read(int, void*, i64)   -> i64,
+            ioctl(int, u64, void*)  -> int;
+    };
+#endif;
+
+#ifdef __WINDOWS__
+    extern
+    {
+        def !!
+            _getwch() -> int;
+    };
+#endif;
+
+    // ===== constants =====
+
+    #def REPL_KEY_EOF   (0 - 1);
+    #def REPL_KEY_NONE  0;
+    #def REPL_KEY_UP    1001;
+    #def REPL_KEY_DOWN  1002;
+    #def REPL_KEY_LEFT  1003;
+    #def REPL_KEY_RIGHT 1004;
+
+    #def REPL_CTRL_C 3;
+    #def REPL_CTRL_D 4;
+    #def REPL_ENTER  13;
+    #def REPL_SUBMIT 10;
+
+    // ===== output =====
+
+    repl_out(byte* s) -> void
+    {
+        print(s);
+        flush();
+        ->;
+    };
+
+    repl_outln(byte* s) -> void
+    {
+        print(s);
+        print(g"\n\0");
+        flush();
+        ->;
+    };
+
+    repl_flush_buf(FvmBuf* b) -> void
+    {
+        b.put(0);
+        print(b.mem);
+        flush();
+        b.len = 0;
+        b.mem[0] = (byte)0;
+        ->;
+    };
+
+    repl_hex_digit(int v) -> int
+    {
+        if (v < 10) { -> 48 + v; };
+        -> 87 + v;
+    };
+
+    repl_put_hex(FvmBuf* o, i64 v) -> void
+    {
+        byte[20] tmp = noinit;
+        int n, d;
+        u64 t = (u64)v;
+        if (t == (u64)0)
+        {
+            o.put(48);
+            ->;
+        };
+        while (t != (u64)0)
+        {
+            d = (int)(t `& (u64)15);
+            if (d < 10) { tmp[n] = (byte)(48 + d); } else { tmp[n] = (byte)(87 + d); };
+            t = t >> (u64)4;
+            n++;
+        };
+        while (n > 0)
+        {
+            n--;
+            o.put((int)tmp[n]);
+        };
+        ->;
+    };
+
+    // A Win32 COORD packed in an int: X in the low word, Y in the high word. Done in int on purpose:
+    // console.idk make_coord shifts an i16, which loses Y.
+    repl_coord(int x, int y) -> int
+    {
+        -> (x `& 0xFFFF) `| ((y `& 0xFFFF) << 16);
+    };
+
+    // ===== terminal layer =====
+
+    // True for a UTF-8 continuation byte (10xxxxxx)
+    repl_cont(int b) -> bool
+    {
+        -> (b `& 0xC0) == 0x80;
+    };
+
+    // Number of screen columns of text[from, to): one per non-continuation byte
+    repl_cols(byte* text, int a0, int b0) -> int
+    {
+        int n, i;
+        i = a0;
+        while (i < b0)
+        {
+            if (!repl_cont((int)text[i])) { n++; };
+            i++;
+        };
+        -> n;
+    };
+
+    object Term
+    {
+        bool raw;
+        bool tty;
+        byte[64] saved;
+        byte[64] cur_termios;
+
+        __init() -> this
+        {
+            this.raw = false;
+            this.tty = false;
+            -> this;
+        };
+
+        __expr() -> Term* -> this;
+
+        __exit() -> void -> (void)this;
+
+#ifdef __LINUX__
+        // tty.setraw: no echo, no line buffering, no signals, no output post-processing
+        enter_raw() -> void
+        {
+            u32* f;
+            int i;
+            if (ioctl(0, (u64)0x5401, (void*)@this.saved[0]) != 0)
+            {
+                this.tty = false;
+                ->;
+            };
+            this.tty = true;
+            i = 0;
+            while (i < 64)
+            {
+                this.cur_termios[i] = this.saved[i];
+                i++;
+            };
+            f = (u32*)@this.cur_termios[0];
+            f[0] = f[0] `& (u32)(`!(0x02 `| 0x100 `| 0x10 `| 0x20 `| 0x400));   // BRKINT ICRNL INPCK ISTRIP IXON
+            f[1] = f[1] `& (u32)(`!0x01);                                      // OPOST
+            f[2] = (f[2] `& (u32)(`!(0x30 `| 0x100))) `| (u32)0x30;          // CSIZE PARENB, then CS8
+            f[3] = f[3] `& (u32)(`!(0x08 `| 0x02 `| 0x8000 `| 0x01));       // ECHO ICANON IEXTEN ISIG
+            this.cur_termios[17 + 6] = (byte)1;                                // VMIN
+            this.cur_termios[17 + 5] = (byte)0;                                // VTIME
+            ioctl(0, (u64)0x5402, (void*)@this.cur_termios[0]);
+            this.raw = true;
+            ->;
+        };
+
+        leave_raw() -> void
+        {
+            if (this.raw)
+            {
+                ioctl(0, (u64)0x5403, (void*)@this.saved[0]);
+                this.raw = false;
+            };
+            ->;
+        };
+
+        // One byte from standard input, -1 at end of input
+        rd() -> int
+        {
+            byte[4] b = noinit;
+            i64 n = read(0, (void*)@b[0], (i64)1);
+            if (n <= (i64)0) { -> -1; };
+            -> (int)b[0];
+        };
+
+        // One logical key: a byte, a REPL_KEY_* code, REPL_KEY_NONE or REPL_KEY_EOF
+        read_key() -> int
+        {
+            int ch, seq, code;
+            ch = this.rd();
+            if (ch < 0) { -> REPL_KEY_EOF; };
+            if (ch == 27)
+            {
+                seq = this.rd();
+                if (seq == '[')
+                {
+                    code = this.rd();
+                    switch (code)
+                    {
+                        case ('A') { -> REPL_KEY_UP; }
+                        case ('B') { -> REPL_KEY_DOWN; }
+                        case ('C') { -> REPL_KEY_RIGHT; }
+                        case ('D') { -> REPL_KEY_LEFT; }
+                        default {};
+                    };
+                };
+                -> REPL_KEY_NONE;
+            };
+            -> ch;
+        };
+
+        // Asks the terminal for the cursor position (ESC [ 6 n) and says whether it is in column 1.
+        // Output written without a trailing newline (compiler.io.console.print) leaves it elsewhere.
+        at_line_start() -> bool
+        {
+            int c, col, state;
+            if (!this.tty) { -> true; };
+            repl_out(g"\x1b[6n\0");
+            // reply: ESC [ row ; col R
+            while (true)
+            {
+                c = this.rd();
+                if (c < 0) { -> true; };
+                if (c == 27) { state = 1; }
+                elif (state == 1 & c == '[') { state = 2; }
+                elif (state == 2)
+                {
+                    if (c == ';') { state = 3; col = 0; };
+                }
+                elif (state == 3)
+                {
+                    if (c == 'R') { -> col <= 1; };
+                    if (c >= '0' & c <= '9') { col = col * 10 + (c - '0'); };
+                };
+            };
+            -> true;
+        };
+#endif;
+
+#ifdef __WINDOWS__
+        enter_raw() -> void
+        {
+            this.tty = true;
+            ->;
+        };
+
+        leave_raw() -> void
+        {
+            ->;
+        };
+
+        read_key() -> int
+        {
+            int ch, code;
+            ch = _getwch();
+            if (ch == 0 | ch == 0xE0)
+            {
+                code = _getwch();
+                switch (code)
+                {
+                    case ('H') { -> REPL_KEY_UP; }
+                    case ('P') { -> REPL_KEY_DOWN; }
+                    case ('K') { -> REPL_KEY_LEFT; }
+                    case ('M') { -> REPL_KEY_RIGHT; }
+                    default {};
+                };
+                -> REPL_KEY_NONE;
+            };
+            -> ch;
+        };
+#endif;
+    };
+
+#ifdef __WINDOWS__
+    // Direct Win32 console access for the in-place redraw
+    object WinCon
+    {
+        i64 h;
+        byte[24] info;
+
+        __init() -> this
+        {
+            this.h = GetStdHandle(-11);
+            -> this;
+        };
+
+        __expr() -> WinCon* -> this;
+
+        __exit() -> void -> (void)this;
+
+        refresh() -> void
+        {
+            GetConsoleScreenBufferInfo(this.h, (void*)@this.info[0]);
+            ->;
+        };
+
+        buffer_width() -> int
+        {
+            this.refresh();
+            -> (int)((i16*)@this.info[0])[0];
+        };
+
+        cursor_x() -> int
+        {
+            this.refresh();
+            -> (int)((i16*)@this.info[0])[2];
+        };
+
+        cursor_y() -> int
+        {
+            this.refresh();
+            -> (int)((i16*)@this.info[0])[3];
+        };
+
+        set_cursor(int x, int y) -> void
+        {
+            SetConsoleCursorPosition(this.h, repl_coord(x, y));
+            ->;
+        };
+
+        clear_lines(int x, int y, int width, int num_lines) -> void
+        {
+            int written;
+            FillConsoleOutputCharacterA(this.h, (byte)' ', width * num_lines, repl_coord(x, y), @written);
+            ->;
+        };
+    };
+#endif;
+
+    // ===== multi-line editor =====
+
+    // The buffer is one run of bytes, lines separated by 0x0A. cur is a byte offset.
+    object Editor
+    {
+        FvmBuf t;           // the text
+        FvmBuf ind;         // indentation carried across blank lines
+        FvmBuf ob;          // output staging
+        byte* prompt;
+        byte* cont;
+        int cur;
+        bool first;
+        Term* term;
+        int win_ox, win_oy;
+        int win_prev;
+
+        __init(byte* prompt, byte* cont, Term* term) -> this
+        {
+            this.t.__init();
+            this.ind.__init();
+            this.ob.__init();
+            this.prompt = prompt;
+            this.cont = cont;
+            this.cur = 0;
+            this.first = true;
+            this.term = term;
+            this.win_prev = 0;
+            -> this;
+        };
+
+        __expr() -> Editor* -> this;
+
+        __exit() -> void
+        {
+            this.t.__exit();
+            this.ind.__exit();
+            this.ob.__exit();
+            ->;
+        };
+
+        // -- geometry --
+
+        // Offset where the line holding byte offset p starts
+        ls_of(int p) -> int
+        {
+            while (p > 0 & this.t.mem[p - 1] != (byte)10) { p--; };
+            -> p;
+        };
+
+        // Offset one past the last byte of the line holding p
+        le_of(int p) -> int
+        {
+            while (p < this.t.len & this.t.mem[p] != (byte)10) { p++; };
+            -> p;
+        };
+
+        row_of(int p) -> int
+        {
+            int r, i;
+            while (i < p)
+            {
+                if (this.t.mem[i] == (byte)10) { r++; };
+                i++;
+            };
+            -> r;
+        };
+
+        line_count() -> int
+        {
+            int r, i;
+            r = 1;
+            while (i < this.t.len)
+            {
+                if (this.t.mem[i] == (byte)10) { r++; };
+                i++;
+            };
+            -> r;
+        };
+
+        // Byte offset reached from ls after advancing c columns, not past le
+        off_for_cols(int ls, int le, int c) -> int
+        {
+            int p = ls;
+            while (c > 0 & p < le)
+            {
+                p++;
+                while (p < le & repl_cont((int)this.t.mem[p])) { p++; };
+                c--;
+            };
+            -> p;
+        };
+
+        // -- rendering --
+
+#ifdef __WINDOWS__
+        render() -> void
+        {
+            this.render_windows();
+            ->;
+        };
+#endif;
+
+#ifdef __LINUX__
+        render() -> void
+        {
+            this.render_ansi();
+            ->;
+        };
+#endif;
+
+#ifdef __LINUX__
+        render_ansi() -> void
+        {
+            int i, ls, le, row, lines, below, plen, tcol;
+            FvmBuf* o = @this.ob;
+            if (this.first)
+            {
+                this.first = false;
+                if (!this.term.at_line_start()) { o.put_str(g"\r\n\0"); };
+            };
+            o.put(13);
+            o.put_str(g"\x1b[J\0");
+            lines = this.line_count();
+            ls = 0;
+            i = 0;
+            while (i < lines)
+            {
+                le = this.le_of(ls);
+                if (i == 0) { o.put_str(this.prompt); } else { o.put_str(this.cont); };
+                o.put_n(this.t.mem + ls, le - ls);
+                if (i != lines - 1) { o.put_str(g"\r\n\0"); };
+                ls = le + 1;
+                i++;
+            };
+            row = this.row_of(this.cur);
+            below = (lines - 1) - row;
+            if (below > 0)
+            {
+                o.put_str(g"\x1b[\0");
+                o.put_int(below);
+                o.put(65);
+            };
+            if (row == 0) { plen = idkvm_strlen(this.prompt); } else { plen = idkvm_strlen(this.cont); };
+            o.put(13);
+            ls = this.ls_of(this.cur);
+            tcol = plen + repl_cols(this.t.mem, ls, this.cur);
+            if (tcol > 0)
+            {
+                o.put_str(g"\x1b[\0");
+                o.put_int(tcol);
+                o.put(67);
+            };
+            repl_flush_buf(o);
+            ->;
+        };
+#endif;
+
+#ifdef __WINDOWS__
+        // rows a line of text_len columns takes in a console of the given width
+        rows_for(int text_len, int width) -> int
+        {
+            if (text_len == 0) { -> 1; };
+            -> (text_len + width - 1) / width;
+        };
+
+        render_windows() -> void
+        {
+            WinCon con;
+            int width, lines, i, ls, le, tl, total, ex, ey, noy, trow, plen, scol, apos, tcol, row, col, rr;
+            int[256] rc = noinit;
+            con.__init();
+            width = con.buffer_width();
+            if (width < 1) { width = 1; };
+            if (this.first)
+            {
+                this.first = false;
+                if (con.cursor_x() != 0) { repl_out(g"\r\n\0"); };
+                this.win_ox = con.cursor_x();
+                this.win_oy = con.cursor_y();
+            };
+            lines = this.line_count();
+            if (lines > 256) { lines = 256; };
+            ls = 0;
+            i = 0;
+            total = 0;
+            while (i < lines)
+            {
+                le = this.le_of(ls);
+                if (i == 0) { plen = idkvm_strlen(this.prompt); } else { plen = idkvm_strlen(this.cont); };
+                tl = plen + repl_cols(this.t.mem, ls, le);
+                rc[i] = this.rows_for(tl, width);
+                total = total + rc[i];
+                ls = le + 1;
+                i++;
+            };
+            // blank every row the editor covers now or covered before, including the part of the
+            // first row left of the prompt: text printed earlier (compiler output, the last
+            // result) must not show through at the end of a line
+            rr = this.win_prev;
+            if (total > rr) { rr = total; };
+            con.clear_lines(0, this.win_oy, width, rr);
+            con.set_cursor(this.win_ox, this.win_oy);
+            ls = 0;
+            i = 0;
+            while (i < lines)
+            {
+                le = this.le_of(ls);
+                if (i == 0) { repl_out(this.prompt); } else { repl_out(this.cont); };
+                this.ob.put_n(this.t.mem + ls, le - ls);
+                repl_flush_buf(@this.ob);
+                if (i != lines - 1) { repl_out(g"\r\n\0"); };
+                ls = le + 1;
+                i++;
+            };
+            ex = con.cursor_x();
+            ey = con.cursor_y();
+            noy = ey - (total - 1);
+            if (noy < 0) { noy = 0; };
+            this.win_oy = noy;
+            this.win_prev = total;
+            row = this.row_of(this.cur);
+            trow = noy;
+            rr = 0;
+            while (rr < row)
+            {
+                trow = trow + rc[rr];
+                rr++;
+            };
+            if (row == 0) { plen = idkvm_strlen(this.prompt); scol = this.win_ox + plen; }
+            else { plen = idkvm_strlen(this.cont); scol = plen; };
+            col = repl_cols(this.t.mem, this.ls_of(this.cur), this.cur);
+            apos = scol + col;
+            trow = trow + apos / width;
+            tcol = apos % width;
+            con.set_cursor(tcol, trow);
+            ->;
+        };
+#endif;
+
+        // -- editing ops --
+
+        insert_byte(int ch) -> void
+        {
+            int j;
+            this.t.put(ch);
+            j = this.t.len - 1;
+            while (j > this.cur)
+            {
+                this.t.mem[j] = this.t.mem[j - 1];
+                j--;
+            };
+            this.t.mem[this.cur] = (byte)ch;
+            this.t.mem[this.t.len] = (byte)0;
+            this.cur++;
+            ->;
+        };
+
+        // Removes the bytes [a, b)
+        remove_range(int a, int b) -> void
+        {
+            int j = a;
+            while (b < this.t.len)
+            {
+                this.t.mem[j] = this.t.mem[b];
+                j++;
+                b++;
+            };
+            this.t.len = j;
+            this.t.mem[j] = (byte)0;
+            ->;
+        };
+
+        // The enter key: split the line, indent the new one like the line being left
+        enter() -> void
+        {
+            int ls, i, c;
+            bool content;
+            ls = this.ls_of(this.cur);
+            i = ls;
+            while (i < this.cur)
+            {
+                c = (int)this.t.mem[i];
+                if (c != ' ' & c != '\t' & c != 10 & c != 13 & c != 11 & c != 12) { content = true; };
+                i++;
+            };
+            if (content)
+            {
+                this.ind.len = 0;
+                this.ind.mem[0] = (byte)0;
+                i = ls;
+                while (i < this.cur & (this.t.mem[i] == (byte)' ' | this.t.mem[i] == (byte)'\t'))
+                {
+                    this.ind.put((int)this.t.mem[i]);
+                    i++;
+                };
+            };
+            this.insert_byte(10);
+            i = 0;
+            while (i < this.ind.len)
+            {
+                this.insert_byte((int)this.ind.mem[i]);
+                i++;
+            };
+            ->;
+        };
+
+        backspace() -> void
+        {
+            int p;
+            if (this.cur == 0) { ->; };
+            p = this.cur - 1;
+            while (p > 0 & repl_cont((int)this.t.mem[p])) { p--; };
+            this.remove_range(p, this.cur);
+            this.cur = p;
+            ->;
+        };
+
+        move_left() -> void
+        {
+            if (this.cur == 0) { ->; };
+            this.cur--;
+            while (this.cur > 0 & repl_cont((int)this.t.mem[this.cur])) { this.cur--; };
+            ->;
+        };
+
+        move_right() -> void
+        {
+            if (this.cur >= this.t.len) { ->; };
+            this.cur++;
+            while (this.cur < this.t.len & repl_cont((int)this.t.mem[this.cur])) { this.cur++; };
+            ->;
+        };
+
+        move_up() -> void
+        {
+            int ls, ps, col, pl;
+            ls = this.ls_of(this.cur);
+            if (ls == 0) { ->; };
+            col = repl_cols(this.t.mem, ls, this.cur);
+            ps = this.ls_of(ls - 1);
+            pl = repl_cols(this.t.mem, ps, ls - 1);
+            if (col > pl) { col = pl; };
+            this.cur = this.off_for_cols(ps, ls - 1, col);
+            ->;
+        };
+
+        move_down() -> void
+        {
+            int ls, le, ns, ne, col, nl;
+            ls = this.ls_of(this.cur);
+            le = this.le_of(this.cur);
+            if (le >= this.t.len) { ->; };
+            col = repl_cols(this.t.mem, ls, this.cur);
+            ns = le + 1;
+            ne = this.le_of(ns);
+            nl = repl_cols(this.t.mem, ns, ne);
+            if (col > nl) { col = nl; };
+            this.cur = this.off_for_cols(ns, ne, col);
+            ->;
+        };
+
+        // -- main loop --
+
+        // Handles one key. 0 keep going, 1 submit, 2 interrupt, 3 end of input
+        process_key(int key) -> int
+        {
+            if (key == REPL_KEY_EOF) { -> 3; };
+            if (key == REPL_CTRL_C) { -> 2; };
+            if (key == REPL_CTRL_D)
+            {
+                if (this.t.len == 0) { -> 3; };
+                -> 0;
+            };
+            if (key == REPL_SUBMIT) { -> 1; };
+            if (key == REPL_ENTER)
+            {
+                this.enter();
+                this.render();
+                -> 0;
+            };
+            if (key == 127 | key == 8)
+            {
+                this.backspace();
+                this.render();
+                -> 0;
+            };
+            if (key == REPL_KEY_UP) { this.move_up(); this.render(); -> 0; };
+            if (key == REPL_KEY_DOWN) { this.move_down(); this.render(); -> 0; };
+            if (key == REPL_KEY_LEFT) { this.move_left(); this.render(); -> 0; };
+            if (key == REPL_KEY_RIGHT) { this.move_right(); this.render(); -> 0; };
+            if (key >= 32 & key != 127 & key < 256)
+            {
+                this.insert_byte(key);
+                this.render();
+                -> 0;
+            };
+            -> 0;
+        };
+
+        // 0 when the buffer was submitted, 1 on CTRL+C or end of input
+        run() -> int
+        {
+            int key, st;
+            this.term.enter_raw();
+            this.render();
+            while (true)
+            {
+                key = this.term.read_key();
+                st = this.process_key(key);
+                if (st != 0) { break; };
+            };
+            // the result goes below the whole buffer, not over its remaining lines
+            if (st == 1)
+            {
+                this.cur = this.t.len;
+                this.render();
+            };
+            this.term.leave_raw();
+            repl_out(g"\r\n\0");
+            if (st == 1) { -> 0; };
+            -> 1;
+        };
+    };
+
+    // ===== session =====
+
+    object ReplSession
+    {
+        IDEKAVM* vm;
+        PtrVec* cgs;        // IDKVMCodegen* of every block, alive while the VM may run their code
+        PtrVec* persist;    // FvmCap*, live variable bindings in insertion order
+        NameMap* pidx;      // name to FvmCap*
+        int emit_cursor;    // index into the VM emit results already shown
+        int imports;        // imports served, makes the wrapper file names unique
+        PtrVec* uses;       // namespaces named by using in earlier inputs, as written (a::b)
+        PtrVec* defn;       // #def names of earlier inputs
+        PtrVec* defv;       // and their values
+
+        __init() -> this
+        {
+            heap IDEKAVM nvm;
+            this.vm = nvm;
+            this.vm.__init();
+            this.cgs = pv_new();
+            this.persist = pv_new();
+            this.pidx = nm_new();
+            this.emit_cursor = 0;
+            this.imports = 0;
+            this.uses = pv_new();
+            this.defn = pv_new();
+            this.defv = pv_new();
+            -> this;
+        };
+
+        __expr() -> ReplSession* -> this;
+
+        __exit() -> void
+        {
+            ->;
+        };
+
+        // Frees the VM and the code generators and starts over
+        reset() -> void
+        {
+            int i;
+            IDKVMCodegen* c;
+            this.vm.__exit();
+            ffree((byte*)this.vm);
+            i = 0;
+            while (i < this.cgs.len)
+            {
+                c = (IDKVMCodegen*)this.cgs.items[i];
+                c.__exit();
+                ffree((byte*)c);
+                i++;
+            };
+            pv_free(this.cgs);
+            i = 0;
+            while (i < this.persist.len)
+            {
+                ffree((byte*)this.persist.items[i]);
+                i++;
+            };
+            pv_free(this.persist);
+            pv_free(this.uses);
+            pv_free(this.defn);
+            pv_free(this.defv);
+            nm_free(this.pidx);
+            this.__init();
+            ->;
+        };
+
+        // Keeps a local for the inputs that follow
+        persist_put(byte* name, int tag, i64 d, i64 m) -> void
+        {
+            FvmCap* c = (FvmCap*)nm_get(this.pidx, name);
+            if (c == (FvmCap*)0)
+            {
+                c = (FvmCap*)fmalloc((u64)((sizeof(FvmCap) + 7) / 8));
+                c.name = ts_dup(name);
+                nm_put(this.pidx, name, (void*)c);
+                pv_push(this.persist, (void*)c);
+            };
+            c.tag = tag;
+            c.d = d;
+            c.m = m;
+            ->;
+        };
+    };
+
+    // ===== value output =====
+
+    // Python repr of a bytes value that holds text
+    repl_put_quoted(FvmBuf* o, byte* p, int n) -> void
+    {
+        int i, c;
+        o.put(39);
+        while (i < n)
+        {
+            c = (int)p[i];
+            switch (c)
+            {
+                case (10) { o.put(92); o.put('n'); }
+                case (13) { o.put(92); o.put('r'); }
+                case (9)  { o.put(92); o.put('t'); }
+                case (92) { o.put(92); o.put(92); }
+                case (39) { o.put(92); o.put(39); }
+                default
+                {
+                    if (c < 32 | c == 127)
+                    {
+                        o.put(92);
+                        o.put('x');
+                        o.put(repl_hex_digit((c >> 4) `& 15));
+                        o.put(repl_hex_digit(c `& 15));
+                    }
+                    else { o.put(c); };
+                };
+            };
+            i++;
+        };
+        o.put(39);
+        ->;
+    };
+
+    // _val_repr
+    repl_val_repr(IDEKAVM* vm, FvmBuf* o, int tag, i64 d, i64 m) -> void
+    {
+        if (tag == IDKVM_T_VOID) { o.put_str(g"void\0"); ->; };
+        if (tag == IDKVM_T_BOOL)
+        {
+            if (d != (i64)0) { o.put_str(g"true\0"); } else { o.put_str(g"false\0"); };
+            ->;
+        };
+        if (tag == IDKVM_T_BYTES)
+        {
+            repl_put_quoted(o, idkvm_i2p(d), (int)m);
+            ->;
+        };
+        if (tag == IDKVM_T_PTR)
+        {
+            if (m >= (i64)IDKVM_META_TYPE & m - (i64)IDKVM_META_TYPE < (i64)vm.tn_n)
+            {
+                o.put(60);
+                o.put_str(vm.tn_name[(int)(m - (i64)IDKVM_META_TYPE)]);
+                o.put_str(g" @ 0x\0");
+                repl_put_hex(o, d);
+                o.put(62);
+                ->;
+            };
+            o.put_str(g"<ptr 0x\0");
+            repl_put_hex(o, d);
+            o.put(62);
+            ->;
+        };
+        if (tag == IDKVM_T_FLOAT | tag == IDKVM_T_DOUBLE)
+        {
+            idkvm_put_double(o, idkvm_bits_dbl(d));
+            ->;
+        };
+        o.put_i64(d);
+        ->;
+    };
+
+    // "<repr> : <tag>"
+    repl_val_line(IDEKAVM* vm, FvmBuf* o, int tag, i64 d, i64 m) -> void
+    {
+        repl_val_repr(vm, o, tag, d, m);
+        o.put_str(g" : \0");
+        o.put_str(idkvm_ttag_name(tag));
+        ->;
+    };
+
+    // _print_new_emissions
+    repl_print_emissions(ReplSession* s) -> void
+    {
+        IDEKAVM* vm = s.vm;
+        FvmBuf o;
+        int k, i;
+        o.__init();
+        while (s.emit_cursor < vm.emit_count)
+        {
+            k = s.emit_cursor;
+            o.len = 0;
+            o.mem[0] = (byte)0;
+            switch (vm.e_kind[k])
+            {
+                case (IDKVM_EMIT_K_CONST)
+                {
+                    o.put_str(g"[emit:const]  \0");
+                    repl_val_line(vm, @o, vm.e_tag[k], vm.e_data[k], vm.e_meta[k]);
+                }
+                case (IDKVM_EMIT_K_GLOBAL)
+                {
+                    o.put_str(g"[emit:global] \0");
+                    i = 0;
+                    while (i < (int)vm.e_data[k])
+                    {
+                        o.put(repl_hex_digit(((int)vm.e_text[k][i] >> 4) `& 15));
+                        o.put(repl_hex_digit((int)vm.e_text[k][i] `& 15));
+                        i++;
+                    };
+                }
+                case (IDKVM_EMIT_K_TYPE)
+                {
+                    o.put_str(g"[emit:type]   \0");
+                    if (vm.e_tag[k] == IDKVM_T_BYTES) { o.put_n(idkvm_i2p(vm.e_data[k]), (int)vm.e_meta[k]); }
+                    else { repl_val_repr(vm, @o, vm.e_tag[k], vm.e_data[k], vm.e_meta[k]); };
+                }
+                default
+                {
+                    o.put_str(g"[emit:IDEKA]   \0");
+                    o.put_str(vm.e_text[k]);
+                };
+            };
+            o.put(10);
+            repl_flush_buf(@o);
+            s.emit_cursor++;
+        };
+        o.__exit();
+        ->;
+    };
+
+    // ===== commands =====
+
+    repl_cmd_stack(ReplSession* s) -> void
+    {
+        IDEKAVM* vm = s.vm;
+        FvmBuf o;
+        int i;
+        if (vm.sp == 0)
+        {
+            repl_outln(g"(stack is empty)\0");
+            ->;
+        };
+        o.__init();
+        while (i < vm.sp)
+        {
+            o.len = 0;
+            o.mem[0] = (byte)0;
+            o.put_str(g"  [\0");
+            o.put_int(i);
+            o.put_str(g"]  \0");
+            repl_val_line(vm, @o, vm.st_tag[i], vm.st_data[i], vm.st_meta[i]);
+            o.put(10);
+            repl_flush_buf(@o);
+            i++;
+        };
+        o.__exit();
+        ->;
+    };
+
+    repl_strcmp(byte* a, byte* b) -> int
+    {
+        int i;
+        while (a[i] != (byte)0 & a[i] == b[i]) { i++; };
+        -> (int)a[i] - (int)b[i];
+    };
+
+    repl_cmd_locals(ReplSession* s) -> void
+    {
+        FvmBuf o;
+        FvmCap* c;
+        FvmCap* best;
+        int n, i, k, last;
+        byte* prev;
+        n = s.persist.len;
+        if (n == 0)
+        {
+            repl_outln(g"(no variables in scope)\0");
+            ->;
+        };
+        o.__init();
+        // ascending by name: each round picks the smallest name above the previous one
+        prev = (byte*)0;
+        k = 0;
+        while (k < n)
+        {
+            best = (FvmCap*)0;
+            i = 0;
+            while (i < n)
+            {
+                c = (FvmCap*)s.persist.items[i];
+                if (prev == (byte*)0 | repl_strcmp(c.name, prev) > 0)
+                {
+                    if (best == (FvmCap*)0) { best = c; }
+                    elif (repl_strcmp(c.name, best.name) < 0) { best = c; };
+                };
+                i++;
+            };
+            if (best == (FvmCap*)0) { break; };
+            o.len = 0;
+            o.mem[0] = (byte)0;
+            o.put_str(g"  \0");
+            o.put_str(best.name);
+            o.put_str(g" = \0");
+            repl_val_line(s.vm, @o, best.tag, best.d, best.m);
+            o.put(10);
+            repl_flush_buf(@o);
+            prev = best.name;
+            k++;
+        };
+        o.__exit();
+        ->;
+    };
+
+    repl_cmd_funcs(ReplSession* s) -> void
+    {
+        IDEKAVM* vm = s.vm;
+        FvmBuf o;
+        int i, k, best;
+        byte* prev;
+        if (vm.funcs.n == 0)
+        {
+            repl_outln(g"(no comptime functions defined)\0");
+            ->;
+        };
+        o.__init();
+        prev = (byte*)0;
+        k = 0;
+        while (k < vm.funcs.n)
+        {
+            best = -1;
+            i = 0;
+            while (i < vm.funcs.n)
+            {
+                if (prev == (byte*)0 | repl_strcmp(vm.funcs.names[i], prev) > 0)
+                {
+                    if (best < 0) { best = i; }
+                    elif (repl_strcmp(vm.funcs.names[i], vm.funcs.names[best]) < 0) { best = i; };
+                };
+                i++;
+            };
+            if (best < 0) { break; };
+            o.len = 0;
+            o.mem[0] = (byte)0;
+            o.put_str(g"  \0");
+            o.put_str(vm.funcs.names[best]);
+            o.put(10);
+            repl_flush_buf(@o);
+            prev = vm.funcs.names[best];
+            k++;
+        };
+        o.__exit();
+        ->;
+    };
+
+    // ===== parse and execute =====
+
+    // Prints "<what><msg>" and a newline
+    repl_error(byte* what, byte* msg) -> void
+    {
+        repl_out(what);
+        repl_outln(msg);
+        ->;
+    };
+
+    // _parse_comptime_blocks: lexes and parses the wrapped source and appends every top level
+    // statement to out. False after printing the error.
+    repl_parse(byte* text, int n, PtrVec* out, byte* pre) -> bool
+    {
+        byte* t = ts_dup(text);
+        Lexer* sl = (Lexer*)fmalloc((u64)((sizeof(Lexer) + 7) / 8));
+        Parser* sp;
+        Node* stmt;
+        Buf eb;
+        int k;
+        sl.__init(t, n);
+        if (!sl.tokenize())
+        {
+            repl_error(pre, IDEKA::lexer::error_message(sl.err_code));
+            -> false;
+        };
+        sp = (Parser*)fmalloc((u64)((sizeof(Parser) + 7) / 8));
+        sp.__init(sl);
+        sp.st = st_new();
+        sp.toks = sl.tokens;
+        sp.count = sl.count;
+        sp.pos = 0;
+        while (!sp.failed & !sp.expect(TokenType.EOF))
+        {
+            stmt = sp.statement();
+            if (sp.failed) { break; };
+            if (stmt != (Node*)0) { pv_push(out, (void*)stmt); };
+            k = 0;
+            while (k < sp.pending.len)
+            {
+                pv_push(out, sp.pending.items[k]);
+                k++;
+            };
+            sp.pending.len = 0;
+        };
+        if (sp.failed)
+        {
+            eb.__init();
+            sp.render_error(@eb);
+            repl_error(pre, eb.mem);
+            eb.__exit();
+            -> false;
+        };
+        -> true;
+    };
+
+    repl_is_ws(int c) -> bool
+    {
+        -> c == ' ' | c == '\t' | c == 10 | c == 13 | c == 11 | c == 12;
+    };
+
+    // Serves compiler.import.stdlib and compiler.import.local (ct_import): preprocesses, parses and
+    // compiles the imported file for the VM. False after printing the error.
+    repl_import(ReplSession* s, int kind, byte* path) -> bool
+    {
+        IDEKAVM* vm = s.vm;
+        FvmBuf m, tn, wr;
+        PtrVec* stmts;
+        byte* sdir;
+        void* fh;
+        int i, n;
+        bool ok;
+        m.__init();
+        tn.__init();
+        wr.__init();
+        s.imports++;
+        if (kind == IDKVM_HOST_IMPORT_STDLIB)
+        {
+            wr.put_str(g"#import <\0");
+            wr.put_str(path);
+            wr.put_str(g">;\n\0");
+        }
+        else
+        {
+            wr.put_str(g"#import \"\0");
+            wr.put_str(path);
+            wr.put_str(g"\";\n\0");
+        };
+        tn.put_str(g"__repl_import_\0");
+        tn.put_int(s.imports);
+        tn.put_str(g".idk\0");
+        fh = fopen(tn.mem, g"wb\0");
+        if (fh == (void*)0)
+        {
+            m.put_str(g"compiler.import: cannot write '\0");
+            m.put_str(tn.mem);
+            m.put_str(g"'\0");
+            m.put(0);
+            repl_error(g"VM error: \0", m.mem);
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+        fwrite(wr.mem, 1, wr.len, fh);
+        fclose(fh);
+
+        Preprocessor pp(tn.mem);
+        defer pp.__exit();
+        sdir = getenv(g"IDEKA_SRCDIR\0");
+        if (sdir != (byte*)0) { pp.set_srcdir(sdir); };
+        pp.add_default_macros();
+        i = 0;
+        while (i < s.defn.len)
+        {
+            pp.define((byte*)s.defn.items[i], (byte*)s.defv.items[i]);
+            i++;
+        };
+        ok = pp.process();
+        remove(tn.mem);
+        if (!ok)
+        {
+            m.put_str(g"compiler.import: \0");
+            m.put_str(pp.err_text());
+            m.put(0);
+            repl_error(g"VM error: \0", m.mem);
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+
+        // an empty import compiles nothing
+        n = pp.text_len();
+        i = 0;
+        while (i < n & repl_is_ws((int)pp.text_ptr()[i])) { i++; };
+        if (i >= n)
+        {
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> true;
+        };
+
+        stmts = pv_new();
+        if (!repl_parse(pp.text_ptr(), n, stmts, g"VM error: \0"))
+        {
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+
+        heap IDKVMCodegen c;
+        c.__init();
+        pv_push(s.cgs, (void*)c);
+        ok = c.compile_import(stmts, vm);
+        if (c.failed)
+        {
+            c.errb.put(0);
+            m.put_str(g"compiler.import (compiling imported declarations): \0");
+            m.put_str(c.errb.mem);
+            m.put(0);
+            repl_error(g"VM error: \0", m.mem);
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+        if (!c.register_new_functions(vm))
+        {
+            repl_error(g"VM error: \0", g"instruction pool allocation failed\0");
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+        c.collect_externs(vm);
+        if (!c.lay_merge_into(@vm.layouts))
+        {
+            repl_error(g"VM error: \0", g"struct layout allocation failed\0");
+            m.__exit(); tn.__exit(); wr.__exit();
+            -> false;
+        };
+        m.__exit(); tn.__exit(); wr.__exit();
+        -> true;
+    };
+
+    // _run_block: compiles and executes one comptime block on the session. False after printing
+    // the error. *has_result tells whether the block left a value, which is shown by the caller.
+    repl_run_block(ReplSession* s, Node* n, bool* has_result, int* rtag, i64* rd, i64* rm) -> bool
+    {
+        IDEKAVM* vm = s.vm;
+        FvmCap* cap;
+        FvmBuf eb;
+        i64* sbox;
+        byte* nm;
+        int i, u, slot, tag, hk, k;
+        Node* nd2;
+        bool ok, dup;
+        *has_result = false;
+        heap IDKVMCodegen c;
+        c.__init();
+        pv_push(s.cgs, (void*)c);
+        c.lay_copy_from(@vm.layouts);
+
+        i = 0;
+        while (i < s.defn.len)
+        {
+            c.capture_macro((byte*)s.defn.items[i], (byte*)s.defv.items[i]);
+            i++;
+        };
+
+        // the using statements of earlier inputs stay in force
+        i = 0;
+        while (i < s.uses.len)
+        {
+            pv_push(c.usings, (void*)c.ns_name((byte*)s.uses.items[i]));
+            i++;
+        };
+
+        // captured scope: persisted locals, then the functions and globals of the VM
+        i = 0;
+        while (i < s.persist.len)
+        {
+            cap = (FvmCap*)s.persist.items[i];
+            c.capture(cap.name, cap.tag, cap.d, cap.m);
+            i++;
+        };
+        i = 0;
+        while (i < vm.funcs.n)
+        {
+            c.known_add(vm.funcs.names[i]);
+            i++;
+        };
+        i = 0;
+        while (i < vm.gn)
+        {
+            c.capture(vm.g_name[i], vm.g_tag[i], vm.g_data[i], vm.g_meta[i]);
+            i++;
+        };
+
+        if (!c.compile_comptime(n))
+        {
+            if (c.failed)
+            {
+                c.errb.put(0);
+                repl_error(g"Codegen error: \0", c.errb.mem);
+            }
+            else
+            {
+                repl_error(g"Codegen error: \0", g"the block holds features that are not ported yet\0");
+            };
+            -> false;
+        };
+        if (!c.register_functions(vm))
+        {
+            repl_error(g"Codegen error: \0", g"instruction pool allocation failed\0");
+            -> false;
+        };
+        if (!c.lay_merge_into(@vm.layouts))
+        {
+            repl_error(g"Codegen error: \0", g"struct layout allocation failed\0");
+            -> false;
+        };
+        u = vm.import_unit(@c.code, c.unit);
+        if (u < 0)
+        {
+            repl_error(g"Codegen error: \0", g"instruction pool allocation failed\0");
+            -> false;
+        };
+        ok = vm.execute(u, c.nlocals);
+        // imports are served between two runs of the VM
+        while (ok & vm.host_kind != 0)
+        {
+            hk = vm.host_kind;
+            if (!repl_import(s, hk, vm.host_arg)) { vm.recover(); -> false; };
+            ok = vm.resume();
+        };
+        if (!ok)
+        {
+            repl_error(g"VM error: \0", vm.err_text());
+            vm.recover();
+            -> false;
+        };
+
+        // the result is the top of the stack; the stack is cleared so each input starts clean
+        if (vm.sp > 0)
+        {
+            *has_result = true;
+            *rtag = vm.st_tag[vm.sp - 1];
+            *rd = vm.st_data[vm.sp - 1];
+            *rm = vm.st_meta[vm.sp - 1];
+        };
+        vm.sp = 0;
+
+        // the using statements of this input
+        i = 0;
+        while (i < node_count(n, 0))
+        {
+            nd2 = node_child(n, 0, i);
+            if (nd2 != (Node*)0 & nd2.kind == NodeKind.USING_STATEMENT & nd2.text != (byte*)0)
+            {
+                k = 0;
+                dup = false;
+                while (k < s.uses.len)
+                {
+                    if (repl_strcmp((byte*)s.uses.items[k], nd2.text) == 0) { dup = true; };
+                    k++;
+                };
+                if (!dup) { pv_push(s.uses, (void*)ts_dup(nd2.text)); };
+            };
+            i++;
+        };
+
+        // live variables into the persistent scope; internal temporaries are skipped
+        i = 0;
+        while (i < c.lnames.len)
+        {
+            nm = (byte*)c.lnames.items[i];
+            sbox = (i64*)nm_get(c.locals, nm);
+            if (!(nm[0] == '_' & nm[1] == '_') & sbox != (i64*)0)
+            {
+                slot = (int)*sbox;
+                tag = vm.lc_tag[slot];
+                if (tag == IDKVM_T_INT | tag == IDKVM_T_UINT | tag == IDKVM_T_LONG | tag == IDKVM_T_ULONG | tag == IDKVM_T_FLOAT | tag == IDKVM_T_DOUBLE | tag == IDKVM_T_BOOL | tag == IDKVM_T_BYTE | tag == IDKVM_T_CHAR | tag == IDKVM_T_DATA | tag == IDKVM_T_PTR)
+                {
+                    s.persist_put(nm, tag, vm.lc_data[slot], vm.lc_meta[slot]);
+                };
+            };
+            i++;
+        };
+        -> true;
+    };
+
+    // ===== main loop =====
+
+    // True when text, stripped of surrounding whitespace, equals word
+    repl_is_cmd(byte* text, int n, byte* word) -> bool
+    {
+        int a, b, i;
+        a = 0;
+        b = n;
+        while (a < b & repl_is_ws((int)text[a])) { a++; };
+        while (b > a & repl_is_ws((int)text[b - 1])) { b--; };
+        if (idkvm_strlen(word) != b - a) { -> false; };
+        i = 0;
+        while (i < b - a)
+        {
+            if (text[a + i] != word[i]) { -> false; };
+            i++;
+        };
+        -> true;
+    };
+
+    // A preprocessor directive line of the input (#import, #def). 0 when it was carried out, 1 after
+    // an error was printed. The session keeps the #def macros: they reach later imports and blocks.
+    repl_directive(ReplSession* s, byte* ln, int n) -> int
+    {
+        int a, b, e, k, kind;
+        FvmBuf nm, val;
+        byte* word;
+        a = 0;
+        while (a < n & repl_is_ws((int)ln[a])) { a++; };
+        a++;
+        while (a < n & (ln[a] == ' ' | ln[a] == '\t')) { a++; };
+        b = a;
+        while (b < n & ln[b] != ' ' & ln[b] != '\t' & ln[b] != '<' & ln[b] != '"') { b++; };
+        nm.__init();
+        val.__init();
+        nm.put_n(ln + a, b - a);
+        nm.put(0);
+        word = nm.mem;
+        while (b < n & (ln[b] == ' ' | ln[b] == '\t')) { b++; };
+        // the operand up to the closing ; or the end of the line
+        e = n;
+        while (e > b & (repl_is_ws((int)ln[e - 1]) | ln[e - 1] == ';')) { e--; };
+        if (repl_strcmp(word, g"import\0") == 0)
+        {
+            if (b < e & (ln[b] == '<' | ln[b] == '"'))
+            {
+                kind = IDKVM_HOST_IMPORT_LOCAL;
+                if (ln[b] == '<') { kind = IDKVM_HOST_IMPORT_STDLIB; };
+                k = b + 1;
+                while (k < e & ln[k] != '>' & ln[k] != '"') { k++; };
+                val.put_n(ln + b + 1, k - b - 1);
+                val.put(0);
+                if (!repl_import(s, kind, val.mem))
+                {
+                    nm.__exit(); val.__exit();
+                    -> 1;
+                };
+                nm.__exit(); val.__exit();
+                -> 0;
+            };
+            repl_error(g"Error: \0", g"#import needs <file> or \"file\"\0");
+            nm.__exit(); val.__exit();
+            -> 1;
+        };
+        if (repl_strcmp(word, g"def\0") == 0)
+        {
+            k = b;
+            while (k < e & ln[k] != ' ' & ln[k] != '\t' & ln[k] != '(') { k++; };
+            val.put_n(ln + b, k - b);
+            val.put(0);
+            pv_push(s.defn, (void*)ts_dup(val.mem));
+            val.len = 0;
+            val.mem[0] = (byte)0;
+            while (k < e & (ln[k] == ' ' | ln[k] == '\t')) { k++; };
+            val.put_n(ln + k, e - k);
+            val.put(0);
+            pv_push(s.defv, (void*)ts_dup(val.mem));
+            nm.__exit(); val.__exit();
+            -> 0;
+        };
+        repl_error(g"Error: unsupported preprocessor directive #\0", word);
+        nm.__exit(); val.__exit();
+        -> 1;
+    };
+
+    repl_banner() -> void
+    {
+        repl_outln(g"IDEKA REPL 0.1.1  (IDKVM-powered)\0");
+        repl_outln(g"Type IDEKA comptime code.  ENTER inserts a new line (indentation is carried\0");
+        repl_outln(g"over from the previous line); press CTRL+ENTER to compile and run.\0");
+        repl_outln(g"Type :help for commands, :quit to exit.\0");
+        repl_outln(g"\0");
+        ->;
+    };
+
+    repl_help() -> void
+    {
+        repl_outln(g"Commands:\0");
+        repl_outln(g"  :quit  :q        Exit the REPL\0");
+        repl_outln(g"  :reset           Clear all session state (VM, variables, functions)\0");
+        repl_outln(g"  :stack           Dump the current VM stack\0");
+        repl_outln(g"  :locals          Dump the variables kept from earlier inputs\0");
+        repl_outln(g"  :funcs           List comptime functions defined so far\0");
+        repl_outln(g"  :help            Show this message\0");
+        repl_outln(g"\0");
+        repl_outln(g"ENTER inserts a new line; CTRL+ENTER submits the input for compilation.\0");
+        repl_outln(g"New lines are indented to match the previous line.\0");
+        repl_outln(g"Any other input is treated as the body of a comptime block and executed.\0");
+        repl_outln(g"Variables and functions defined in one input survive into the next.\0");
+        ->;
+    };
+
+    repl_main() -> int
+    {
+        ReplSession sess;
+        Term term;
+        FvmBuf w;
+        FvmBuf o;
+        FvmBuf code;
+        bool derr;
+        int li, le2, ls2;
+        PtrVec* stmts;
+        Node* nd;
+        bool hasb, okb;
+        int st, i, rtag;
+        i64 rd, rm;
+        byte* src;
+        int sn;
+
+        term.__init();
+        sess.__init();
+        w.__init();
+        o.__init();
+        code.__init();
+        repl_banner();
+
+        while (true)
+        {
+            heap Editor ed;
+            ed.__init(g"fx> \0", g"... \0", @term);
+            st = ed.run();
+            if (st != 0)
+            {
+                ed.__exit();
+                repl_out(g"\n\0");
+                break;
+            };
+            sn = ed.t.len;
+            src = ts_dup(ed.t.mem);
+            ed.__exit();
+
+            if (repl_is_cmd(src, sn, g"\0")) { ffree(src); continue; };
+            if (repl_is_cmd(src, sn, g":quit\0") | repl_is_cmd(src, sn, g":q\0")) { ffree(src); break; };
+            if (repl_is_cmd(src, sn, g":reset\0"))
+            {
+                sess.reset();
+                repl_outln(g"Session reset.\0");
+                ffree(src);
+                continue;
+            };
+            if (repl_is_cmd(src, sn, g":help\0")) { repl_help(); ffree(src); continue; };
+            if (repl_is_cmd(src, sn, g":stack\0")) { repl_cmd_stack(@sess); ffree(src); continue; };
+            if (repl_is_cmd(src, sn, g":locals\0")) { repl_cmd_locals(@sess); ffree(src); continue; };
+            if (repl_is_cmd(src, sn, g":funcs\0")) { repl_cmd_funcs(@sess); ffree(src); continue; };
+
+            // preprocessor directive lines are carried out first, the rest is the comptime body;
+            // a directive line leaves an empty line behind so the line numbers stay
+            code.len = 0;
+            code.mem[0] = (byte)0;
+            derr = false;
+            li = 0;
+            while (li < sn & !derr)
+            {
+                le2 = li;
+                while (le2 < sn & src[le2] != 10) { le2++; };
+                ls2 = li;
+                while (ls2 < le2 & repl_is_ws((int)src[ls2])) { ls2++; };
+                if (ls2 < le2 & src[ls2] == '#')
+                {
+                    if (repl_directive(@sess, src + li, le2 - li) != 0) { derr = true; };
+                }
+                else { code.put_n(src + li, le2 - li); };
+                code.put(10);
+                li = le2 + 1;
+            };
+            ffree(src);
+            if (derr) { continue; };
+            if (repl_is_cmd(code.mem, code.len, g"\0")) { continue; };
+
+            // wrap and parse
+            w.len = 0;
+            w.mem[0] = (byte)0;
+            w.put_str(g"comptime\n{\n\0");
+            w.put_n(code.mem, code.len);
+            w.put_str(g"\n};\0");
+            w.put(0);
+            stmts = pv_new();
+            if (!repl_parse(w.mem, w.len - 1, stmts, g"Parse error: \0")) { pv_free(stmts); continue; };
+
+            hasb = false;
+            i = 0;
+            while (i < stmts.len)
+            {
+                nd = (Node*)stmts.items[i];
+                if (nd.kind == NodeKind.COMPTIME_BLOCK) { hasb = true; };
+                i++;
+            };
+            if (!hasb)
+            {
+                repl_outln(g"(nothing to execute)\0");
+                pv_free(stmts);
+                continue;
+            };
+
+            // execute each block
+            i = 0;
+            while (i < stmts.len)
+            {
+                nd = (Node*)stmts.items[i];
+                i++;
+                if (nd.kind != NodeKind.COMPTIME_BLOCK) { continue; };
+                okb = repl_run_block(@sess, nd, @hasb, @rtag, @rd, @rm);
+                if (!okb) { break; };
+                repl_print_emissions(@sess);
+                if (hasb & rtag != IDKVM_T_VOID)
+                {
+                    o.len = 0;
+                    o.mem[0] = (byte)0;
+                    o.put_str(g"=> \0");
+                    repl_val_line(sess.vm, @o, rtag, rd, rm);
+                    o.put(10);
+                    repl_flush_buf(@o);
+                };
+            };
+            pv_free(stmts);
+        };
+
+        repl_outln(g"Goodbye.\0");
+        -> 0;
+    };
+
+    main() -> int
+    {
+        -> repl_main();
+    };
+}
+#build
+{
+    #[name] = "irepl"
+};

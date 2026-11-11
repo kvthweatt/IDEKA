@@ -1,0 +1,15 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+comptime
+{
+    byte* bytes = [0x00, 0x01, 0x02, 0x03, 0x00];
+    f"{bytes}"()->void->println("TEST FROM ARBITRARY BYTE FUNCTION");
+    f"{bytes}"();
+
+    println("Testing comptime println call");
+    compiler.io.console.println("XXXX");
+};
+
+main()->int->0;

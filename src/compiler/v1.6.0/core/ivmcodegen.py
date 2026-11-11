@@ -247,7 +247,7 @@ class FVMCodegen:
         # statements (DeferStatement.body or [DeferStatement.expression]) for
         # the body currently being compiled by _visit_body. Mirrors
         # icodegen.py's builder._IDEKA_defer_stack but as an explicit stack
-        # since fvmcodegen has no enclosing builder object.
+        # since idkvmcodegen has no enclosing builder object.
         self._defer_stack: List[List] = []
         # Names declared at the top level of the comptime block (accessible to
         # nested function definitions via GLOBAL_GET / GLOBAL_SET).
@@ -926,7 +926,7 @@ class FVMCodegen:
         elif t is NotUsingStatement:     self._visit_not_using(node)
         else:
             raise FVMCodegenError(
-                f'fvmcodegen: unsupported node in comptime: {type(node).__name__}',
+                f'idkvmcodegen: unsupported node in comptime: {type(node).__name__}',
                 node
             )
 
@@ -1346,7 +1346,7 @@ class FVMCodegen:
         elif isinstance(node.target, ArrayAccess):
             if not isinstance(node.target.array, Identifier):
                 raise FVMCodegenError(
-                    'fvmcodegen: array assignment target must be a simple identifier in comptime',
+                    'idkvmcodegen: array assignment target must be a simple identifier in comptime',
                     node
                 )
             arr_name = node.target.array.name
@@ -1400,7 +1400,7 @@ class FVMCodegen:
             self._emit(_instr(Op.LOCAL_DEREF_SET))
         else:
             raise FVMCodegenError(
-                f'fvmcodegen: unsupported assignment target in comptime: {type(node.target).__name__}',
+                f'idkvmcodegen: unsupported assignment target in comptime: {type(node.target).__name__}',
                 node
             )
 
@@ -1411,12 +1411,12 @@ class FVMCodegen:
         """
         if getattr(node, 'from_value', False):
             raise FVMCodegenError(
-                'fvmcodegen: range assignment from an array value is not supported in comptime',
+                'idkvmcodegen: range assignment from an array value is not supported in comptime',
                 node
             )
         if not isinstance(node.array, Identifier):
             raise FVMCodegenError(
-                'fvmcodegen: range assignment target must be a simple identifier in comptime',
+                'idkvmcodegen: range assignment target must be a simple identifier in comptime',
                 node
             )
         arr_name = node.array.name
@@ -1480,7 +1480,7 @@ class FVMCodegen:
         if not isinstance(node.target, Identifier):
             loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
             raise NotImplementedError(
-                f'fvmcodegen: only simple identifier compound-assignment in comptime{loc}'
+                f'idkvmcodegen: only simple identifier compound-assignment in comptime{loc}'
             )
         name = node.target.name
         self._check_const_assign(name, node, 'compound assignment')
@@ -1521,7 +1521,7 @@ class FVMCodegen:
             self._emit(_instr(oc))
         else:
             raise NotImplementedError(
-                f'fvmcodegen: compound assign op {op_token!r} not supported'
+                f'idkvmcodegen: compound assign op {op_token!r} not supported'
             )
 
     # ------------------------------------------------------------------
@@ -1602,7 +1602,7 @@ class FVMCodegen:
             return False
         else:
             raise FVMCodegenError(
-                f'fvmcodegen: unsupported expression in comptime: {type(node).__name__}',
+                f'idkvmcodegen: unsupported expression in comptime: {type(node).__name__}',
                 node
             )
 
@@ -1737,7 +1737,7 @@ class FVMCodegen:
             self._emit(_instr(Op.GLOBAL_GET, name))
             return True
         loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
-        raise NameError(f'fvmcodegen: undefined comptime variable {name!r}{loc}')
+        raise NameError(f'idkvmcodegen: undefined comptime variable {name!r}{loc}')
 
     def _visit_stringify(self, node: Stringify):
         """
@@ -1826,7 +1826,7 @@ class FVMCodegen:
             return True
         loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
         raise NotImplementedError(
-            f'fvmcodegen: binary operator {op!r} not supported in comptime{loc}'
+            f'idkvmcodegen: binary operator {op!r} not supported in comptime{loc}'
         )
 
     def _visit_unary_op(self, node: UnaryOp):
@@ -1862,7 +1862,7 @@ class FVMCodegen:
             if not isinstance(node.operand, Identifier):
                 loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
                 raise NotImplementedError(
-                    f'fvmcodegen: ++/-- only on simple identifiers in comptime{loc}'
+                    f'idkvmcodegen: ++/-- only on simple identifiers in comptime{loc}'
                 )
             name = node.operand.name
             if name in self._outer_globals:
@@ -1903,7 +1903,7 @@ class FVMCodegen:
         if vm_op is None:
             loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
             raise NotImplementedError(
-                f'fvmcodegen: unary operator {op!r} not supported in comptime{loc}'
+                f'idkvmcodegen: unary operator {op!r} not supported in comptime{loc}'
             )
         self._emit(_instr(vm_op))
         return True
@@ -2342,7 +2342,7 @@ class FVMCodegen:
             return True
         if not isinstance(node.expression, Identifier):
             raise FVMCodegenError(
-                f'fvmcodegen: address-of unsupported on {type(node.expression).__name__} in comptime',
+                f'idkvmcodegen: address-of unsupported on {type(node.expression).__name__} in comptime',
                 node
             )
         name = node.expression.name
@@ -2599,7 +2599,7 @@ class FVMCodegen:
         for arg in node.arguments:
             if isinstance(arg, Identifier) and arg.name in self._local_vars:
                 raise FVMCodegenError(
-                    f"fvmcodegen: local variable '{arg.name}' cannot escape scope (passed to function)",
+                    f"idkvmcodegen: local variable '{arg.name}' cannot escape scope (passed to function)",
                     arg)
             self._visit_expr(arg)
         if self._tail_call_self is not None and resolved_name == self._tail_call_self:
@@ -2754,7 +2754,7 @@ class FVMCodegen:
 
         loc = f' [{node.source_line}:{node.source_col}]' if node.source_line else ''
         raise NotImplementedError(
-            f'fvmcodegen: method call on complex receiver not supported in comptime: {node!r}{loc}'
+            f'idkvmcodegen: method call on complex receiver not supported in comptime: {node!r}{loc}'
         )
 
     def _visit_macro_call(self, node) -> bool:
@@ -2774,10 +2774,10 @@ class FVMCodegen:
         macro_def = self._macro_table.get(node.name)
         if macro_def is None:
             raise FVMCodegenError(
-                f"fvmcodegen: unknown expression macro '{node.name}'", node)
+                f"idkvmcodegen: unknown expression macro '{node.name}'", node)
         if len(node.arguments) != len(macro_def.params):
             raise FVMCodegenError(
-                f"fvmcodegen: macro '{node.name}' expects {len(macro_def.params)} "
+                f"idkvmcodegen: macro '{node.name}' expects {len(macro_def.params)} "
                 f"argument(s), got {len(node.arguments)}", node)
 
         fn_key = f"__macro__{node.name}"
@@ -3112,7 +3112,7 @@ class FVMCodegen:
         e_const = int(node.end.value)   if isinstance(node.end,   Literal) else None
         if s_const is None or e_const is None:
             raise FVMCodegenError(
-                'fvmcodegen: array slice [start:end] requires compile-time constant indices in comptime',
+                'idkvmcodegen: array slice [start:end] requires compile-time constant indices in comptime',
                 node
             )
         count = abs(e_const - s_const) + 1
@@ -3153,7 +3153,7 @@ class FVMCodegen:
             e = node.iterable.end
             if not (isinstance(s, Literal) and isinstance(e, Literal)):
                 raise FVMCodegenError(
-                    'fvmcodegen: array comprehension over range requires compile-time constant bounds',
+                    'idkvmcodegen: array comprehension over range requires compile-time constant bounds',
                     node
                 )
             start_v = int(s.value)
@@ -3161,7 +3161,7 @@ class FVMCodegen:
             count   = end_v - start_v + 1
             if count <= 0:
                 raise FVMCodegenError(
-                    'fvmcodegen: array comprehension range must have positive count',
+                    'idkvmcodegen: array comprehension range must have positive count',
                     node
                 )
 
@@ -3217,7 +3217,7 @@ class FVMCodegen:
             return True
 
         raise FVMCodegenError(
-            'fvmcodegen: array comprehension only supports range and array literal iterables',
+            'idkvmcodegen: array comprehension only supports range and array literal iterables',
             node
         )
 
@@ -3261,13 +3261,13 @@ class FVMCodegen:
         """
         if not isinstance(node.operand, Identifier):
             raise FVMCodegenError(
-                'fvmcodegen: tie operator ~ can only be applied to variables',
+                'idkvmcodegen: tie operator ~ can only be applied to variables',
                 node
             )
         var_name = node.operand.name
         if var_name not in self._locals:
             raise FVMCodegenError(
-                f'fvmcodegen: tie: unknown variable {var_name!r}',
+                f'idkvmcodegen: tie: unknown variable {var_name!r}',
                 node
             )
         slot = self._locals[var_name]
@@ -3282,7 +3282,7 @@ class FVMCodegen:
         Not supported in comptime; mirrors fcodegen guard.
         """
         raise FVMCodegenError(
-            'fvmcodegen: variadic access ...[N] is not supported in comptime blocks',
+            'idkvmcodegen: variadic access ...[N] is not supported in comptime blocks',
             node
         )
 
@@ -3293,13 +3293,13 @@ class FVMCodegen:
         """
         if not isinstance(node.target, Identifier):
             raise FVMCodegenError(
-                'fvmcodegen: TernaryAssign target must be an identifier',
+                'idkvmcodegen: TernaryAssign target must be an identifier',
                 node
             )
         var_name = node.target.name
         if var_name not in self._locals:
             raise FVMCodegenError(
-                f'fvmcodegen: TernaryAssign: unknown variable {var_name!r}',
+                f'idkvmcodegen: TernaryAssign: unknown variable {var_name!r}',
                 node
             )
         slot = self._locals[var_name]
@@ -3327,8 +3327,7 @@ class FVMCodegen:
         Mirrors fcodegen.visit_ForInLoop for the array case.
         """
         if getattr(node, 'is_bit', False):
-            raise FVMCodegenError(
-                'fvmcodegen: bit iteration is not supported in comptime', node)
+            raise FVMCodegenError('idkvmcodegen: bit iteration is not supported in comptime', node)
         self._visit_expr(node.iterable)
         iter_slot = self._alloc_local('__forin_iter__')
         self._emit(_instr(Op.LOCAL_SET, iter_slot))
@@ -3601,7 +3600,7 @@ class FVMCodegen:
         """
         if node.pointer_name not in self._locals:
             raise FVMCodegenError(
-                f'fvmcodegen: function pointer {node.pointer_name!r} not declared',
+                f'idkvmcodegen: function pointer {node.pointer_name!r} not declared',
                 node
             )
         self._visit_expr(node.function_expr)
@@ -3840,7 +3839,7 @@ class FVMCodegen:
         """
         if node.struct_type is None:
             raise FVMCodegenError(
-                'fvmcodegen: StructLiteral has no struct_type in comptime', node)
+                'idkvmcodegen: StructLiteral has no struct_type in comptime', node)
         self._emit(_instr(Op.STRUCT_NEW, node.struct_type))
         tmp_slot = self._alloc_local('__struct_lit_tmp__')
         self._emit(_instr(Op.LOCAL_SET, tmp_slot))
@@ -3873,16 +3872,16 @@ class FVMCodegen:
         layout = self._struct_layouts.get(node.target_type)
         if layout is None:
             raise FVMCodegenError(
-                f'fvmcodegen: StructRecast: unknown struct type {node.target_type!r}', node)
+                f'idkvmcodegen: StructRecast: unknown struct type {node.target_type!r}', node)
 
         if not isinstance(node.source_expr, Identifier):
             raise FVMCodegenError(
-                f'fvmcodegen: StructRecast source must be a simple identifier in comptime', node)
+                f'idkvmcodegen: StructRecast source must be a simple identifier in comptime', node)
 
         src_name = node.source_expr.name
         if src_name not in self._locals:
             raise FVMCodegenError(
-                f'fvmcodegen: StructRecast: source {src_name!r} not found in locals', node)
+                f'idkvmcodegen: StructRecast: source {src_name!r} not found in locals', node)
         src_slot = self._locals[src_name]
 
         # Pre-compute bit offsets for each field (LSB-first packed layout)
@@ -4464,7 +4463,7 @@ class FVMCodegen:
     def _visit_return(self, node: ReturnStatement):
         if node.value is not None and isinstance(node.value, Identifier) and node.value.name in self._local_vars:
             raise FVMCodegenError(
-                f"fvmcodegen: local variable '{node.value.name}' cannot escape scope (returned from function)",
+                f"idkvmcodegen: local variable '{node.value.name}' cannot escape scope (returned from function)",
                 node)
         if node.value is None or not self._visit_expr(node.value):
             # no value (or a call that leaves none, e.g. compiler.io.console.println)

@@ -51,7 +51,7 @@ namespace standard
 
         struct Face    { int a, b, c;   };
         struct Edge    { int a, b;      };
-        struct POINT   { int x, y;      };
+        cstruct POINT { int x, y; };
         struct Complex { double re, im; };
 
         // ==================== Absolute value ====================

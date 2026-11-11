@@ -212,6 +212,10 @@ namespace IDEKA
             int al = 0;
             int lg = 0;
             int nfile = 0;
+            int q;
+            int dg;
+            int t;
+            int[8] digs;
             byte** cnames;
             int cn = 0;
             int* symname, noff;
@@ -455,12 +459,11 @@ namespace IDEKA
                     j = noff[shnameoff[i]];
                     k = 1;
                     {
-                        int dg = 1;
-                        int t = j;
-                        while (t >= 10) { dg++; t = t / 10; };
-                        int[8] digs;
+                        dg = 1;
                         t = j;
-                        int q = dg - 1;
+                        while (t >= 10) { dg++; t = t / 10; };
+                        t = j;
+                        q = dg - 1;
                         while (q >= 0) { digs[q] = t % 10; t = t / 10; q--; };
                         q = 0;
                         while (q < dg) { eb_put8(o, 48 + digs[q]); q++; };

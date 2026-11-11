@@ -1,0 +1,317 @@
+// Author: Karac V. Thweatt
+//
+// issa_types.idk - data structures of the SSA code generator (imported by ix64.idk)
+//
+// The code generator records every instruction the front end builds (SI), turns the function into SSA
+// form, selects machine instructions over virtual registers (MI), allocates registers on the SSA
+// interference graph and writes the result as AT&T assembly.
+
+// Operations of the recorded instructions
+#def SO_BIN 1;
+#def SO_CMP 2;
+#def SO_CAST 3;
+#def SO_ALLOCA 4;
+#def SO_ALLOCAN 5;
+#def SO_LOAD 6;
+#def SO_STORE 7;
+#def SO_GEP 8;
+#def SO_CALL 9;
+#def SO_PHI 10;
+#def SO_SELECT 11;
+#def SO_VAARG 12;
+#def SO_EXTRACT 13;
+#def SO_INSERT 14;
+#def SO_BR 15;
+#def SO_CBR 16;
+#def SO_RET 17;
+#def SO_RETV 18;
+#def SO_UNREACH 19;
+#def SO_SWITCH 20;
+#def XF_POPCNT 1;     // CPU features of the machine the code is made for
+#def XF_LZCNT 2;
+#def XF_BMI1 4;
+#def XF_BMI2 8;
+#def XF_MOVBE 16;
+#def XF_GFNI 32;
+#def XF_ERMS 64;
+#def SO_COPY 22;      // a destination ptr, b source ptr, c count: copies count elements of size sz forward, k 1 when the count is signed
+#def SO_FILL 21;      // a ptr, b value, c count: stores the value over count elements of size sz from a, k 1 when the count is signed
+
+// Binary operation kinds
+#def SB_ADD 1;
+#def SB_SUB 2;
+#def SB_MUL 3;
+#def SB_SDIV 4;
+#def SB_UDIV 5;
+#def SB_SREM 6;
+#def SB_UREM 7;
+#def SB_AND 8;
+#def SB_OR 9;
+#def SB_XOR 10;
+#def SB_SHL 11;
+#def SB_LSHR 12;
+#def SB_ASHR 13;
+#def SB_FADD 14;
+#def SB_FSUB 15;
+#def SB_FMUL 16;
+#def SB_FDIV 17;
+#def SB_FREM 18;
+
+// Cast kinds
+#def SK_TRUNC 1;
+#def SK_ZEXT 2;
+#def SK_SEXT 3;
+#def SK_BITCAST 4;
+#def SK_PTRTOINT 5;
+#def SK_INTTOPTR 6;
+#def SK_FPEXT 7;
+#def SK_FPTRUNC 8;
+#def SK_SITOFP 9;
+#def SK_UITOFP 10;
+#def SK_FPTOSI 11;
+#def SK_FPTOUI 12;
+
+// Compare predicates, integer 1..10 and float 11..
+#def SP_EQ 1;
+#def SP_NE 2;
+#def SP_ULT 3;
+#def SP_ULE 4;
+#def SP_UGT 5;
+#def SP_UGE 6;
+#def SP_SLT 7;
+#def SP_SLE 8;
+#def SP_SGT 9;
+#def SP_SGE 10;
+#def SP_FALSE 11;
+#def SP_TRUE 12;
+#def SP_ORD 13;
+#def SP_UNO 14;
+#def SP_OEQ 15;
+#def SP_ONE 16;
+#def SP_UEQ 17;
+#def SP_UNE 18;
+#def SP_OGT 19;
+#def SP_OGE 20;
+#def SP_OLT 21;
+#def SP_OLE 22;
+#def SP_UGT_F 23;
+#def SP_UGE_F 24;
+#def SP_ULT_F 25;
+#def SP_ULE_F 26;
+
+// Kinds of constant operands, see s_ck
+#def CK_NO 0;       // not a constant
+#def CK_INT 1;      // integer bits in scv
+#def CK_SYM 2;      // symbol scs plus scv
+#def CK_FP 3;       // float bits in scv
+#def CK_ZERO 4;     // zeroinitializer or undef of an aggregate
+#def CK_BAD 5;      // constant text the selector cannot read
+
+// One recorded instruction. res is the value it defines, a b c its operands.
+struct SI
+{
+    int op, n, k, sz, bi;
+    IRType* ty;
+    IRValue* res;
+    IRValue* a;
+    IRValue* b;
+    IRValue* c;
+    IRValue** args;
+    IRBlock** blks;
+    IRBlock* t;
+    IRBlock* f;
+    bool vol, flag;
+    int pos;
+};
+
+// ------------------------------------------------------------------
+// Machine IR
+// ------------------------------------------------------------------
+//
+// Registers share one number space. 0..15 are the hardware general registers in encoding
+// order (0 rax 1 rcx 2 rdx 3 rbx 4 rsp 5 rbp 6 rsi 7 rdi 8..15 r8..r15), 16..31 are
+// xmm0..xmm15 and 32 and above are virtual registers.
+#def R_VBASE 32;
+
+#def MK_NONE 0;
+#def MK_REG 1;      // r register, sz access size
+#def MK_IMM 2;      // imm
+#def MK_MEM 3;      // base r (-1 none), index r2 (-1 none) scaled by sc, disp imm, sym (rip) or frame object fo
+#def MK_SYM 4;      // sym text
+#def MK_BLK 5;      // block number in imm
+
+struct MO
+{
+    int k, r, r2, sc, sz, fo;
+    i64 imm;
+    byte* sym;
+};
+
+#def M_MOV 1;       // o0 source, o1 destination
+#def M_MOVZX 2;     // o0 source of size sz, o1 destination, zero extended to 32 bits
+#def M_MOVSX 3;     // o0 source of size sz, o1 destination, sign extended to cc bytes
+#def M_LEA 4;       // o0 memory, o1 destination
+#def M_ALU 5;       // o2 = o0 kind o1, cc is the kind
+#def M_SHIFT 6;     // o2 = o0 shifted by o1 (immediate, or the preg rcx)
+#def M_UN 7;        // o1 = kind o0
+#def M_CMP 8;       // flags of o0 against o1
+#def M_TEST 9;      // flags of o0 and o1
+#def M_SETCC 10;    // o0 = condition cc as 0 or 1
+#def M_JCC 11;      // jump to block imm of o0 when cc
+#def M_JMP 12;      // jump to block imm of o0
+#def M_CMOV 13;     // o2 = cc ? o0 : o1
+#def M_CALL 14;     // o0 target, clob the clobbered registers, iu the registers read
+#def M_RET 15;      // iu the registers read
+#def M_DIV 16;      // o0 divisor, cc 0 unsigned 1 signed, rax and rdx implicit
+#def M_CQO 17;      // sign extends rax into rdx, size sz
+#def M_REPMOVS 18;  // rep movsb
+#def M_REPSTOS 19;  // rep stosb
+#def M_UD2 20;
+#def M_FALU 21;     // o2 = o0 kind o1 on scalar floats of size sz
+#def M_FCMP 22;     // ucomis of o0 against o1
+#def M_CVT 23;      // conversion between registers, cc kind
+#def M_GX 24;       // move between general and xmm register, o0 source o1 destination
+#def M_XMOV 25;     // xmm move of size sz, o0 source o1 destination
+#def M_TEXT 26;     // raw text in text
+#def M_LABEL 27;    // local label number in imm of o0
+#def M_MOVABS 28;   // o0 immediate of 64 bits, o1 destination
+#def M_FUN 29;      // o1 = unary float operation kind cc of o0
+#def M_PCOPY 31;    // parallel copy of the phis of the target block along the edge
+#def M_SPILL 32;    // store of register o0 into the spill slot of o1 (inserted by the allocator)
+#def M_JTAB 34;     // jump table: o0 index register, o1 lowest case value, o2 default block, cc entries, text the block ids
+#def M_JTAB2 35;    // sparse switch as nested byte tables: o0 index register, o2 default block, cc cases, text u64 values then int block ids
+#def M_FSEL 36;     // float select: o0 value when cc holds, o1 otherwise, o2 destination
+#def M_COPY 38;     // memory copy of sz bytes: o0 destination, o1 source (both memory operands)
+#def M_REPMOVS 39;  // rep movsb with rsi, rdi, rcx set up
+#def M_REPSTOS 40;  // rep stosb of zero with rdi, rcx and eax set up
+#def M_MEMMOVE 41;  // overlap safe copy with rsi, rdi, rcx set up
+#def M_INT3 42;     // breakpoint trap
+#def M_ASM 43;      // inline asm: text is the body, iu the registers it reads, clob the ones it writes
+#def M_VAARG 44;    // va_arg: o0 the list pointer, o1 the result, cc 1 for a float
+#def M_VASTART 45;  // va_start: o0 the list pointer
+#def M_SAVEVA 46;   // saves the argument registers into the register save area tgt
+#def M_DALLOC 47;   // dynamic stack allocation: o0 the size in bytes, o1 the result
+#def M_BREV 49;     // bit reverse of the sz bytes of register o0 into register o1
+#def M_RMW 48;      // memory destination ALU operation: o0 register or immediate, o1 memory, cc the operation
+#def M_FREM 37;     // float remainder o2 = o0 rem o1 (x87), clobbers rax
+#def M_RELOAD 33;   // load of register o1 from the spill slot of o0 (inserted by the allocator)
+
+// ALU kinds
+#def A_ADD 1;
+#def A_SUB 2;
+#def A_AND 3;
+#def A_OR 4;
+#def A_XOR 5;
+#def A_IMUL 6;
+#def S_SHL 1;
+#def S_SHR 2;
+#def S_SAR 3;
+#def S_ROR 4;         // rorx, only with tgt 77
+#def U_NEG 1;
+#def U_NOT 2;
+#def U_BSWAP 3;
+#def U_MOVBE 4;      // big endian load (memory source) or store (memory destination)
+#def U_POPCNT 5;
+#def U_LZCNT 6;
+#def U_TZCNT 7;
+#def U_BLSR 8;       // x & (x - 1)
+#def U_BLSI 9;       // x & -x
+
+// Condition codes
+#def C_E 0;
+#def C_NE 1;
+#def C_B 2;
+#def C_AE 3;
+#def C_BE 4;
+#def C_A 5;
+#def C_L 6;
+#def C_GE 7;
+#def C_LE 8;
+#def C_G 9;
+#def C_P 10;
+#def C_NP 11;
+#def C_S 12;
+#def C_NS 13;
+
+struct MI
+{
+    int op, sz, cc, iu, id, clob, dying, ddead, tgt;
+    MO* o0;
+    MO* o1;
+    MO* o2;
+    byte* text;
+};
+
+// A phi of the SSA form
+struct GP
+{
+    IRValue* res;
+    int dst;            // virtual register
+    PtrVec* preds;      // GB* of the incoming edges
+    PtrVec* vals;       // IRValue* of the incoming values
+    PtrVec* ops;        // MO* of the incoming values after selection
+};
+
+// A block of the function being compiled
+struct GB
+{
+    IRBlock* ib;
+    int id, rpo, idom, lbl, depth, nexti, lw;
+    PtrVec* preds;      // GB*
+    PtrVec* succs;      // GB*
+    PtrVec* kids;       // GB* children in the dominator tree
+    PtrVec* df;         // GB* dominance frontier
+    PtrVec* phis;       // GP*
+    PtrVec* mi;         // MI*
+    int* livein;
+    int* liveout;
+    int* guse;
+    int* gdef;
+    int hd;             // shrink wrapping: 1 where the frame is set up, 2 below such a block, 0 outside
+};
+
+// A frame object (an alloca that stays in memory, or an aggregate temporary)
+struct XFO
+{
+    int size, al, off, fix;
+};
+
+// Per function state of the code generator
+struct GF
+{
+    IRFunc* f;
+    PtrVec* bl;         // GB* in source order, reachable blocks only
+    GB** rpo;           // GB* in reverse post order
+    int nb;
+    int nvr;            // virtual registers made so far
+    int asmsv;          // registers named by inline asm
+    int vagp, vafp, vastk, vafo;   // named register arguments, stack bytes, save area of a vararg function
+    int sretv;          // register holding the hidden result pointer, 0 when there is none
+    int capvr;
+    int* vcls;          // 0 general, 1 xmm
+    int* vwgt;          // spill cost
+    int* vcol;          // assigned register, -1 spilled, -2 unassigned
+    int* vslot;         // frame offset of a spilled register
+    int* vforb;         // registers it must not take
+    int* vhint;         // preferred register, or virtual register whose register is preferred (as -(v + 1))
+    int* vdef;          // defining block id
+    int* vglob;         // dense index among registers live across blocks, or -1
+    int* vuse;          // number of uses
+    int nglob;
+    int outmax;         // bytes of outgoing argument area
+    PtrVec* fobj;       // frame objects: XFO*
+    int saved;          // callee saved registers used
+    bool sw;            // the frame is set up in the blocks marked hd instead of at the entry
+    int frame;
+    int csbase;
+    bool dyn;           // the function has a dynamic stack allocation
+    bool nofp;          // leaf function without a frame pointer: frame objects are addressed from rsp
+    int mlast;
+    int rcap, nl, occ, csbase2;
+    int* lpos;
+    int* llist;
+    int* gv;
+    int* gw;
+    int* cur;
+    int* csoff;
+};

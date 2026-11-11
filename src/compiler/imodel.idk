@@ -26,6 +26,7 @@
 #def VF_TYPEFUNC_STR 2;
 #def VF_ALLOCA 4;
 #def VF_GLOBAL 8;
+#def VF_NOALIAS 16;    // function argument: a tied pointer, nothing else reaches what it points to
 
 using IDEKA::ast;
 using IDEKA::preprocessor;
@@ -58,6 +59,8 @@ namespace IDEKA
             int nitems;
             byte* name;
             bool vararg, defined;
+            int* loff;      // declared structs: bit offset of each member, null when unset
+            int lbits;      // declared structs: the size in bits their layout computed, 0 when unset
         };
 
         // A value: ty and the operand text (without the type), plus the IDEKA type
@@ -71,6 +74,16 @@ namespace IDEKA
             int flags;
             bool is_const;
             int slot;           // scratch owned by a native code backend (frame offset), unused by the LLVM text backend
+            int vr;             // SSA backend: virtual register number, 0 when none
+            int fo;             // SSA backend: frame object number plus one, 0 when none
+            IRValue* fwd;       // SSA backend: value that replaces this one after promotion
+            int nu;             // SSA backend: number of uses
+            void* di;           // SSA backend: recorded instruction that defines this value
+            int db;             // SSA backend: block that defines this value
+            void* ui;           // SSA backend: the only instruction that uses this value, when it has one use
+            bool kc;            // SSA backend: the value folded to the integer constant kv
+            i64 kv;
+            void* cl;           // SSA backend: copy of this value made while a function is being inlined
         };
 
         struct IRBlock
@@ -79,6 +92,9 @@ namespace IDEKA
             PtrVec* lines;
             bool terminated;
             int id, term_at;    // scratch owned by a native code backend (label number, first terminator line)
+            PtrVec* insts;      // SSA backend: recorded instructions
+            void* popsi;        // SSA backend: terminator taken back by pop_term
+            int gi;             // SSA backend: index among the reachable blocks
         };
 
         struct IRFunc
@@ -96,6 +112,12 @@ namespace IDEKA
             IRValue* self;      // the function as a value (pointer to its type)
             int frame, sret_slot, cs_mask, va_gp, va_fp, va_stk, va_slot, wsave;   // scratch owned by a native code backend
             int* cs;
+            PtrVec* sall;       // SSA backend: recorded instructions of this function
+            PtrVec* sarr;       // SSA backend: operand arrays of the recorded instructions
+            byte* sp;           // SSA backend: free space left in the newest block of sall
+            int sleft;
+            byte* ap;           // SSA backend: free space left in the newest block of sarr
+            int aleft;
         };
 
         struct IRGlobal

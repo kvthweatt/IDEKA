@@ -1,0 +1,76 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+const noopstr chars = "HI";
+
+operator(i32 x)[!] -> i32
+{
+    int v = x;
+    while (x--)
+    {
+        if (x!?) v *= x;
+    };
+    -> v;
+} # binding {:this};
+
+comptime
+{
+    data{5} as b5;
+    data{3} as b3;
+    b5 b5x = 0b01000;
+    compiler.io.console.print("b5x = ");
+    ////
+    for (`i in b5x)
+    {
+        compiler.io.console.print(int(i));
+    };
+    ///
+    compiler.io.console.print("\nb3x = ");
+    ///
+    for (`i in b3x)
+    {
+        compiler.io.console.print(int(i));
+    };
+    ///
+    compiler.io.console.print("\n");
+
+    operator(u64 x)[!] -> u64
+    {
+        int v = x;
+        while (x--)
+        {
+            if (x!?) v *= x;
+        };
+        -> v;
+    } # binding {:this};
+
+    compiler.io.console.println(16ul!);
+};
+
+main() -> int
+{
+    int y = 25;
+
+    int z = 5!;
+
+    println(z);
+
+    byte t;
+    for (x in chars)
+    {
+        if (x!?)
+        {
+            //print(f"Current char: {x}\n");
+            print(f"Current char: ");      // 1 4
+            print(x);                      // 2 5
+            print();                       // 3 6
+        }
+        else
+        {
+            println("Hit end of string!"); // 7
+        };
+    };
+    println(--GCSTDOUT);
+    -> 0;
+};

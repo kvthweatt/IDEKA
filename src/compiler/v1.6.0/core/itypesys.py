@@ -1220,6 +1220,7 @@ class TypeSystem:
     is_pointer: bool = False
     pointer_depth: int = 0
     is_const_pointer: bool = False
+    is_bit_pointer: bool = False  # T`*: a pair (origin pointer to T, bit index)
     custom_typename: Optional[str] = None
     storage_class: Optional[StorageClass] = None
     no_functions: bool = False  # True when declared with data!{N} -- type cannot have type functions
@@ -1257,6 +1258,18 @@ class TypeSystem:
             param_types = [TypeSystem.get_llvm_type(param, module) for param in type_spec.parameter_types]
             return ir.FunctionType(ret_type, param_types)
         
+        # A bit pointer is the pair (origin pointer to the pointee, bit index)
+        if getattr(type_spec, 'is_bit_pointer', False):
+            import dataclasses as _dc
+            _inner = _dc.replace(type_spec, is_bit_pointer=False)
+            try:
+                _pt = TypeSystem.get_llvm_type(_inner, module, include_array=include_array)
+            except Exception:
+                _pt = ir.IntType(8)
+            if isinstance(_pt, ir.VoidType):
+                _pt = ir.IntType(8)
+            return ir.LiteralStructType([_pt.as_pointer(), ir.IntType(64)])
+
         # Handle DataType (from LiteralTypeHandler)
         if isinstance(type_spec, DataType):
             if type_spec in (DataType.SINT, DataType.UINT):
@@ -5584,48 +5597,114 @@ class StructTypeHandler:
                 total += 64  # pointer
         return total
 
-    def calculate_vtable(members: List, module: 'ir.Module') -> 'StructVTable':
+    def _field_extent(member_type, module: 'ir.Module'):
+        """
+        Returns (bit_width, alignment_bits) of one struct member.
+        The alignment is the placement constraint: 1 means the field packs at the next free bit.
+          - data{w}        : no constraint, packs tightly
+          - data{w:a}      : aligned to a, occupies max(w, a) bits (a >= w is enforced by the parser)
+          - standard types : aligned to their own width (capped at 64), arrays to their element
+          - struct members : the nested struct's own alignment and its exact size
+        """
+        import dataclasses
+        if member_type.is_array:
+            elem_spec = dataclasses.replace(member_type, is_array=False, array_size=None,
+                                            array_dimensions=None, array_element_type=None)
+            elem_width, elem_align = StructTypeHandler._field_extent(elem_spec, module)
+            llvm_type = TypeSystem.get_llvm_type(member_type, module, include_array=True)
+            total = SizeOfTypeHandler.bits_from_llvm_type(llvm_type, module)
+            elem_llvm = TypeSystem.get_llvm_type(elem_spec, module, include_array=True)
+            raw_elem = SizeOfTypeHandler.bits_from_llvm_type(elem_llvm, module)
+            # array elements are addressable, so each takes a whole number of bytes
+            if isinstance(elem_llvm, ir.IntType):
+                stride = 8 if elem_llvm.width <= 8 else 16 if elem_llvm.width <= 16 else 32 if elem_llvm.width <= 32 else 64 if elem_llvm.width <= 64 else 128
+                n = total // raw_elem if raw_elem > 0 else 0
+                total = n * stride
+            elif raw_elem > 0 and elem_width != raw_elem:
+                total = total // raw_elem * elem_width
+            return total, elem_align
+        nested = getattr(module, '_struct_vtables', {}).get(member_type.custom_typename) \
+            if member_type.custom_typename else None
+        if nested is not None and not member_type.is_pointer:
+            return nested.total_bits, nested.alignment
+        if member_type.is_pointer:
+            return 64, 64
+        _lt = TypeSystem.get_llvm_type(member_type, module, include_array=True)
+        if isinstance(_lt, ir.PointerType):
+            return 64, 64
+        if member_type.bit_width is not None:
+            width = member_type.bit_width
+            if member_type.alignment is not None:
+                return width, member_type.alignment
+            if member_type.base_type == DataType.DATA:
+                return width, 1
+            return width, (width if width <= 64 else 64)
+        llvm_type = TypeSystem.get_llvm_type(member_type, module, include_array=True)
+        width = SizeOfTypeHandler.bits_from_llvm_type(llvm_type, module)
+        return width, (width if width <= 64 else 64)
+
+    @staticmethod
+    def _c_field_extent(member, member_type, bit_width: int, alignment: int, module: 'ir.Module'):
+        """
+        Width and alignment of a member of a cstruct. Fields sit at their natural alignment: the largest
+        power of two that divides the width, at most 64 bits. An explicit data{w:a} alignment is kept.
+        A width that is not a whole number of bytes has no C layout and is an error.
+        """
+        from ierrors import IDEKACodegenError
+        import dataclasses
+        spec = member_type
+        if spec.is_array:
+            spec = dataclasses.replace(spec, is_array=False, array_size=None,
+                                       array_dimensions=None, array_element_type=None)
+        nested = getattr(module, '_struct_vtables', {}).get(spec.custom_typename) \
+            if spec.custom_typename else None
+        if nested is not None and not spec.is_pointer:
+            return bit_width, nested.alignment
+        if bit_width % 8 != 0:
+            raise IDEKACodegenError(
+                f"cstruct field '{member.name}' is {bit_width} bits wide: a C layout needs whole bytes", member, module)
+        if spec.bit_width is not None and spec.alignment is not None and spec.base_type == DataType.DATA:
+            return bit_width, alignment
+        elem_width = SizeOfTypeHandler.bits_from_llvm_type(
+            TypeSystem.get_llvm_type(spec, module, include_array=True), module)
+        natural = elem_width & -elem_width
+        return bit_width, min(natural, 64)
+
+    @staticmethod
+    def calculate_vtable(members: List, module: 'ir.Module', c_layout: bool = False) -> 'StructVTable':
         from iast import StructVTable, get_builtin_bit_width
-        
+
         fields = []
         field_types = {}
         current_offset = 0
         max_alignment = 1
-        has_data_types = False  # Track if struct uses data{} types
-        
+
         for member in members:
             member_type = member.type_spec
-            
-            # Check if this is a packed data{} type
-            if member_type.bit_width is not None:
-                has_data_types = True
-            
-            # Get the LLVM type for this field
             llvm_field_type = TypeSystem.get_llvm_type(member_type, module, include_array=True, node=member)
             field_types[member.name] = llvm_field_type
 
-            if member_type.bit_width is not None and not member_type.is_array:
-                # Packed data{} scalar field — use declared width directly.
-                bit_width = member_type.bit_width
-                alignment = member_type.alignment if member_type.alignment is not None else bit_width
-            else:
-                # Derive width from the LLVM type — this is always authoritative.
-                bit_width = SizeOfTypeHandler.bits_from_llvm_type(llvm_field_type, module)
-                alignment = bit_width if bit_width <= 64 else 64
+            bit_width, alignment = StructTypeHandler._field_extent(member_type, module)
+            if c_layout:
+                bit_width, alignment = StructTypeHandler._c_field_extent(member, member_type, bit_width, alignment, module)
 
-            import sys
-            #print(f"[VTB] {member.name}: llvm={llvm_field_type} bits={bit_width}", file=sys.stderr)
+            # A field starts at the next multiple of its alignment and occupies at least that many bits.
+            if alignment > 1 and current_offset % alignment != 0:
+                current_offset += alignment - (current_offset % alignment)
+            slot = max(bit_width, alignment)
 
-            # IDEKA structs are tightly packed — no alignment padding between fields.
             fields.append((member.name, current_offset, bit_width, alignment))
             member.offset = current_offset
 
-            current_offset += bit_width
+            current_offset += slot
             max_alignment = max(max_alignment, alignment)
-        
+
+        # A struct ends where its last field ends. A cstruct is padded up to its alignment, as C does.
+        if c_layout and max_alignment > 1 and current_offset % max_alignment != 0:
+            current_offset += max_alignment - (current_offset % max_alignment)
         total_bits = current_offset
         total_bytes = (total_bits + 7) // 8
-        
+
         return StructVTable(
             struct_name="",  # Will be set by caller
             total_bits=total_bits,
@@ -5633,7 +5712,7 @@ class StructTypeHandler:
             alignment=max_alignment,
             fields=fields,
             field_types=field_types)
-    
+
     @staticmethod
     def create_struct_type(name: str, vtable: 'StructVTable', module: 'ir.Module') -> 'ir.Type':
         field_types = [vtable.field_types[field_name] for field_name, _, _, _ in vtable.fields]
@@ -6158,6 +6237,10 @@ class SizeOfTypeHandler:
 
         # Structs (literal or identified)
         if isinstance(llvm_type, ir.LiteralStructType) or hasattr(llvm_type, "elements"):
+            # A declared struct has exactly the size its layout computed (alignment padding included)
+            _vt = getattr(module, '_struct_vtables', {}).get(getattr(llvm_type, 'name', None))
+            if _vt is not None:
+                return _vt.total_bits
             elements = getattr(llvm_type, "elements", None)
             if elements is None:
                 return module.data_layout.get_type_size(llvm_type) * 8

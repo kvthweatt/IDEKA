@@ -2073,7 +2073,7 @@ module IDEKA_Compiler_Entrypoint
                         print(cg.nskipped);
                         print(" function(s) skipped, \0");
                         print(cg.nerrors);
-                        println(" error(s). Not invoking llc.\0");
+                        println(" error(s).\0");
                         }
                             default {};
                         };
@@ -2082,6 +2082,14 @@ module IDEKA_Compiler_Entrypoint
                     };
                     if (X64_BACKEND & cg.mod.unsupported() > 0)
                     {
+                        int uk;
+                        PtrVec* ul = cg.mod.unsupported_log();
+                        while (uk < ul.len)
+                        {
+                            print("x64 backend: unsupported in \0");
+                            println((byte*)ul.items[uk]);
+                            uk++;
+                        };
                         print("x64 backend: \0");
                         print(cg.mod.unsupported());
                         println(" unsupported construct(s), not assembling.\0");

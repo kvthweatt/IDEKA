@@ -1026,9 +1026,9 @@ class IDEKACompiler:
                     #"--unresolved-symbols=ignore-all",
                     #"-lc",
                     "-Ttext-segment=0x400000",              # Text segment address
-                    "--section-start", ".rodata=0x500000",  # Read-only data address
-                    "--section-start", ".data=0x600000",    # Data section address
-                    "--section-start", ".bss=0x700000",     # BSS section address
+                    "--section-start", ".rodata=0x600000",  # Read-only data address
+                    "--section-start", ".data=0x700000",    # Data section address
+                    "--section-start", ".bss=0x800000",     # BSS section address
                     "-dynamic-linker", "/lib/ld-linux-aarch64.so.1" if self.is_arm64 else "/lib64/ld-linux-x86-64.so.2",
                     "-e", "_start",                         # Entry point
                     str(obj_file),

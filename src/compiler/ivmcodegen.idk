@@ -286,8 +286,7 @@ namespace IDEKA
         {
             byte* name;
             int tag;
-            i64 d;
-            i64 m;
+            i64 d, m;
         };
 
         // Python int(text, 0): optional sign, 0x, 0o and 0b prefixes, a decimal number without
@@ -297,12 +296,8 @@ namespace IDEKA
             int i;
             int n = idkvm_strlen(s);
             int base = 10;
-            int dv;
-            int c;
-            int ndig;
-            bool neg;
-            bool prev_us;
-            bool lead_zero;
+            int dv, c, ndig;
+            bool neg, prev_us, lead_zero;
             i64 v;
             while (i < n & (s[i] == ' ' | s[i] == '\t' | s[i] == '\n' | s[i] == '\r')) { i++; };
             while (n > i & (s[n - 1] == ' ' | s[n - 1] == '\t' | s[n - 1] == '\n' | s[n - 1] == '\r')) { n--; };
@@ -374,6 +369,7 @@ namespace IDEKA
             NameMap* ltypes;    // name to TypeSpec* (_local_typespecs)
             PtrVec* brks;       // break patch lists, one PtrVec* per loop (entries are index + 1)
             PtrVec* conts;      // continue patch lists
+            PtrVec* bsw;        // per entry of brks: 1 for a switch scope, 0 for a loop
             byte* tail_self;    // name of the <~ function being compiled, null outside
             int tail_argc;
             bool in_func;       // _is_function_body
@@ -399,6 +395,9 @@ namespace IDEKA
             PtrVec* gp_name;    // and the label each waits for (byte*)
             NameMap* excluded;  // namespaces named by not using (_excluded_namespaces)
             NodeVec* pstmts;    // the top level statements of the program (_program_statements), borrowed
+            int pbound;         // only the statements before this index are visible to the comptime code, -1 for all
+            NameMap* pulled;    // program functions compiled on demand, kept by the outermost codegen
+            byte* curns;        // the namespace of the function being compiled, "a__b", null outside of one
             FvmLayouts lay;     // struct layouts defined by comptime StructDefs (_struct_layouts)
             NameMap* ldirty;    // layouts this codegen defined, merged into the VM after compile
             int lay_seed;       // layouts copied in at the start, they are not merged back unless redefined
@@ -416,6 +415,8 @@ namespace IDEKA
             NodeVec* cbody;     // statements of the comptime body (_comptime_body_stmts)
             bool shared_ifc;    // trreg, ifreg and the whitelists belong to the codegen of the object
             bool in_method;     // _is_method_body: a method returns this, then its own return value
+            bool strict;        // comptime block: a bare call is resolved through the active usings only
+            int pull_depth;     // program functions being pulled in, their bodies are not strict
 
             __init() -> this
             {
@@ -435,6 +436,7 @@ namespace IDEKA
                 this.lvars = nm_new();
                 this.ltypes = nm_new();
                 this.brks = pv_new();
+                this.bsw = pv_new();
                 this.conts = pv_new();
                 this.tail_self = (byte*)0;
                 this.tail_argc = 0;
@@ -476,6 +478,11 @@ namespace IDEKA
                 this.gp_name = pv_new();
                 this.excluded = nm_new();
                 this.pstmts = (NodeVec*)0;
+                this.pbound = -1;
+                this.pulled = (NameMap*)0;
+                this.curns = (byte*)0;
+                this.strict = false;
+                this.pull_depth = 0;
                 this.lay.__init();
                 -> this;
             };
@@ -562,6 +569,7 @@ namespace IDEKA
                 nm_free(this.excluded);
                 this.lay.__exit();
                 pv_free(this.brks);
+                pv_free(this.bsw);
                 pv_free(this.conts);
                 pv_free(this.caps);
                 pv_free(this.lnames);
@@ -673,13 +681,13 @@ namespace IDEKA
                 };
                 switch (idkvmcg_parse_pyint(text, @iv))
                 {
-                    case (true) { this.capture(name, IDKVM_T_INT, iv, (i64)0); ->; }
+                    case (true) { this.capture(name, IDKVM_T_INT, iv, 0); ->; }
                     default {};
                 };
                 dv = idkvm_parse_double(text, idkvm_strlen(text), @ok);
                 switch (ok)
                 {
-                    case (true) { this.capture(name, IDKVM_T_DOUBLE, idkvm_dbl_bits(dv), (i64)0); ->; }
+                    case (true) { this.capture(name, IDKVM_T_DOUBLE, idkvm_dbl_bits(dv), 0); ->; }
                     default {};
                 };
                 this.capture_bytes(name, text);
@@ -709,15 +717,15 @@ namespace IDEKA
                 -> r;
             };
 
-            emit0(int op) -> int -> this.emit(op, (i64)0, (i64)0, (i64)0, (byte*)0);
+            emit0(int op) -> int -> this.emit(op, 0, 0, 0, (byte*)0);
 
-            emit1(int op, i64 oa) -> int -> this.emit(op, oa, (i64)0, (i64)0, (byte*)0);
+            emit1(int op, i64 oa) -> int -> this.emit(op, oa, 0, 0, (byte*)0);
 
             // operand is a name (GLOBAL_GET, GLOBAL_SET, STRUCT_NEW, ...)
-            emits(int op, byte* name) -> int -> this.emit(op, (i64)0, (i64)0, (i64)0, this.keep(name));
+            emits(int op, byte* name) -> int -> this.emit(op, 0, 0, 0, this.keep(name));
 
             // PUSH tag:data
-            emit_push(int tag, i64 dval) -> int -> this.emit(IDKVM_PUSH, (i64)tag, dval, (i64)0, (byte*)0);
+            emit_push(int tag, i64 dval) -> int -> this.emit(IDKVM_PUSH, (i64)tag, dval, 0, (byte*)0);
 
             // IDKVMCodegen._current_ip: jump targets are relative to the unit
             ip() -> int -> this.code.len - this.ubase;
@@ -727,8 +735,8 @@ namespace IDEKA
             {
                 this.code.ops[idx] = op;
                 this.code.a[idx] = (i64)addr;
-                this.code.b[idx] = (i64)0;
-                this.code.c[idx] = (i64)0;
+                this.code.b[idx] = 0;
+                this.code.c[idx] = 0;
                 this.code.s[idx] = (byte*)0;
                 ->;
             };
@@ -741,9 +749,9 @@ namespace IDEKA
                 {
                     case (true)
                     {
-                        box = (i64*)fmalloc((u64)8);
+                        box = (i64*)fmalloc(8);
                         pv_push(this.owned, (void*)box);
-                        *box = (i64)this.nlocals;
+                        *box = this.nlocals;
                         nm_put(this.locals, name, (void*)box);
                         pv_push(this.lnames, (void*)this.keep(name));
                         this.nlocals++;
@@ -783,6 +791,7 @@ namespace IDEKA
             loop_push() -> void
             {
                 pv_push(this.brks, (void*)pv_new());
+                pv_push(this.bsw, (void*)(u64)0);
                 pv_push(this.conts, (void*)pv_new());
                 ->;
             };
@@ -794,6 +803,7 @@ namespace IDEKA
                 PtrVec* cl = (PtrVec*)this.conts.items[this.conts.len - 1];
                 int i;
                 this.brks.len--;
+                this.bsw.len--;
                 this.conts.len--;
                 while (i < bl.len)
                 {
@@ -814,6 +824,15 @@ namespace IDEKA
             // compiled_functions: has, and put (a name that is already there keeps its position)
             cf_has(byte* name) -> bool -> nm_has(this.fidx, name);
 
+            // true when both names are registered for the same function
+            cf_same(byte* a, byte* b) -> bool
+            {
+                i64* ba = (i64*)nm_get(this.fidx, a);
+                i64* bb = (i64*)nm_get(this.fidx, b);
+                switch (ba == (i64*)0 | bb == (i64*)0) { case (true) { -> false; } default {}; };
+                -> this.fcgs.items[(int)*ba - 1] == this.fcgs.items[(int)*bb - 1];
+            };
+
             cf_put(byte* name, IDKVMCodegen* c) -> void
             {
                 i64* box = (i64*)nm_get(this.fidx, name);
@@ -824,7 +843,7 @@ namespace IDEKA
                     default
                     {
                         nm = this.keep(name);
-                        box = (i64*)fmalloc((u64)8);
+                        box = (i64*)fmalloc(8);
                         pv_push(this.owned, (void*)box);
                         pv_push(this.fnames, (void*)nm);
                         pv_push(this.fcgs, (void*)c);
@@ -861,6 +880,21 @@ namespace IDEKA
             // compiled_functions or known_functions
             fn_known(byte* name) -> bool -> this.cf_has(name) | nm_has(this.known, name);
 
+            // True when name is a function of this block, or a VM function that is not also the bare
+            // name of a namespace function (those exist under both names, the bare one is no match)
+            fn_exact(byte* name) -> bool
+            {
+                int i;
+                if (this.cf_has(name)) { -> true; };
+                if (!nm_has(this.known, name)) { -> false; };
+                while (i < this.known.count)
+                {
+                    if (this.known.keys[i] != (byte*)0 & idkvm_ends_dunder((byte*)this.known.keys[i], name)) { -> false; };
+                    i++;
+                };
+                -> true;
+            };
+
             // The codegen of a function body: it reads the block globals through GLOBAL_GET and
             // GLOBAL_SET (_outer_globals), and starts from copies of the scope tables
             make_child() -> IDKVMCodegen*
@@ -872,6 +906,8 @@ namespace IDEKA
                 c.__init();
                 c.par = this;
                 c.pstmts = this.pstmts;
+                c.pbound = this.pbound;
+                c.curns = this.curns;
                 pv_push(this.kids, (void*)c);
                 while (i < this.bglobals.count)
                 {
@@ -884,6 +920,13 @@ namespace IDEKA
                 while (i < this.known.count)
                 {
                     c.known_add((byte*)this.known.keys[i]);
+                    i++;
+                };
+                // the functions compiled so far, like compiled_functions copied into a child
+                i = 0;
+                while (i < this.fnames.len)
+                {
+                    c.known_add((byte*)this.fnames.items[i]);
                     i++;
                 };
                 i = 0;
@@ -965,22 +1008,40 @@ namespace IDEKA
             // name replaces the earlier one.
             register_functions(IDEKAVM* vm) -> bool
             {
-                int i;
-                int u;
+                int i, u;
                 IDKVMCodegen* c;
+                int* us = (int*)idkvm_alloc((this.fnames.len + 1) * 4);
+                if (us == (int*)0) { -> false; };
                 while (i < this.fnames.len)
                 {
                     c = (IDKVMCodegen*)this.fcgs.items[i];
-                    u = vm.import_unit(@c.code, c.unit);
+                    u = this.unit_shared(vm, i, us);
                     switch (u < 0)
                     {
-                        case (true) { -> false; }
+                        case (true) { ffree((byte*)us); -> false; }
                         default {};
                     };
+                    us[i] = u;
                     vm.register_function((byte*)this.fnames.items[i], u);
                     i++;
                 };
+                ffree((byte*)us);
                 -> true;
+            };
+
+            // The VM unit of function name i: the unit its code generator already gave to an earlier
+            // name (the bare, the mangled and the signature name stand for one function), else a new one.
+            // us holds the unit of each earlier name, -1 for one that was not registered.
+            unit_shared(IDEKAVM* vm, int i, int* us) -> int
+            {
+                int j;
+                IDKVMCodegen* c = (IDKVMCodegen*)this.fcgs.items[i];
+                while (j < i)
+                {
+                    if (this.fcgs.items[j] == this.fcgs.items[i] & us[j] >= 0) { -> us[j]; };
+                    j++;
+                };
+                -> vm.import_unit(@c.code, c.unit);
             };
 
             // The statements of a body visited one by one without a defer scope: a BLOCK holds
@@ -1012,6 +1073,7 @@ namespace IDEKA
             brk_push() -> void
             {
                 pv_push(this.brks, (void*)pv_new());
+                pv_push(this.bsw, (void*)(u64)1);
                 ->;
             };
 
@@ -1020,6 +1082,7 @@ namespace IDEKA
                 PtrVec* bl = (PtrVec*)this.brks.items[this.brks.len - 1];
                 int i;
                 this.brks.len--;
+                this.bsw.len--;
                 while (i < bl.len)
                 {
                     this.patch_at((int)(u64)bl.items[i] - 1, IDKVM_JMP, to);
@@ -1178,8 +1241,7 @@ namespace IDEKA
             struct_def_prefixed(Node* n, byte* prefix) -> void
             {
                 byte* full = this.joined_name(prefix, n.text);
-                int i;
-                int li;
+                int i, li;
                 // nested structs first, their layouts are needed by the members
                 while (i < node_count(n, 3))
                 {
@@ -1333,14 +1395,14 @@ namespace IDEKA
                     {
                         this.visit_expr(o.a);
                         this.visit_expr(o.b);
-                        this.emit_push(IDKVM_T_UINT, (i64)size);
+                        this.emit_push(IDKVM_T_UINT, size);
                         this.emit0(IDKVM_MUL);
                         this.emit0(IDKVM_ADD);
                         this.emit0(IDKVM_DUP);
-                        this.emit(IDKVM_LOAD, (i64)IDKVM_T_STRUCT, (i64)size, (i64)0, this.keep(tn));
+                        this.emit(IDKVM_LOAD, (i64)IDKVM_T_STRUCT, size, 0, this.keep(tn));
                         this.visit_expr(n.b);
                         this.emits(IDKVM_STRUCT_STORE, t.text);
-                        this.emit(IDKVM_STORE, (i64)IDKVM_T_STRUCT, (i64)size, (i64)0, this.keep(tn));
+                        this.emit(IDKVM_STORE, (i64)IDKVM_T_STRUCT, size, 0, this.keep(tn));
                         ->;
                     }
                     default {};
@@ -1408,7 +1470,7 @@ namespace IDEKA
                                         this.visit_expr(o);
                                         this.visit_expr(n.b);
                                         this.emits(IDKVM_STRUCT_STORE, t.text);
-                                        this.emit(IDKVM_STORE, (i64)hv.ttag, (i64)hv.bytes, (i64)0, (byte*)0);
+                                        this.emit(IDKVM_STORE, hv.ttag, hv.bytes, 0, (byte*)0);
                                         ->;
                                     }
                                     default {};
@@ -1493,14 +1555,14 @@ namespace IDEKA
                                 {
                                     case (true)
                                     {
-                                        this.emit_push(IDKVM_T_UINT, (i64)hv.bytes);
+                                        this.emit_push(IDKVM_T_UINT, hv.bytes);
                                         this.emit0(IDKVM_MUL);
                                     }
                                     default {};
                                 };
                                 this.emit0(IDKVM_ADD);
                                 this.visit_expr(n.b);
-                                this.emit(IDKVM_STORE, (i64)hv.ttag, (i64)hv.bytes, (i64)0, (byte*)0);
+                                this.emit(IDKVM_STORE, hv.ttag, hv.bytes, 0, (byte*)0);
                                 ->;
                             }
                             default {};
@@ -1536,11 +1598,11 @@ namespace IDEKA
                     {
                         this.visit_expr(t.a);
                         this.visit_expr(t.b);
-                        this.emit_push(IDKVM_T_UINT, (i64)8);
+                        this.emit_push(IDKVM_T_UINT, 8);
                         this.emit0(IDKVM_MUL);
                         this.emit0(IDKVM_ADD);
                         this.visit_expr(n.b);
-                        this.emit(IDKVM_STORE, (i64)IDKVM_T_PTR, (i64)8, (i64)0, (byte*)0);
+                        this.emit(IDKVM_STORE, (i64)IDKVM_T_PTR, 8, 0, (byte*)0);
                         ->;
                     }
                     default {};
@@ -1549,7 +1611,11 @@ namespace IDEKA
                 this.visit_expr(t.b);
                 this.visit_expr(n.b);
                 this.emit0(IDKVM_ARRAY_STORE);
-                this.emit1(IDKVM_LOCAL_SET, (i64)arr_slot);
+                switch (nm_has(this.oglobals, an) | nm_has(this.bglobals, an))
+                {
+                    case (true) { this.write_back(an); }
+                    default { this.emit1(IDKVM_LOCAL_SET, arr_slot); };
+                };
                 ->;
             };
 
@@ -1649,9 +1715,9 @@ namespace IDEKA
                 {
                     case (true)
                     {
-                        box = (i64*)fmalloc((u64)8);
+                        box = (i64*)fmalloc(8);
                         pv_push(this.owned, (void*)box);
-                        *box = (i64)0;
+                        *box = 0;
                         nm_put(this.ucounts, what, (void*)box);
                     }
                     default {};
@@ -1692,10 +1758,10 @@ namespace IDEKA
             compile_comptime(Node* n) -> bool
             {
                 int before = this.nstubs;
-                int i;
-                int slot;
+                int i, slot;
                 Node* st;
                 FvmCap* cp;
+                this.strict = true;
                 this.seed_program_structs();
                 // captured scope: read only locals set from the enclosing scope
                 while (i < this.caps.len)
@@ -1760,13 +1826,11 @@ namespace IDEKA
             {
                 int k = s.kind;
                 Node* ns = s;
-                Node* ini;
-                Node* inner;
+                Node* ini, inner;
                 TypeSpec* ts;
                 byte* nm;
                 i64* blk;
-                int i;
-                int cnt;
+                int i, cnt;
                 switch (k == NodeKind.NAMESPACE_DEF_STATEMENT | k == NodeKind.NAMESPACE_DEF)
                 {
                     case (true)
@@ -1823,7 +1887,7 @@ namespace IDEKA
                                 blk = vm.arr_make(cnt, IDKVM_T_PTR);
                                 switch (blk != (i64*)0) { case (true) { vm.global_set(nm, IDKVM_T_ARRAY, (i64)blk, (i64)cnt); } default {}; };
                             }
-                            default { vm.global_set(nm, IDKVM_T_PTR, (i64)0, (i64)0); };
+                            default { vm.global_set(nm, IDKVM_T_PTR, 0, 0); };
                         };
                         ->;
                     }
@@ -1835,14 +1899,14 @@ namespace IDEKA
                     {
                         switch (ini.op)
                         {
-                            case (DataType.BOOL) { vm.global_set(nm, IDKVM_T_BOOL, (i64)(ini.ival != (i64)0), (i64)0); }
-                            case (DataType.FLOAT) { vm.global_set(nm, IDKVM_T_DOUBLE, idkvm_dbl_bits(ini.fval), (i64)0); }
-                            case (DataType.DOUBLE) { vm.global_set(nm, IDKVM_T_DOUBLE, idkvm_dbl_bits(ini.fval), (i64)0); }
-                            case (DataType.SINT) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, (i64)0); }
-                            case (DataType.UINT) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, (i64)0); }
-                            case (DataType.SLONG) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, (i64)0); }
-                            case (DataType.ULONG) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, (i64)0); }
-                            case (DataType.BYTE) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, (i64)0); }
+                            case (DataType.BOOL) { vm.global_set(nm, IDKVM_T_BOOL, (i64)(ini.ival != (i64)0), 0); }
+                            case (DataType.FLOAT) { vm.global_set(nm, IDKVM_T_DOUBLE, idkvm_dbl_bits(ini.fval), 0); }
+                            case (DataType.DOUBLE) { vm.global_set(nm, IDKVM_T_DOUBLE, idkvm_dbl_bits(ini.fval), 0); }
+                            case (DataType.SINT) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, 0); }
+                            case (DataType.UINT) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, 0); }
+                            case (DataType.SLONG) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, 0); }
+                            case (DataType.ULONG) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, 0); }
+                            case (DataType.BYTE) { vm.global_set(nm, IDKVM_T_LONG, ini.ival, 0); }
                             default {};
                         };
                         ->;
@@ -1856,14 +1920,14 @@ namespace IDEKA
                         inner = ini.a.a;
                         switch (inner != (Node*)0 & inner.kind == NodeKind.LITERAL & (inner.op == DataType.VOID | (inner.ival == (i64)0 & inner.fval == (double)0.0)))
                         {
-                            case (true) { vm.global_set(nm, IDKVM_T_PTR, (i64)0, (i64)0); }
+                            case (true) { vm.global_set(nm, IDKVM_T_PTR, 0, 0); }
                             default {};
                         };
                         ->;
                     }
                     default {};
                 };
-                vm.global_set(nm, IDKVM_T_PTR, (i64)0, (i64)0);
+                vm.global_set(nm, IDKVM_T_PTR, 0, 0);
                 ->;
             };
 
@@ -1872,8 +1936,7 @@ namespace IDEKA
             // functions and the globals the VM holds
             compile_import(PtrVec* stmts, IDEKAVM* vm) -> bool
             {
-                int i;
-                int k;
+                int i, k;
                 Node* s;
                 int before = this.nstubs;
                 i = 0;
@@ -1913,24 +1976,28 @@ namespace IDEKA
             // not replace a definition that is already there
             register_new_functions(IDEKAVM* vm) -> bool
             {
-                int i;
-                int u;
+                int i, u;
                 IDKVMCodegen* c;
+                int* us = (int*)idkvm_alloc((this.fnames.len + 1) * 4);
+                if (us == (int*)0) { -> false; };
                 while (i < this.fnames.len)
                 {
+                    us[i] = -1;
                     switch (vm.funcs.find((byte*)this.fnames.items[i]) < 0)
                     {
                         case (true)
                         {
                             c = (IDKVMCodegen*)this.fcgs.items[i];
-                            u = vm.import_unit(@c.code, c.unit);
-                            switch (u < 0) { case (true) { -> false; } default {}; };
+                            u = this.unit_shared(vm, i, us);
+                            switch (u < 0) { case (true) { ffree((byte*)us); -> false; } default {}; };
+                            us[i] = u;
                             vm.register_function((byte*)this.fnames.items[i], u);
                         }
                         default {};
                     };
                     i++;
                 };
+                ffree((byte*)us);
                 -> true;
             };
 
@@ -1938,8 +2005,7 @@ namespace IDEKA
             // bodies (the EXTERN_DECL instructions)
             collect_externs(IDEKAVM* vm) -> void
             {
-                int i;
-                int k;
+                int i, k;
                 IDKVMCodegen* c;
                 k = this.ubase;
                 while (k < this.code.len)
@@ -1978,10 +2044,7 @@ namespace IDEKA
             visit_body_stmts(Node* b) -> void
             {
                 int c = node_count(b, 0);
-                int i;
-                int j;
-                int k;
-                int gs;
+                int i, j, k, gs;
                 int* ends = (int*)fmalloc((u64)((c + 1) * 4));
                 Node* s;
                 j = 0;
@@ -2260,8 +2323,8 @@ namespace IDEKA
                     {
                         switch (n.ival != (i64)0)
                         {
-                            case (true) { this.emit_push(IDKVM_T_BOOL, (i64)1); }
-                            default { this.emit_push(IDKVM_T_BOOL, (i64)0); };
+                            case (true) { this.emit_push(IDKVM_T_BOOL, 1); }
+                            default { this.emit_push(IDKVM_T_BOOL, 0); };
                         };
                         -> true;
                     }
@@ -2316,7 +2379,7 @@ namespace IDEKA
                             {
                                 switch (hv.count == 0)
                                 {
-                                    case (true) { this.emit(IDKVM_LOAD, (i64)hv.ttag, (i64)hv.bytes, (i64)0, (byte*)0); }
+                                    case (true) { this.emit(IDKVM_LOAD, hv.ttag, hv.bytes, 0, (byte*)0); }
                                     default {};
                                 };
                             }
@@ -2371,15 +2434,14 @@ namespace IDEKA
             visit_binary_op(Node* n) -> bool
             {
                 int op = n.op;
-                int j;
-                int vm;
+                int j, vm;
                 switch (op == Operator.AND)
                 {
                     case (true)
                     {
                         this.visit_expr(n.a);
                         this.emit0(IDKVM_DUP);
-                        j = this.emit1(IDKVM_JNF, (i64)0);
+                        j = this.emit1(IDKVM_JNF, 0);
                         this.emit0(IDKVM_POP);
                         this.visit_expr(n.b);
                         this.patch_at(j, IDKVM_JNF, this.ip());
@@ -2393,7 +2455,7 @@ namespace IDEKA
                     {
                         this.visit_expr(n.a);
                         this.emit0(IDKVM_DUP);
-                        j = this.emit1(IDKVM_JIF, (i64)0);
+                        j = this.emit1(IDKVM_JIF, 0);
                         this.emit0(IDKVM_POP);
                         this.visit_expr(n.b);
                         this.patch_at(j, IDKVM_JIF, this.ip());
@@ -2454,7 +2516,7 @@ namespace IDEKA
             cast_declared_float(TypeSpec* ts) -> void
             {
                 int ft = this.declared_float_ttag(ts);
-                switch (ft >= 0) { case (true) { this.emit(IDKVM_CAST, (i64)ft, (i64)0, (i64)0, (byte*)0); } default {}; };
+                switch (ft >= 0) { case (true) { this.emit(IDKVM_CAST, (i64)ft, 0, 0, (byte*)0); } default {}; };
                 ->;
             };
 
@@ -2466,19 +2528,8 @@ namespace IDEKA
                 Node* ini = n.a;
                 int slot = this.alloc_local(n.text);
                 bool has_init;
-                int dt;
-                int i;
-                int argc;
-                int total;
-                int ebytes;
-                int cnt;
-                int tt;
-                int bsz;
-                int jnf;
-                int jmp;
-                int done_ip;
-                byte* guard;
-                byte* tn;
+                int dt, i, argc, total, ebytes, cnt, tt, bsz, jnf, jmp, done_ip;
+                byte* guard, tn;
                 FvmBuf b;
                 FvmHeapVar* hv;
                 switch (ts != (TypeSpec*)0)
@@ -2514,7 +2565,7 @@ namespace IDEKA
                                         hv.bytes = ebytes;
                                         hv.count = cnt;
                                         nm_put(this.hvars, n.text, (void*)hv);
-                                        this.emit_push(IDKVM_T_UINT, (i64)total);
+                                        this.emit_push(IDKVM_T_UINT, total);
                                         this.emit0(IDKVM_ALLOC);
                                         switch (ini != (Node*)0)
                                         {
@@ -2530,7 +2581,7 @@ namespace IDEKA
                                                             this.emit_push(IDKVM_T_UINT, (i64)(i * ebytes));
                                                             this.emit0(IDKVM_ADD);
                                                             this.visit_expr(node_child(ini, 0, i));
-                                                            this.emit(IDKVM_STORE, (i64)tt, (i64)ebytes, (i64)0, (byte*)0);
+                                                            this.emit(IDKVM_STORE, (i64)tt, ebytes, 0, (byte*)0);
                                                             i++;
                                                         };
                                                     }
@@ -2551,7 +2602,7 @@ namespace IDEKA
                                 hv.bytes = bsz;
                                 hv.count = 0;
                                 nm_put(this.hvars, n.text, (void*)hv);
-                                this.emit_push(IDKVM_T_UINT, (i64)bsz);
+                                this.emit_push(IDKVM_T_UINT, bsz);
                                 this.emit0(IDKVM_ALLOC);
                                 switch (ini != (Node*)0)
                                 {
@@ -2563,7 +2614,7 @@ namespace IDEKA
                                             {
                                                 this.emit0(IDKVM_DUP);
                                                 this.visit_expr(ini);
-                                                this.emit(IDKVM_STORE, (i64)tt, (i64)bsz, (i64)0, (byte*)0);
+                                                this.emit(IDKVM_STORE, (i64)tt, bsz, 0, (byte*)0);
                                             }
                                             default {};
                                         };
@@ -2587,9 +2638,9 @@ namespace IDEKA
                                 guard = this.keep(b.mem);
                                 b.__exit();
                                 this.emits(IDKVM_GLOBAL_GET, guard);
-                                this.emit_push(IDKVM_T_INT, (i64)0);
+                                this.emit_push(IDKVM_T_INT, 0);
                                 this.emit0(IDKVM_CMP_EQ);
-                                jnf = this.emit1(IDKVM_JNF, (i64)0);
+                                jnf = this.emit1(IDKVM_JNF, 0);
                                 switch (ini != (Node*)0)
                                 {
                                     case (true)
@@ -2597,17 +2648,17 @@ namespace IDEKA
                                         switch (ini.kind != NodeKind.NO_INIT)
                                         {
                                             case (true) { this.visit_expr(ini); }
-                                            default { this.emit_push(this.type_ttag_from_ts(ts), (i64)0); };
+                                            default { this.emit_push(this.type_ttag_from_ts(ts), 0); };
                                         };
                                     }
-                                    default { this.emit_push(this.type_ttag_from_ts(ts), (i64)0); };
+                                    default { this.emit_push(this.type_ttag_from_ts(ts), 0); };
                                 };
                                 this.emit0(IDKVM_DUP);
                                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
                                 this.emits(IDKVM_GLOBAL_SET, n.text);
-                                this.emit_push(IDKVM_T_INT, (i64)1);
+                                this.emit_push(IDKVM_T_INT, 1);
                                 this.emits(IDKVM_GLOBAL_SET, guard);
-                                jmp = this.emit1(IDKVM_JMP, (i64)0);
+                                jmp = this.emit1(IDKVM_JMP, 0);
                                 done_ip = this.ip();
                                 this.patch_at(jnf, IDKVM_JNF, done_ip);
                                 this.emits(IDKVM_GLOBAL_GET, n.text);
@@ -2651,7 +2702,7 @@ namespace IDEKA
                                             this.visit_expr(node_child(ini, 0, i));
                                             i++;
                                         };
-                                        this.emit(IDKVM_CALL, (i64)(1 + argc), (i64)0, (i64)0, this.keep(ini.text));
+                                        this.emit(IDKVM_CALL, (i64)(1 + argc), 0, 0, this.keep(ini.text));
                                         this.emit0(IDKVM_POP);
                                         this.emit0(IDKVM_DUP);
                                         this.emit1(IDKVM_LOCAL_SET, (i64)slot);
@@ -2669,12 +2720,18 @@ namespace IDEKA
                             case (true)
                             {
                                 dt = ts.base_type;
-                                switch ((ts.flags `& TS_ARRAY) == 0 & (ini.flags `& NF_IS_STRING) == 0 & idkvmcg_unpack_type(dt))
+                                switch ((ts.flags `& TS_ARRAY) == 0 & (ts.flags `& TS_POINTER) == 0 & ts.pointer_depth == 0 & (ini.flags `& NF_IS_STRING) == 0 & idkvmcg_unpack_type(dt))
                                 {
                                     case (true) { this.emit_pack(ini, ts); }
                                     default
                                     {
                                         this.struct_elem_type(ts, ini);
+                                        // a pointer or array declared byte, char... gives its literal that element type
+                                        switch (ini.ts == (TypeSpec*)0 & (ini.flags `& NF_IS_STRING) == 0 & ts.custom_typename == (byte*)0 & (ts.flags `& TS_ARRAY) == 0 & ts.pointer_depth == 1)
+                                        {
+                                            case (true) { ini.ts = typespec_clone(ts); }
+                                            default {};
+                                        };
                                         this.visit_expr(ini);
                                     };
                                 };
@@ -2694,7 +2751,7 @@ namespace IDEKA
                                     {
                                         switch (!nm_has(this.enums, ts.custom_typename) & this.alias_ttag(ts.custom_typename) < 0)
                                         {
-                                            case (true) { this.emit(IDKVM_CAST, (i64)IDKVM_T_PTR, (i64)0, (i64)0, this.keep(ts.custom_typename)); }
+                                            case (true) { this.emit(IDKVM_CAST, (i64)IDKVM_T_PTR, 0, 0, this.keep(ts.custom_typename)); }
                                             default {};
                                         };
                                     }
@@ -2725,7 +2782,7 @@ namespace IDEKA
                                             default {};
                                         };
                                         // stack array: ARRAY_NEW with zero elements, element tag from the base type
-                                        this.emit(IDKVM_ARRAY_NEW, (i64)ts.array_size.ival, (i64)0, (i64)0, this.keep(idkvmcg_ttag_type_name(idkvmcg_datatype_ttag(ts.base_type))));
+                                        this.emit(IDKVM_ARRAY_NEW, (i64)ts.array_size.ival, 0, 0, this.keep(idkvmcg_ttag_type_name(idkvmcg_datatype_ttag(ts.base_type))));
                                     }
                                     default
                                     {
@@ -2736,7 +2793,7 @@ namespace IDEKA
                                                 dt = this.alias_ttag(ts.custom_typename);
                                                 switch (dt >= 0)
                                                 {
-                                                    case (true) { this.emit_push(dt, (i64)0); }
+                                                    case (true) { this.emit_push(dt, 0); }
                                                     default
                                                     {
                                                         switch (nm_has(this.enums, ts.custom_typename))
@@ -2747,12 +2804,12 @@ namespace IDEKA
                                                     };
                                                 };
                                             }
-                                            default { this.emit_push(idkvmcg_datatype_ttag(ts.base_type), (i64)0); };
+                                            default { this.emit_push(idkvmcg_datatype_ttag(ts.base_type), 0); };
                                         };
                                     };
                                 };
                             }
-                            default { this.emit_push(IDKVM_T_INT, (i64)0); };
+                            default { this.emit_push(IDKVM_T_INT, 0); };
                         };
                     };
                 };
@@ -2815,7 +2872,7 @@ namespace IDEKA
                                         // heap scalar: the slot holds the pointer, so the value is STOREd through it
                                         this.emit1(IDKVM_LOCAL_GET, *hbox);
                                         this.visit_expr(n.b);
-                                        this.emit(IDKVM_STORE, (i64)hv.ttag, (i64)hv.bytes, (i64)0, (byte*)0);
+                                        this.emit(IDKVM_STORE, hv.ttag, hv.bytes, 0, (byte*)0);
                                         -> false;
                                     }
                                     default {};
@@ -2912,18 +2969,18 @@ namespace IDEKA
                         // a call that leaves no value (compiler.io.console.println) returns void
                         switch (this.visit_expr(n.a))
                         {
-                            case (false) { this.emit_push(IDKVM_T_VOID, (i64)0); }
+                            case (false) { this.emit_push(IDKVM_T_VOID, 0); }
                             default {};
                         };
                     }
-                    default { this.emit_push(IDKVM_T_VOID, (i64)0); };
+                    default { this.emit_push(IDKVM_T_VOID, 0); };
                 };
                 switch (this.in_method)
                 {
                     case (true)
                     {
                         // [value] becomes [this, value], the caller stores this back into the receiver
-                        this.emit1(IDKVM_LOCAL_GET, (i64)0);
+                        this.emit1(IDKVM_LOCAL_GET, 0);
                         this.emit0(IDKVM_SWAP);
                     }
                     default {};
@@ -2933,7 +2990,7 @@ namespace IDEKA
                 this.flush_all_defers();
                 switch (this.tail_self != (byte*)0)
                 {
-                    case (true) { this.emit1(IDKVM_TAIL_SELF, (i64)this.tail_argc); }
+                    case (true) { this.emit1(IDKVM_TAIL_SELF, this.tail_argc); }
                     default { this.emit0(IDKVM_RET); };
                 };
                 -> false;
@@ -2943,19 +3000,18 @@ namespace IDEKA
             visit_if(Node* n) -> bool
             {
                 PtrVec* ends = pv_new();
-                int j;
-                int i;
+                int j, i;
                 this.visit_expr(n.a);
-                j = this.emit1(IDKVM_JNF, (i64)0);
+                j = this.emit1(IDKVM_JNF, 0);
                 this.visit_body(n.b);
-                pv_push(ends, (void*)(u64)(this.emit1(IDKVM_JMP, (i64)0) + 1));
+                pv_push(ends, (void*)(u64)(this.emit1(IDKVM_JMP, 0) + 1));
                 this.patch_at(j, IDKVM_JNF, this.ip());
                 while (i < node_count(n, 0))
                 {
                     this.visit_expr(node_child(n, 0, i));
-                    j = this.emit1(IDKVM_JNF, (i64)0);
+                    j = this.emit1(IDKVM_JNF, 0);
                     this.visit_body(node_child(n, 1, i));
-                    pv_push(ends, (void*)(u64)(this.emit1(IDKVM_JMP, (i64)0) + 1));
+                    pv_push(ends, (void*)(u64)(this.emit1(IDKVM_JMP, 0) + 1));
                     this.patch_at(j, IDKVM_JNF, this.ip());
                     i++;
                 };
@@ -2978,11 +3034,9 @@ namespace IDEKA
             visit_while(Node* n) -> bool
             {
                 int start = this.ip();
-                int exit_patch;
-                int i;
-                int after;
+                int exit_patch, i, after;
                 this.visit_expr(n.a);
-                exit_patch = this.emit1(IDKVM_JNF, (i64)0);
+                exit_patch = this.emit1(IDKVM_JNF, 0);
                 this.loop_push();
                 switch (n.b != (Node*)0 & (n.b.kind == NodeKind.BLOCK))
                 {
@@ -3003,14 +3057,28 @@ namespace IDEKA
                 -> false;
             };
 
+            // The innermost break scope of a kind: a loop for `break`, a switch for `break switch`
+            // (a plain break inside a switch leaves the loop around it). -1 when there is none.
+            brk_scope(bool want_switch) -> int
+            {
+                int i = this.brks.len - 1;
+                while (i >= 0)
+                {
+                    if (((int)(u64)this.bsw.items[i] != 0) == want_switch) { -> i; };
+                    i--;
+                };
+                -> -1;
+            };
+
             // IDKVMCodegen._visit_break
             visit_break(Node* n) -> bool
             {
-                int idx = this.emit1(IDKVM_JMP, (i64)0);
-                switch (this.brks.len > 0)
+                int idx = this.emit1(IDKVM_JMP, 0);
+                int sc = this.brk_scope(false);
+                switch (sc >= 0)
                 {
-                    case (true) { pv_push((PtrVec*)this.brks.items[this.brks.len - 1], (void*)(u64)(idx + 1)); }
-                    default {};
+                    case (true) { pv_push((PtrVec*)this.brks.items[sc], (void*)(u64)(idx + 1)); }
+                    default { this.fail(n, g"idkvmcodegen: break outside loop\0"); };
                 };
                 -> false;
             };
@@ -3018,7 +3086,7 @@ namespace IDEKA
             // IDKVMCodegen._visit_continue
             visit_continue(Node* n) -> bool
             {
-                int idx = this.emit1(IDKVM_JMP, (i64)0);
+                int idx = this.emit1(IDKVM_JMP, 0);
                 switch (this.conts.len > 0)
                 {
                     case (true) { pv_push((PtrVec*)this.conts.items[this.conts.len - 1], (void*)(u64)(idx + 1)); }
@@ -3029,19 +3097,358 @@ namespace IDEKA
 
             // IDKVMCodegen._visit_function_call: compiler.* builtins, then CALL or TAIL_SELF.
             // Function pointer variables and using-namespace resolution are not ported.
+            // The outermost codegen of this compilation
+            outer() -> IDKVMCodegen*
+            {
+                IDKVMCodegen* o = this;
+                while (o.par != (IDKVMCodegen*)0) { o = o.par; };
+                -> o;
+            };
+
+            // The functions named bare in the namespace tree n (path prefix), with the namespace of each
+            pull_scan(Node* n, byte* prefix, byte* bare, PtrVec* cfn, PtrVec* cpf) -> void
+            {
+                byte* nsn = this.joined_name(prefix, n.text);
+                Node* fn;
+                int i, nnest;
+                while (i < node_count(n, 0))
+                {
+                    fn = node_child(n, 0, i);
+                    i++;
+                    if (fn == (Node*)0) { continue; };
+                    if (fn.text != (byte*)0 & fn.a != (Node*)0 & idkvm_streq(fn.text, bare))
+                    {
+                        pv_push(cfn, (void*)fn);
+                        pv_push(cpf, (void*)nsn);
+                    };
+                };
+                i = 0;
+                nnest = 0;
+                if (n.b != (Node*)0) { nnest = node_count(n.b, 0); };
+                while (i < nnest)
+                {
+                    this.pull_scan(node_child(n.b, 0, i), nsn, bare, cfn, cpf);
+                    i++;
+                };
+                ->;
+            };
+
+            // The variables declared in the namespace named want (path form a__b), over the namespace tree n
+            pull_vars(Node* n, byte* prefix, byte* want, PtrVec* out) -> void
+            {
+                byte* nsn = this.joined_name(prefix, n.text);
+                int i, nnest;
+                if (idkvm_streq(nsn, want) & n.a != (Node*)0)
+                {
+                    while (i < node_count(n.a, 0))
+                    {
+                        pv_push(out, (void*)node_child(n.a, 0, i));
+                        i++;
+                    };
+                };
+                i = 0;
+                nnest = 0;
+                if (n.b != (Node*)0) { nnest = node_count(n.b, 0); };
+                while (i < nnest)
+                {
+                    this.pull_vars(node_child(n.b, 0, i), nsn, want, out);
+                    i++;
+                };
+                ->;
+            };
+
+            // A call to a function the comptime code does not define: a function defined earlier in the
+            // program is compiled for the VM from its definition, once. A function of a namespace is looked
+            // for in the namespace being compiled, then in the namespaces in use, then in the only namespace
+            // that has it; every overload of the name there is compiled, with the variables of its namespace.
+            pull_fn(byte* name) -> bool
+            {
+                IDKVMCodegen* o = this.outer();
+                NodeVec* ps = this.pstmts;
+                Node* s;
+                Node* ns;
+                int i, lim, k, p, ln, nu, pick;
+                byte* bare;
+                byte* path;
+                byte* key;
+                FvmBuf b;
+                PtrVec* cfn;
+                PtrVec* cpf;
+                PtrVec* vars;
+                PtrVec* us;
+                bool found;
+                if (ps == (NodeVec*)0) { -> false; };
+                if (o.pulled == (NameMap*)0) { o.pulled = nm_new(); };
+                b.__init();
+                if (this.curns != (byte*)0) { b.put_str(this.curns); };
+                b.put_str(g"|\0");
+                b.put_str(name);
+                b.put(0);
+                key = this.keep(b.mem);
+                b.__exit();
+                if (nm_has(o.pulled, key)) { -> false; };
+                lim = ps.len;
+                if (this.pbound >= 0 & this.pbound < lim) { lim = this.pbound; };
+                // a function of the top level
+                i = 0;
+                while (i < lim)
+                {
+                    s = ps.items[i];
+                    if (s.kind == NodeKind.FUNCTION_DEF_STATEMENT) { s = s.a; };
+                    if (s.kind == NodeKind.FUNCTION_DEF & s.text != (byte*)0 & s.a != (Node*)0 & (s.flags `& NF_PROTOTYPE) == 0)
+                    {
+                        if (idkvm_streq(s.text, name))
+                        {
+                            nm_put(o.pulled, key, (void*)this);
+                            o.pull_depth++;
+                            this.visit_function_def(s);
+                            o.pull_depth--;
+                            -> true;
+                        };
+                    };
+                    i++;
+                };
+                // the functions of the namespaces that carry the name, or its last part when it is qualified
+                cfn = pv_new();
+                cpf = pv_new();
+                bare = name;
+                path = (byte*)0;
+                i = 0;
+                while (i < lim)
+                {
+                    ns = ps.items[i];
+                    if (ns.kind == NodeKind.NAMESPACE_DEF_STATEMENT) { ns = ns.a; };
+                    if (ns.kind == NodeKind.NAMESPACE_DEF) { this.pull_scan(ns, (byte*)0, bare, cfn, cpf); };
+                    i++;
+                };
+                if (cfn.len == 0)
+                {
+                    ln = idkvm_strlen(name);
+                    p = ln - 3;
+                    while (p > 0 & cfn.len == 0)
+                    {
+                        if (name[p] == '_' & name[p + 1] == '_' & name[p + 2] != '_' & name[p - 1] != '_')
+                        {
+                            b.__init();
+                            b.put_n(name, p);
+                            b.put(0);
+                            path = this.keep(b.mem);
+                            b.__exit();
+                            bare = name + p + 2;
+                            i = 0;
+                            while (i < lim)
+                            {
+                                ns = ps.items[i];
+                                if (ns.kind == NodeKind.NAMESPACE_DEF_STATEMENT) { ns = ns.a; };
+                                if (ns.kind == NodeKind.NAMESPACE_DEF) { this.pull_scan(ns, (byte*)0, bare, cfn, cpf); };
+                                i++;
+                            };
+                            // only the namespace named by the path counts
+                            k = 0;
+                            while (k < cfn.len)
+                            {
+                                if (!idkvm_streq((byte*)cpf.items[k], path))
+                                {
+                                    cfn.items[k] = (void*)0;
+                                };
+                                k++;
+                            };
+                            found = false;
+                            k = 0;
+                            while (k < cfn.len) { if (cfn.items[k] != (void*)0) { found = true; }; k++; };
+                            if (!found) { cfn.len = 0; cpf.len = 0; };
+                        };
+                        p--;
+                    };
+                };
+                if (cfn.len == 0)
+                {
+                    pv_free(cfn);
+                    pv_free(cpf);
+                    -> false;
+                };
+                // which namespace: qualified by the path, else the one being compiled, one in use, or the only one
+                pick = -1;
+                if (path != (byte*)0)
+                {
+                    pick = 0;
+                }
+                else
+                {
+                    us = pv_new();
+                    i = 0;
+                    while (i < lim)
+                    {
+                        s = ps.items[i];
+                        if (s.kind == NodeKind.USING_STATEMENT & s.text != (byte*)0) { pv_push(us, (void*)this.ns_name(s.text)); };
+                        i++;
+                    };
+                    i = 0;
+                    while (i < this.usings.len) { pv_push(us, this.usings.items[i]); i++; };
+                    k = 0;
+                    while (k < cfn.len & this.curns != (byte*)0)
+                    {
+                        if (idkvm_streq((byte*)cpf.items[k], this.curns)) { path = (byte*)cpf.items[k]; k = cfn.len; };
+                        k++;
+                    };
+                    if (path == (byte*)0)
+                    {
+                        k = 0;
+                        while (k < cfn.len & path == (byte*)0)
+                        {
+                            nu = 0;
+                            while (nu < us.len)
+                            {
+                                if (idkvm_streq((byte*)cpf.items[k], (byte*)us.items[nu])) { path = (byte*)cpf.items[k]; };
+                                nu++;
+                            };
+                            k++;
+                        };
+                    };
+                    // the only namespace that has the name is taken for code inside a namespace; a call
+                    // outside of every namespace (a comptime block) must be reachable through a using
+                    if (path == (byte*)0 & this.curns != (byte*)0)
+                    {
+                        k = 1;
+                        path = (byte*)cpf.items[0];
+                        while (k < cfn.len)
+                        {
+                            if (!idkvm_streq((byte*)cpf.items[k], path)) { path = (byte*)0; k = cfn.len; };
+                            k++;
+                        };
+                    };
+                    pv_free(us);
+                    if (path == (byte*)0)
+                    {
+                        pv_free(cfn);
+                        pv_free(cpf);
+                        -> false;
+                    };
+                };
+                nm_put(o.pulled, key, (void*)this);
+                vars = pv_new();
+                i = 0;
+                while (i < lim)
+                {
+                    ns = ps.items[i];
+                    if (ns.kind == NodeKind.NAMESPACE_DEF_STATEMENT) { ns = ns.a; };
+                    if (ns.kind == NodeKind.NAMESPACE_DEF) { this.pull_vars(ns, (byte*)0, path, vars); };
+                    i++;
+                };
+                k = 0;
+                while (k < cfn.len)
+                {
+                    if (cfn.items[k] != (void*)0 & idkvm_streq((byte*)cpf.items[k], path))
+                    {
+                        o.pull_depth++;
+                        this.ns_fn((Node*)cfn.items[k], (byte*)cpf.items[k], vars);
+                        o.pull_depth--;
+                    };
+                    k++;
+                };
+                pv_free(vars);
+                pv_free(cfn);
+                pv_free(cpf);
+                -> true;
+            };
+
+            // The namespaces a bare call of the comptime code may be found in, as a null terminated
+            // array of byte*, latest using first: the usings of the block, then those of the program.
+            // The VM tries "<namespace>__<name>" for each of them (CALL operand c).
+            using_list() -> i64
+            {
+                int n, i, k, lim;
+                Node* s;
+                byte** a;
+                NodeVec* ps = this.pstmts;
+                lim = 0;
+                if (ps != (NodeVec*)0)
+                {
+                    lim = ps.len;
+                    if (this.pbound >= 0 & this.pbound < lim) { lim = this.pbound; };
+                };
+                n = this.usings.len + 1;
+                i = 0;
+                while (i < lim)
+                {
+                    s = ps.items[i];
+                    if (s.kind == NodeKind.USING_STATEMENT & s.text != (byte*)0) { n++; };
+                    i++;
+                };
+                a = (byte**)idkvm_alloc(n * 8);
+                if (a == (byte**)0) { -> (i64)0; };
+                pv_push(this.owned, (void*)a);
+                k = 0;
+                i = this.usings.len - 1;
+                while (i >= 0)
+                {
+                    a[k] = (byte*)this.usings.items[i];
+                    k++;
+                    i--;
+                };
+                i = lim - 1;
+                while (i >= 0)
+                {
+                    s = ps.items[i];
+                    if (s.kind == NodeKind.USING_STATEMENT & s.text != (byte*)0)
+                    {
+                        a[k] = this.ns_name(s.text);
+                        k++;
+                    };
+                    i--;
+                };
+                a[k] = (byte*)0;
+                -> idkvm_p2i((byte*)a);
+            };
+
             // IDKVMCodegen._visit_function_call: compiler.* builtins, function pointer variables, then
             // CALL or TAIL_SELF
             visit_function_call(Node* n) -> bool
             {
-                int op = idkvmcg_compiler_io(n.text);
+                int op;
                 int argc = node_count(n, 0);
                 int i;
                 Node* arg;
                 byte* rname = n.text;
-                byte* tn;
-                byte* q;
+                IDKVMCodegen* o2;
+                byte* tn, q;
                 FvmBuf b;
                 i64* box;
+                // f-string name the parser could not fold: the name is evaluated when the call runs
+                switch (n.text == (byte*)0)
+                {
+                    case (true)
+                    {
+                        switch (n.a == (Node*)0)
+                        {
+                            case (true)
+                            {
+                                this.fail(n, g"idkvmcodegen: call without a function name\0");
+                                -> false;
+                            }
+                            default {};
+                        };
+                        switch (n.a.kind != NodeKind.F_STRING_LITERAL)
+                        {
+                            case (true)
+                            {
+                                this.fail(n, g"idkvmcodegen: comptime call name must be a string or an f-string\0");
+                                -> false;
+                            }
+                            default {};
+                        };
+                        while (i < argc)
+                        {
+                            this.visit_expr(node_child(n, 0, i));
+                            i++;
+                        };
+                        this.visit_expr(n.a);
+                        this.emit1(IDKVM_CALL_PTR, (i64)argc);
+                        -> true;
+                    }
+                    default {};
+                };
+                op = idkvmcg_compiler_io(n.text);
                 switch (op >= 0)
                 {
                     case (true)
@@ -3111,6 +3518,12 @@ namespace IDEKA
                         default { i--; };
                     };
                 };
+                // a function of the program that the comptime code does not define is compiled from its definition
+                if (!this.fn_known(rname)) { this.pull_fn(rname); };
+                // arguments whose types are known here select the overload that takes exactly those types, as
+                // the compiler does; anything else is left to the VM to score at run time
+                q = this.static_overload(n, rname);
+                if (q != (byte*)0) { rname = q; };
                 i = 0;
                 while (i < argc)
                 {
@@ -3131,7 +3544,19 @@ namespace IDEKA
                         }
                         default {};
                     };
-                    this.visit_expr(arg);
+                    // a local array passed on decays to a pointer to its slot
+                    switch (arg.kind == NodeKind.IDENTIFIER)
+                    {
+                        case (true)
+                        {
+                            switch (this.is_slot_array(arg.text))
+                            {
+                                case (true) { this.emit_stkptr((int)*(i64*)nm_get(this.locals, arg.text)); }
+                                default { this.visit_expr(arg); };
+                            };
+                        }
+                        default { this.visit_expr(arg); };
+                    };
                     i++;
                 };
                 switch (this.tail_self != (byte*)0)
@@ -3150,7 +3575,15 @@ namespace IDEKA
                     }
                     default {};
                 };
-                this.emit(IDKVM_CALL, (i64)argc, (i64)0, (i64)0, this.keep(rname));
+                // a bare name nothing is known for yet (an import that runs later, a function defined
+                // further down) is looked up by the VM through the active usings, never by a name suffix
+                o2 = this.outer();
+                if (o2.strict & o2.pull_depth == 0 & !this.fn_exact(rname))
+                {
+                    this.emit(IDKVM_CALL, (i64)argc, (i64)1, this.using_list(), this.keep(rname));
+                    -> true;
+                };
+                this.emit(IDKVM_CALL, (i64)argc, 0, 0, this.keep(rname));
                 -> true;
             };
 
@@ -3162,9 +3595,7 @@ namespace IDEKA
                 int tag = (int)this.code.a[idx];
                 i64 d = this.code.b[idx];
                 byte* p;
-                int k;
-                int len;
-                int ch;
+                int k, len, ch;
                 switch (tag == IDKVM_T_BYTES)
                 {
                     case (true)
@@ -3238,7 +3669,7 @@ namespace IDEKA
                 {
                     ch = nm[k];
                     switch (ch >= 'a' & ch <= 'z') { case (true) { ch = (byte)(ch - 32); } default {}; };
-                    o.put((int)ch);
+                    o.put(ch);
                     k++;
                 };
                 ->;
@@ -3344,8 +3775,7 @@ namespace IDEKA
             dump_idkvm(FvmBuf* o) -> void
             {
                 int i = this.ubase;
-                int f;
-                int k;
+                int f, k;
                 IDKVMCodegen* c;
                 o.put_str(g"# Generated by compiler.idkvm.dump\n\n\0");
                 while (f < this.fnames.len)
@@ -3387,8 +3817,7 @@ namespace IDEKA
             // true when name is mang, or starts with mang followed by two underscores
             dep_matches(byte* name, byte* mang, int ml) -> bool
             {
-                int i;
-                int nl;
+                int i, nl;
                 switch (name == (byte*)0)
                 {
                     case (true) { -> false; }
@@ -3422,8 +3851,7 @@ namespace IDEKA
             // Children are visited in field order a, b, c, d, e, then the lists.
             dep_walk(Node* n, byte* mang, int ml, FvmBuf* out, int* cnt) -> void
             {
-                int i;
-                int sl;
+                int i, sl;
                 switch (n == (Node*)0)
                 {
                     case (true) { ->; }
@@ -3495,12 +3923,8 @@ namespace IDEKA
             // in the program is an error listing each one
             visit_deprecate(Node* n) -> bool
             {
-                FvmBuf mb;
-                FvmBuf out;
-                FvmBuf msg;
-                int cnt;
-                int i;
-                int ml;
+                FvmBuf mb, out, msg;
+                int cnt, i, ml;
                 byte* path = n.text;
                 byte* mang;
                 mb.__init();
@@ -3621,8 +4045,7 @@ namespace IDEKA
             objdef_in(NodeVec* v, byte* name, Node* cur) -> Node*
             {
                 int i;
-                Node* st;
-                Node* od;
+                Node* st, od;
                 Node* found = cur;
                 switch (v == (NodeVec*)0) { case (true) { -> cur; } default {}; };
                 while (i < v.len)
@@ -3679,24 +4102,12 @@ namespace IDEKA
             // False after an error.
             object_interfaces(Node* n) -> bool
             {
-                int ii;
-                int k;
-                int pi;
-                int mi;
-                Node* ia;
-                Node* idef;
-                Node* prm;
-                Node* proto;
-                Node* pr;
-                Node* td;
-                Node* target;
-                NameMap* roles;
-                NameMap* st;
-                byte* concrete;
-                byte* arg;
+                int ii, k, pi, mi;
+                Node* ia, idef, prm, proto, pr, td, target;
+                NameMap* roles, st;
+                byte* concrete, arg;
                 FvmBuf ib;
-                byte* c1;
-                byte* c2;
+                byte* c1, c2;
                 PtrVec* tl;
                 int kind;
                 bool ok = true;
@@ -3847,12 +4258,7 @@ namespace IDEKA
             // in a return gives 'this' back so the caller can store the mutated object.
             visit_object_def(Node* n) -> bool
             {
-                int i;
-                int fsz;
-                int off;
-                int np;
-                int j;
-                int total;
+                int i, fsz, off, np, j, total;
                 byte* nm = this.keep(n.text);
                 byte* key;
                 Node* m;
@@ -3939,8 +4345,8 @@ namespace IDEKA
                     {
                         case (true)
                         {
-                            f.emit1(IDKVM_LOCAL_GET, (i64)0);
-                            f.emit_push(IDKVM_T_VOID, (i64)0);
+                            f.emit1(IDKVM_LOCAL_GET, 0);
+                            f.emit_push(IDKVM_T_VOID, 0);
                             f.emit0(IDKVM_RET);
                         }
                         default {};
@@ -3967,7 +4373,7 @@ namespace IDEKA
                 byte* t;
                 FvmBuf b;
                 this.visit_expr(n.a);
-                skip = this.emit1(IDKVM_JIF, (i64)0);
+                skip = this.emit1(IDKVM_JIF, 0);
                 switch (n.b != (Node*)0)
                 {
                     case (true)
@@ -3984,7 +4390,7 @@ namespace IDEKA
                         b.put_str(g"Assertion failed at [\0");
                         b.put_i64((i64)n.line);
                         b.put_str(g":\0");
-                        b.put_i64((i64)n.col);
+                        b.put_i64(n.col);
                         b.put_str(g"]\n\0");
                         b.put(0);
                         t = this.keep(b.mem);
@@ -4009,16 +4415,14 @@ namespace IDEKA
             // thrown value (or pops it) and ends in a JMP to the common exit
             visit_try(Node* n) -> bool
             {
-                int begin = this.emit1(IDKVM_TRY_BEGIN, (i64)0);
-                int past;
-                int i;
-                int slot;
+                int begin = this.emit1(IDKVM_TRY_BEGIN, 0);
+                int past, i, slot;
                 int nc = node_count(n, 0);
                 PtrVec* after = pv_new();
                 Node* c;
                 this.visit_body(n.a);
                 this.emit0(IDKVM_TRY_END);
-                past = this.emit1(IDKVM_JMP, (i64)0);
+                past = this.emit1(IDKVM_JMP, 0);
                 this.patch_at(begin, IDKVM_TRY_BEGIN, this.ip());
                 while (i < nc)
                 {
@@ -4045,7 +4449,7 @@ namespace IDEKA
                         default { this.emit0(IDKVM_POP); };
                     };
                     this.visit_body(c.a);
-                    pv_push(after, (void*)(u64)(this.emit1(IDKVM_JMP, (i64)0) + 1));
+                    pv_push(after, (void*)(u64)(this.emit1(IDKVM_JMP, 0) + 1));
                     i++;
                 };
                 this.patch_at(past, IDKVM_JMP, this.ip());
@@ -4129,13 +4533,7 @@ namespace IDEKA
             // IDKVMCodegen._visit_range_assignment: a counted loop of ARRAY_STORE over a plain identifier
             visit_range_assignment(Node* n) -> bool
             {
-                int arr;
-                int ctr;
-                int st;
-                int en;
-                int fl;
-                int cond;
-                int jend;
+                int arr, ctr, st, en, fl, cond, jend;
                 switch (n.ival != (i64)0)
                 {
                     case (true)
@@ -4171,14 +4569,14 @@ namespace IDEKA
                 this.emit1(IDKVM_LOCAL_GET, (i64)ctr);
                 this.emit1(IDKVM_LOCAL_GET, (i64)en);
                 this.emit0(IDKVM_CMP_LE);
-                jend = this.emit1(IDKVM_JNF, (i64)0);
+                jend = this.emit1(IDKVM_JNF, 0);
                 this.emit1(IDKVM_LOCAL_GET, (i64)arr);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ctr);
                 this.emit1(IDKVM_LOCAL_GET, (i64)fl);
                 this.emit0(IDKVM_ARRAY_STORE);
                 this.emit1(IDKVM_LOCAL_SET, (i64)arr);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ctr);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_ADD);
                 this.emit1(IDKVM_LOCAL_SET, (i64)ctr);
                 this.emit1(IDKVM_JMP, (i64)cond);
@@ -4306,7 +4704,7 @@ namespace IDEKA
             {
                 byte* kept = idkvm_dup(g"\0", 0);
                 pv_push(this.owned, (void*)kept);
-                this.emit(IDKVM_PUSH, (i64)IDKVM_T_BYTES, idkvm_p2i(kept), (i64)0, (byte*)0);
+                this.emit(IDKVM_PUSH, (i64)IDKVM_T_BYTES, idkvm_p2i(kept), 0, (byte*)0);
                 ->;
             };
 
@@ -4318,8 +4716,7 @@ namespace IDEKA
             {
                 int c = node_count(n, 0);
                 int i = 1;
-                bool lead;
-                bool trail;
+                bool lead, trail;
                 switch (c == 0)
                 {
                     case (true)
@@ -4365,9 +4762,7 @@ namespace IDEKA
             visit_array_literal(Node* n) -> bool
             {
                 byte* et = this.keep(g"int\0");
-                int i;
-                int slot;
-                int dt;
+                int i, slot, dt;
                 switch ((n.flags `& NF_IS_STRING) != 0 & n.text != (byte*)0)
                 {
                     case (true) { -> this.visit_string_literal(n); }
@@ -4394,7 +4789,7 @@ namespace IDEKA
                     }
                     default {};
                 };
-                this.emit(IDKVM_ARRAY_NEW, (i64)node_count(n, 0), (i64)0, (i64)0, et);
+                this.emit(IDKVM_ARRAY_NEW, (i64)node_count(n, 0), 0, 0, et);
                 slot = this.alloc_local(g"__arr_tmp__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
                 while (i < node_count(n, 0))
@@ -4475,9 +4870,7 @@ namespace IDEKA
             visit_unary_op(Node* n) -> bool
             {
                 int op = n.op;
-                int arith;
-                int slot;
-                int vm;
+                int arith, slot, vm;
                 bool post = (n.flags `& NF_POSTFIX) != 0;
                 bool bg;
                 byte* name;
@@ -4509,7 +4902,7 @@ namespace IDEKA
                                         };
                                         this.unary_recv_get(name);
                                         this.emits(IDKVM_STRUCT_LOAD, o.text);
-                                        this.emit_push(IDKVM_T_INT, (i64)1);
+                                        this.emit_push(IDKVM_T_INT, 1);
                                         this.emit0(arith);
                                         switch (!post) { case (true) { this.emit0(IDKVM_DUP); } default {}; };
                                         this.unary_recv_get(name);
@@ -4538,7 +4931,7 @@ namespace IDEKA
                             case (true)
                             {
                                 this.emits(IDKVM_GLOBAL_GET, name);
-                                this.emit_push(IDKVM_T_INT, (i64)1);
+                                this.emit_push(IDKVM_T_INT, 1);
                                 this.emit0(arith);
                                 this.emit0(IDKVM_DUP);
                                 this.emits(IDKVM_GLOBAL_SET, name);
@@ -4554,7 +4947,7 @@ namespace IDEKA
                             {
                                 this.emit1(IDKVM_LOCAL_GET, (i64)slot);
                                 this.emit1(IDKVM_LOCAL_GET, (i64)slot);
-                                this.emit_push(IDKVM_T_INT, (i64)1);
+                                this.emit_push(IDKVM_T_INT, 1);
                                 this.emit0(arith);
                                 switch (bg) { case (true) { this.emit0(IDKVM_DUP); } default {}; };
                                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
@@ -4563,7 +4956,7 @@ namespace IDEKA
                             default
                             {
                                 this.emit1(IDKVM_LOCAL_GET, (i64)slot);
-                                this.emit_push(IDKVM_T_INT, (i64)1);
+                                this.emit_push(IDKVM_T_INT, 1);
                                 this.emit0(arith);
                                 this.emit0(IDKVM_DUP);
                                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
@@ -4618,7 +5011,7 @@ namespace IDEKA
                 b.put_str(g"__\0");
                 b.put_str(n.text2);
                 b.put(0);
-                this.emit(IDKVM_CALL, (i64)(1 + argc), (i64)0, (i64)0, this.keep(b.mem));
+                this.emit(IDKVM_CALL, (i64)(1 + argc), 0, 0, this.keep(b.mem));
                 b.__exit();
                 -> true;
             };
@@ -4759,7 +5152,7 @@ namespace IDEKA
                     };
                 };
                 switch (align < 0) { case (true) { align = 1; } default {}; };
-                this.emit_push(IDKVM_T_UINT, (i64)align);
+                this.emit_push(IDKVM_T_UINT, align);
                 -> true;
             };
 
@@ -4888,8 +5281,7 @@ namespace IDEKA
             {
                 int kind = 0;
                 TypeSpec* ts;
-                byte* tn;
-                byte* name;
+                byte* tn, name;
                 switch (n.ts != (TypeSpec*)0)
                 {
                     case (true) { kind = this.ts_kind(n.ts); }
@@ -4960,10 +5352,10 @@ namespace IDEKA
                 arrs = this.alloc_local(g"__in_arr__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)arrs);
                 rs = this.alloc_local(g"__in_result__\0");
-                this.emit_push(IDKVM_T_BOOL, (i64)0);
+                this.emit_push(IDKVM_T_BOOL, 0);
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
                 ix = this.alloc_local(g"__in_idx__\0");
-                this.emit_push(IDKVM_T_INT, (i64)0);
+                this.emit_push(IDKVM_T_INT, 0);
                 this.emit1(IDKVM_LOCAL_SET, (i64)ix);
                 ls = this.alloc_local(g"__in_len__\0");
                 this.emit1(IDKVM_LOCAL_GET, (i64)arrs);
@@ -4973,7 +5365,7 @@ namespace IDEKA
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ls);
                 this.emit0(IDKVM_CMP_GE);
-                exit_patch = this.emit1(IDKVM_JIF, (i64)0);
+                exit_patch = this.emit1(IDKVM_JIF, 0);
                 this.emit1(IDKVM_LOCAL_GET, (i64)arrs);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
                 this.emit0(IDKVM_ARRAY_LOAD);
@@ -4983,7 +5375,7 @@ namespace IDEKA
                 this.emit0(IDKVM_BOR);
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_ADD);
                 this.emit1(IDKVM_LOCAL_SET, (i64)ix);
                 this.emit1(IDKVM_JMP, (i64)loop_start);
@@ -5062,8 +5454,8 @@ namespace IDEKA
                 };
                 switch (hit)
                 {
-                    case (true) { this.emit_push(IDKVM_T_BOOL, (i64)1); }
-                    default { this.emit_push(IDKVM_T_BOOL, (i64)0); };
+                    case (true) { this.emit_push(IDKVM_T_BOOL, 1); }
+                    default { this.emit_push(IDKVM_T_BOOL, 0); };
                 };
                 -> true;
             };
@@ -5095,7 +5487,7 @@ namespace IDEKA
                                     case (true)
                                     {
                                         this.emit1(IDKVM_LOCAL_GET, *box);
-                                        this.emit(IDKVM_CAST, (i64)IDKVM_T_ULONG, (i64)0, (i64)0, (byte*)0);
+                                        this.emit(IDKVM_CAST, (i64)IDKVM_T_ULONG, 0, 0, (byte*)0);
                                         -> true;
                                     }
                                     default {};
@@ -5139,14 +5531,30 @@ namespace IDEKA
                 -> b == DataType.SINT | b == DataType.UINT | b == DataType.SLONG | b == DataType.ULONG | b == DataType.FLOAT | b == DataType.DOUBLE | b == DataType.BOOL | b == DataType.BYTE | b == DataType.CHAR;
             };
 
+            // A pointer to a slot of the running frame. The VM makes it absolute when it runs, so the callee
+            // reads and writes the variable of its caller through it.
+            emit_stkptr(int slot) -> void
+            {
+                this.emit(IDKVM_PUSH, (i64)IDKVM_T_PTR, (i64)slot, (i64)1125899906842624, (byte*)0);
+                ->;
+            };
+
+            // true for a local array with a fixed size that lives in a slot of this frame
+            is_slot_array(byte* name) -> bool
+            {
+                TypeSpec* ts = (TypeSpec*)nm_get(this.ltypes, name);
+                switch (ts == (TypeSpec*)0) { case (true) { -> false; } default {}; };
+                switch (nm_has(this.hvars, name) | nm_has(this.oglobals, name) | nm_get(this.locals, name) == (void*)0) { case (true) { -> false; } default {}; };
+                -> (ts.flags `& TS_ARRAY) != 0 & ts.array_size != (Node*)0 & !this.ts_is_ptr(ts);
+            };
+
             // IDKVMCodegen._visit_address_of: @x pushes a pointer to the variable's slot
             visit_address_of(Node* n) -> bool
             {
                 Node* e = n.a;
                 int k = e.kind;
                 int tslot;
-                byte* nm_t;
-                byte* name;
+                byte* nm_t, name;
                 i64* box;
                 TypeSpec* ts;
                 bool ptr_type;
@@ -5157,15 +5565,46 @@ namespace IDEKA
                     case (true) { this.visit_expr(e.a); -> true; }
                     default {};
                 };
-                switch (k == NodeKind.LITERAL | k == NodeKind.FUNCTION_CALL | k == NodeKind.STRING_LITERAL | k == NodeKind.F_STRING_LITERAL | k == NodeKind.ARRAY_LITERAL | k == NodeKind.MEMBER_ACCESS | k == NodeKind.ARRAY_ACCESS)
+                // @a[i]: the address of the element, the base pointer plus the index
+                switch (k == NodeKind.ARRAY_ACCESS)
+                {
+                    case (true)
+                    {
+                        switch (e.a.kind == NodeKind.IDENTIFIER)
+                        {
+                            case (true)
+                            {
+                                switch (this.is_slot_array(e.a.text))
+                                {
+                                    case (true)
+                                    {
+                                        box = (i64*)nm_get(this.locals, e.a.text);
+                                        this.emit_stkptr((int)*box);
+                                        this.visit_expr(e.b);
+                                        this.emit0(IDKVM_ADD);
+                                        -> true;
+                                    }
+                                    default {};
+                                };
+                            }
+                            default {};
+                        };
+                        this.visit_expr(e.a);
+                        this.visit_expr(e.b);
+                        this.emit0(IDKVM_OFFSET);
+                        -> true;
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.LITERAL | k == NodeKind.FUNCTION_CALL | k == NodeKind.STRING_LITERAL | k == NodeKind.F_STRING_LITERAL | k == NodeKind.ARRAY_LITERAL | k == NodeKind.MEMBER_ACCESS)
                 {
                     case (true)
                     {
                         nm_t = this.fresh_tmp();
                         tslot = this.alloc_local(nm_t);
                         this.visit_expr(e);
-                        this.emit1(IDKVM_LOCAL_SET, (i64)tslot);
-                        this.emit_push(IDKVM_T_PTR, (i64)tslot);
+                        this.emit1(IDKVM_LOCAL_SET, tslot);
+                        this.emit_stkptr(tslot);
                         -> true;
                     }
                     default {};
@@ -5193,7 +5632,15 @@ namespace IDEKA
                         };
                         ts = (TypeSpec*)nm_get(this.ltypes, name);
                         tn = (byte*)nm_get(this.ltn, name);
-                        switch (ts != (TypeSpec*)0) { case (true) { ptr_type = this.ts_is_ptr(ts); } default {}; };
+                        switch (ts != (TypeSpec*)0)
+                        {
+                            case (true)
+                            {
+                                ptr_type = this.ts_is_ptr(ts) | ((ts.flags `& TS_ARRAY) != 0 & ts.array_size == (Node*)0);
+                                switch (ts.custom_typename != (byte*)0) { case (true) { ptr_type = ptr_type | this.alias_is_ptr(ts.custom_typename); } default {}; };
+                            }
+                            default {};
+                        };
                         switch (tn != (byte*)0)
                         {
                             case (true) { ptr_type = ptr_type | this.alias_is_ptr(tn); }
@@ -5202,7 +5649,7 @@ namespace IDEKA
                         switch (ptr_type)
                         {
                             case (true) { this.emit1(IDKVM_LOCAL_GET, *box); }
-                            default { this.emit_push(IDKVM_T_PTR, *box); };
+                            default { this.emit_stkptr((int)*box); };
                         };
                         -> true;
                     }
@@ -5216,8 +5663,8 @@ namespace IDEKA
                 tslot = this.alloc_local(b.mem);
                 b.__exit();
                 this.emit(IDKVM_PUSH, (i64)IDKVM_T_BYTES, idkvm_p2i(this.keep(name)), (i64)idkvm_strlen(name), (byte*)0);
-                this.emit1(IDKVM_LOCAL_SET, (i64)tslot);
-                this.emit_push(IDKVM_T_PTR, (i64)tslot);
+                this.emit1(IDKVM_LOCAL_SET, tslot);
+                this.emit_stkptr(tslot);
                 -> true;
             };
 
@@ -5226,9 +5673,9 @@ namespace IDEKA
             {
                 int jnf, jmp;
                 this.visit_expr(n.a);
-                jnf = this.emit1(IDKVM_JNF, (i64)0);
+                jnf = this.emit1(IDKVM_JNF, 0);
                 this.visit_expr(n.b);
-                jmp = this.emit1(IDKVM_JMP, (i64)0);
+                jmp = this.emit1(IDKVM_JMP, 0);
                 this.patch_at(jnf, IDKVM_JNF, this.ip());
                 this.visit_expr(n.c);
                 this.patch_at(jmp, IDKVM_JMP, this.ip());
@@ -5240,22 +5687,211 @@ namespace IDEKA
             {
                 int jnf, jmp;
                 this.visit_expr(n.b);
-                jnf = this.emit1(IDKVM_JNF, (i64)0);
+                jnf = this.emit1(IDKVM_JNF, 0);
                 this.visit_expr(n.a);
-                jmp = this.emit1(IDKVM_JMP, (i64)0);
+                jmp = this.emit1(IDKVM_JMP, 0);
                 this.patch_at(jnf, IDKVM_JNF, this.ip());
                 switch (n.c != (Node*)0)
                 {
                     case (true) { this.visit_expr(n.c); }
-                    default { this.emit_push(IDKVM_T_INT, (i64)0); };
+                    default { this.emit_push(IDKVM_T_INT, 0); };
                 };
                 this.patch_at(jmp, IDKVM_JMP, this.ip());
                 -> true;
             };
 
+            // Reads the "constraint"(var) pairs of the constraint text s[a, b): the constraints and the names are
+            // kept by the codegen, as pointers in cs and vs. Returns the pair count.
+            vasm_pairs(byte* s, int a, int b, i64* cs, i64* vs) -> int
+            {
+                int p = a;
+                int n = 0;
+                int qs, ql, v0, ve;
+                FvmBuf fb;
+                fb.__init();
+                while (p < b & n < 16)
+                {
+                    while (p < b & s[p] != '"') { p++; };
+                    if (p >= b) { break; };
+                    qs = p + 1;
+                    ql = qs;
+                    while (ql < b & s[ql] != '"') { ql++; };
+                    if (ql >= b) { break; };
+                    p = ql + 1;
+                    while (p < b & (s[p] == ' ' | s[p] == 9 | s[p] == 10 | s[p] == 13)) { p++; };
+                    if (p >= b | s[p] != '(') { continue; };
+                    v0 = p + 1;
+                    ve = v0;
+                    while (ve < b & s[ve] != ')') { ve++; };
+                    if (ve >= b | ve == v0) { break; };
+                    fb.clear();
+                    fb.put_n(s + qs, ql - qs);
+                    cs[n] = idkvm_p2i(this.keep(fb.mem));
+                    fb.clear();
+                    fb.put_n(s + v0, ve - v0);
+                    vs[n] = idkvm_p2i(this.keep(fb.mem));
+                    n++;
+                    p = ve + 1;
+                };
+                fb.__exit();
+                -> n;
+            };
+
+            // Bytes of the declared type of the variable name; 0 when the codegen has no type for it
+            vasm_size(byte* name) -> int
+            {
+                TypeSpec* ts = (TypeSpec*)nm_get(this.ltypes, name);
+                int bits;
+                if (ts == (TypeSpec*)0) { -> 0; };
+                bits = this.type_bit_width(ts);
+                if (bits <= 0) { -> 0; };
+                -> (bits + 7) / 8;
+            };
+
+            // True when name is a variable the comptime code can read
+            vasm_known(byte* name) -> bool
+            {
+                if (nm_has(this.oglobals, name)) { -> true; };
+                if (nm_get(this.locals, name) != (void*)0) { -> true; };
+                -> nm_has(this.bglobals, name);
+            };
+
+            // IDKVMCodegen._visit_inline_asm: the input values are pushed, INLINE_ASM runs the body and pushes the
+            // outputs, and each output is stored back into its variable. The constraints go on as the operand
+            // list the VM binds, "<bytes>:<constraint>" per operand and "~{reg}" per clobber, the outputs first.
             visit_inline_asm(Node* n) -> bool
             {
-                this.stub(n, g"IDKVMCodegen._visit_inline_asm (never ported: needs an assembler backend)\0");
+                byte* cons = n.text2;
+                byte* body = n.text;
+                i64[16] ocs;
+                i64[16] ovs;
+                i64[16] ics;
+                i64[16] ivs;
+                int len, p0, p1, oe, ie, no, ni, i, k, q, qs, tt, sz;
+                byte* c;
+                byte* nm;
+                byte* lt;
+                TypeSpec* ts;
+                FvmBuf d;
+                FvmBuf cb;
+                if (body == (byte*)0) { body = g"\0"; };
+                len = 0;
+                p0 = -1;
+                p1 = -1;
+                if (cons != (byte*)0)
+                {
+                    while (cons[len] != 0)
+                    {
+                        if (cons[len] == ':')
+                        {
+                            if (p0 < 0) { p0 = len; }
+                            else { if (p1 < 0) { p1 = len; }; };
+                        };
+                        len++;
+                    };
+                };
+                oe = len;
+                ie = len;
+                if (p0 >= 0) { oe = p0; };
+                if (p1 >= 0) { ie = p1; };
+                no = 0;
+                ni = 0;
+                if (cons != (byte*)0)
+                {
+                    no = this.vasm_pairs(cons, 0, oe, @ocs[0], @ovs[0]);
+                    if (p0 >= 0) { ni = this.vasm_pairs(cons, p0 + 1, ie, @ics[0], @ivs[0]); };
+                };
+                d.__init();
+                cb.__init();
+                // outputs: a constraint without = is one, a lone register letter names its register
+                i = 0;
+                while (i < no)
+                {
+                    c = (byte*)idkvm_i2p(ocs[i]);
+                    cb.clear();
+                    q = 0;
+                    if (c[0] == '=' | c[0] == '+') { cb.put((int)c[0]); q = 1; }
+                    else { cb.put(61); };
+                    lt = (byte*)0;
+                    if (c[q + 1] == 0)
+                    {
+                        if (c[q] == 'a') { lt = g"rax\0"; };
+                        if (c[q] == 'b') { lt = g"rbx\0"; };
+                        if (c[q] == 'c') { lt = g"rcx\0"; };
+                        if (c[q] == 'd') { lt = g"rdx\0"; };
+                        if (c[q] == 'S') { lt = g"rsi\0"; };
+                        if (c[q] == 'D') { lt = g"rdi\0"; };
+                    };
+                    if (lt != (byte*)0)
+                    {
+                        cb.put(123);
+                        cb.put_str(lt);
+                        cb.put(125);
+                    }
+                    else { cb.put_str(c + q); };
+                    if (i > 0) { d.put(44); };
+                    d.put_int(this.vasm_size((byte*)idkvm_i2p(ovs[i])));
+                    d.put(58);
+                    d.put_str(cb.mem);
+                    i++;
+                };
+                i = 0;
+                while (i < ni)
+                {
+                    if (i > 0 | no > 0) { d.put(44); };
+                    d.put_int(this.vasm_size((byte*)idkvm_i2p(ivs[i])));
+                    d.put(58);
+                    d.put_str((byte*)idkvm_i2p(ics[i]));
+                    i++;
+                };
+                // clobbers: the quoted names of the last section
+                if (p1 >= 0)
+                {
+                    q = p1 + 1;
+                    while (q < len)
+                    {
+                        while (q < len & cons[q] != '"') { q++; };
+                        if (q >= len) { break; };
+                        qs = q + 1;
+                        q = qs;
+                        while (q < len & cons[q] != '"') { q++; };
+                        if (q >= len) { break; };
+                        if (q > qs)
+                        {
+                            if (d.len > 0) { d.put(44); };
+                            d.put_str(g"~{\0");
+                            d.put_n(cons + qs, q - qs);
+                            d.put(125);
+                        };
+                        q++;
+                    };
+                };
+                // input values
+                i = 0;
+                while (i < ni)
+                {
+                    nm = (byte*)idkvm_i2p(ivs[i]);
+                    if (this.vasm_known(nm)) { this.unary_recv_get(nm); }
+                    else { this.emit_push(IDKVM_T_LONG, 0); };
+                    i++;
+                };
+                this.emit(IDKVM_INLINE_ASM, (i64)ni, (i64)no, idkvm_p2i(this.keep(d.mem)), this.keep(body));
+                // outputs, the last one is on top
+                i = no - 1;
+                while (i >= 0)
+                {
+                    nm = (byte*)idkvm_i2p(ovs[i]);
+                    ts = (TypeSpec*)nm_get(this.ltypes, nm);
+                    if (ts != (TypeSpec*)0)
+                    {
+                        tt = this.type_ttag_from_ts(ts);
+                        if (tt < IDKVM_T_STRUCT) { this.emit(IDKVM_CAST, (i64)tt, 0, 0, (byte*)0); };
+                    };
+                    this.write_back(nm);
+                    i--;
+                };
+                d.__exit();
+                cb.__exit();
                 -> false;
             };
 
@@ -5264,8 +5900,7 @@ namespace IDEKA
             visit_cast(Node* n) -> bool
             {
                 TypeSpec* ts = n.ts;
-                int tt;
-                int bits;
+                int tt, bits;
                 this.visit_expr(n.a);
                 switch (this.ts_is_ptr(ts))
                 {
@@ -5319,7 +5954,7 @@ namespace IDEKA
                         {
                             case (true)
                             {
-                                this.emit(IDKVM_CAST, (i64)tt, (i64)0, (i64)0, this.keep(ts.custom_typename));
+                                this.emit(IDKVM_CAST, (i64)tt, 0, 0, this.keep(ts.custom_typename));
                                 -> true;
                             }
                             default {};
@@ -5329,8 +5964,8 @@ namespace IDEKA
                 };
                 switch (n.ival != (i64)0 & tt != IDKVM_T_PTR)
                 {
-                    case (true) { this.emit(IDKVM_BITCAST, (i64)tt, (i64)0, (i64)0, (byte*)0); }
-                    default { this.emit(IDKVM_CAST, (i64)tt, (i64)0, (i64)0, (byte*)0); };
+                    case (true) { this.emit(IDKVM_BITCAST, (i64)tt, 0, 0, (byte*)0); }
+                    default { this.emit(IDKVM_CAST, (i64)tt, 0, 0, (byte*)0); };
                 };
                 -> true;
             };
@@ -5341,8 +5976,7 @@ namespace IDEKA
             visit_method_call(Node* n) -> bool
             {
                 byte* full = this.flatten_dotted_name(n);
-                int op;
-                int i;
+                int op, i;
                 int argc = node_count(n, 0);
                 if (full != (byte*)0)
                 {
@@ -5392,16 +6026,69 @@ namespace IDEKA
                 -> this.visit_receiver_call(n, full, argc);
             };
 
+            // The name of the overload whose parameter types are exactly the types of the arguments of the call n,
+            // when every argument has a known type (a cast, or a variable with a declared type). Null otherwise.
+            static_overload(Node* n, byte* rname) -> byte*
+            {
+                int argc = node_count(n, 0);
+                int i, u;
+                Node* arg;
+                TypeSpec* ts;
+                FvmBuf sg, nb;
+                byte* cand;
+                byte* r = (byte*)0;
+                if (argc == 0) { -> (byte*)0; };
+                sg.__init();
+                sg.put_str(g"__$\0");
+                while (i < argc)
+                {
+                    arg = node_child(n, 0, i);
+                    ts = (TypeSpec*)0;
+                    if (arg.kind == NodeKind.CAST_EXPRESSION) { ts = arg.ts; };
+                    if (arg.kind == NodeKind.IDENTIFIER) { ts = (TypeSpec*)nm_get(this.ltypes, arg.text); };
+                    if (ts == (TypeSpec*)0) { sg.__exit(); -> (byte*)0; };
+                    if ((ts.flags `& TS_ARRAY) != 0 & ts.array_size != (Node*)0) { sg.__exit(); -> (byte*)0; };
+                    if (i > 0) { sg.put(95); };
+                    this.sig_tag(ts, @sg);
+                    i++;
+                };
+                sg.put(0);
+                u = this.usings.len - 1;
+                while (u >= 0 & r == (byte*)0)
+                {
+                    nb.__init();
+                    nb.put_str((byte*)this.usings.items[u]);
+                    nb.put_str(g"__\0");
+                    nb.put_str(n.text);
+                    nb.put_str(sg.mem);
+                    nb.put(0);
+                    cand = this.keep(nb.mem);
+                    nb.__exit();
+                    if (this.fn_known(cand)) { r = cand; };
+                    u--;
+                };
+                if (r == (byte*)0)
+                {
+                    nb.__init();
+                    nb.put_str(rname);
+                    nb.put_str(sg.mem);
+                    nb.put(0);
+                    cand = this.keep(nb.mem);
+                    nb.__exit();
+                    if (this.fn_known(cand)) { r = cand; };
+                };
+                sg.__exit();
+                -> r;
+            };
+
             // The interface enforcement of _visit_method_call for a call on a local of object type
             // tn. RETURN_TO comes first, a method that a RETURN_TO block permits is not blocked by
             // a CALL_ON block that does not list it. PASS_INTO then checks the arguments that are
             // method calls on locals. False after an error.
             check_interfaces(Node* n, byte* tn) -> bool
             {
-                NameMap* st;
-                NameMap* ps;
-                bool rgov;
-                bool rok;
+                NameMap* st, ps;
+                bool rgov, rok;
                 int i;
                 Node* arg;
                 byte* inner;
@@ -5509,13 +6196,11 @@ namespace IDEKA
             // ported, they are empty until an interface definition has been compiled.
             visit_receiver_call(Node* n, byte* full, int argc) -> bool
             {
-                byte* tn;
-                byte* mk;
-                byte* recv;
+                byte* tn, mk, recv;
                 FvmBuf b;
-                int i;
-                int slot;
-                bool isobj;
+                int i, slot;
+                bool isobj, isarr;
+                TypeSpec* ats;
                 switch (n.a != (Node*)0)
                 {
                     case (true)
@@ -5525,6 +6210,44 @@ namespace IDEKA
                             case (true)
                             {
                                 tn = (byte*)nm_get(this.ltn, n.a.text);
+                                ats = (TypeSpec*)nm_get(this.ltypes, n.a.text);
+                                isarr = false;
+                                switch (ats != (TypeSpec*)0) { case (true) { isarr = (ats.flags `& TS_ARRAY) != 0 & !this.ts_is_ptr(ats); } default {}; };
+                                // an array receiver takes the type function of the array type, <type>_arr, and
+                                // never the one of the element type
+                                switch (tn != (byte*)0 & isarr)
+                                {
+                                    case (true)
+                                    {
+                                        b.__init();
+                                        b.put_str(g"__typefunc__\0");
+                                        b.put_str(tn);
+                                        b.put_str(g"_arr__\0");
+                                        b.put_str(n.text);
+                                        b.put(0);
+                                        mk = this.keep(b.mem);
+                                        b.__exit();
+                                        switch (this.fn_known(mk))
+                                        {
+                                            case (true)
+                                            {
+                                                switch (this.is_slot_array(n.a.text)) { case (true) { this.emit_stkptr((int)*(i64*)nm_get(this.locals, n.a.text)); } default { this.visit_expr(n.a); }; };
+                                                i = 0;
+                                                while (i < argc)
+                                                {
+                                                    this.visit_expr(node_child(n, 0, i));
+                                                    i++;
+                                                };
+                                                this.emit(IDKVM_CALL, (i64)(1 + argc), 0, 0, mk);
+                                                -> true;
+                                            }
+                                            default {};
+                                        };
+                                        this.fail_pieces(n, g"method target not resolved: no type function \0", tn, g"[].\0", n.text, g" is defined\0", (byte*)0, (byte*)0);
+                                        -> false;
+                                    }
+                                    default {};
+                                };
                                 switch (tn != (byte*)0)
                                 {
                                     case (true)
@@ -5536,7 +6259,24 @@ namespace IDEKA
                                         b.put(0);
                                         mk = this.keep(b.mem);
                                         b.__exit();
-                                        isobj = this.lay.find(tn) >= 0 | this.fn_known(mk);
+                                        isobj = this.fn_known(mk);
+                                        switch (!isobj & this.lay.find(tn) >= 0)
+                                        {
+                                            case (true)
+                                            {
+                                                // a struct without that member function: a type function
+                                                // defined for it takes the call
+                                                b.__init();
+                                                b.put_str(g"__typefunc__\0");
+                                                b.put_str(tn);
+                                                b.put_str(g"__\0");
+                                                b.put_str(n.text);
+                                                b.put(0);
+                                                isobj = !this.fn_known(b.mem);
+                                                b.__exit();
+                                            }
+                                            default {};
+                                        };
                                         switch (isobj)
                                         {
                                             case (true)
@@ -5550,12 +6290,12 @@ namespace IDEKA
                                                     this.visit_expr(node_child(n, 0, i));
                                                     i++;
                                                 };
-                                                this.emit(IDKVM_CALL, (i64)(1 + argc), (i64)0, (i64)0, mk);
+                                                this.emit(IDKVM_CALL, (i64)(1 + argc), 0, 0, mk);
                                                 slot = this.alloc_local(recv);
                                                 this.emit0(IDKVM_SWAP);
                                                 this.emit0(IDKVM_DUP);
                                                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
-                                                this.emit(IDKVM_GLOBAL_SET, (i64)0, (i64)0, (i64)0, this.keep(recv));
+                                                this.emit(IDKVM_GLOBAL_SET, 0, 0, 0, this.keep(recv));
                                                 -> true;
                                             }
                                             default {};
@@ -5579,7 +6319,7 @@ namespace IDEKA
                                                     this.visit_expr(node_child(n, 0, i));
                                                     i++;
                                                 };
-                                                this.emit(IDKVM_CALL, (i64)(1 + argc), (i64)0, (i64)0, mk);
+                                                this.emit(IDKVM_CALL, (i64)(1 + argc), 0, 0, mk);
                                                 -> true;
                                             }
                                             default {};
@@ -5599,7 +6339,7 @@ namespace IDEKA
                     this.visit_expr(node_child(n, 0, i));
                     i++;
                 };
-                this.emit(IDKVM_CALL, (i64)argc, (i64)0, (i64)0, this.keep(full));
+                this.emit(IDKVM_CALL, (i64)argc, 0, 0, this.keep(full));
                 -> true;
             };
 
@@ -5682,7 +6422,7 @@ namespace IDEKA
                     this.visit_expr(node_child(n, 0, i));
                     i++;
                 };
-                this.emit(IDKVM_CALL, (i64)argc, (i64)0, (i64)0, key);
+                this.emit(IDKVM_CALL, (i64)argc, 0, 0, key);
                 -> true;
             };
 
@@ -5694,8 +6434,7 @@ namespace IDEKA
                 i64* box;
                 byte* tn;
                 TypeSpec* ts;
-                int li;
-                int size;
+                int li, size;
                 bool is_arr, is_ptr;
                 switch (n.a.kind == NodeKind.IDENTIFIER)
                 {
@@ -5717,13 +6456,13 @@ namespace IDEKA
                                         {
                                             case (true)
                                             {
-                                                this.emit_push(IDKVM_T_UINT, (i64)hv.bytes);
+                                                this.emit_push(IDKVM_T_UINT, hv.bytes);
                                                 this.emit0(IDKVM_MUL);
                                             }
                                             default {};
                                         };
                                         this.emit0(IDKVM_ADD);
-                                        this.emit(IDKVM_LOAD, (i64)hv.ttag, (i64)hv.bytes, (i64)0, (byte*)0);
+                                        this.emit(IDKVM_LOAD, hv.ttag, hv.bytes, 0, (byte*)0);
                                         -> true;
                                     }
                                     default {};
@@ -5758,10 +6497,10 @@ namespace IDEKA
                                                 size = this.lay.ssize[li];
                                                 this.visit_expr(n.a);
                                                 this.visit_expr(n.b);
-                                                this.emit_push(IDKVM_T_UINT, (i64)size);
+                                                this.emit_push(IDKVM_T_UINT, size);
                                                 this.emit0(IDKVM_MUL);
                                                 this.emit0(IDKVM_ADD);
-                                                this.emit(IDKVM_LOAD, (i64)IDKVM_T_STRUCT, (i64)size, (i64)0, this.keep(tn));
+                                                this.emit(IDKVM_LOAD, (i64)IDKVM_T_STRUCT, size, 0, this.keep(tn));
                                                 -> true;
                                             }
                                             default {};
@@ -5812,7 +6551,7 @@ namespace IDEKA
                         mask = ((i64)1 << (i64)num_bits) - (i64)1;
                         this.visit_expr(n.a);
                         vslot = this.alloc_local(g"__bs_val__\0");
-                        this.emit1(IDKVM_LOCAL_SET, (i64)vslot);
+                        this.emit1(IDKVM_LOCAL_SET, vslot);
                         inner = 7 - (int)(e % (i64)8);
                         switch (is_le)
                         {
@@ -5820,12 +6559,12 @@ namespace IDEKA
                             default { byte_shift = (nbytes - 1 - (int)(s / (i64)8)) * 8; };
                         };
                         total_shift = byte_shift + inner;
-                        this.emit1(IDKVM_LOCAL_GET, (i64)vslot);
+                        this.emit1(IDKVM_LOCAL_GET, vslot);
                         switch (total_shift > 0)
                         {
                             case (true)
                             {
-                                this.emit_push(IDKVM_T_INT, (i64)total_shift);
+                                this.emit_push(IDKVM_T_INT, total_shift);
                                 this.emit0(IDKVM_SHR);
                             }
                             default {};
@@ -5838,39 +6577,39 @@ namespace IDEKA
                 };
                 this.visit_expr(n.a);
                 vslot = this.alloc_local(g"__bs_val__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)vslot);
+                this.emit1(IDKVM_LOCAL_SET, vslot);
                 this.visit_expr(n.b);
                 sslot = this.alloc_local(g"__bs_start__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)sslot);
+                this.emit1(IDKVM_LOCAL_SET, sslot);
                 this.visit_expr(n.c);
                 eslot = this.alloc_local(g"__bs_end__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)eslot);
-                this.emit1(IDKVM_LOCAL_GET, (i64)eslot);
-                this.emit_push(IDKVM_T_INT, (i64)8);
+                this.emit1(IDKVM_LOCAL_SET, eslot);
+                this.emit1(IDKVM_LOCAL_GET, eslot);
+                this.emit_push(IDKVM_T_INT, 8);
                 this.emit0(IDKVM_MOD);
-                this.emit_push(IDKVM_T_INT, (i64)7);
+                this.emit_push(IDKVM_T_INT, 7);
                 this.emit0(IDKVM_SWAP);
                 this.emit0(IDKVM_SUB);
                 ishift = this.alloc_local(g"__bs_inner_shift__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)ishift);
-                this.emit1(IDKVM_LOCAL_GET, (i64)eslot);
-                this.emit1(IDKVM_LOCAL_GET, (i64)sslot);
+                this.emit1(IDKVM_LOCAL_SET, ishift);
+                this.emit1(IDKVM_LOCAL_GET, eslot);
+                this.emit1(IDKVM_LOCAL_GET, sslot);
                 this.emit0(IDKVM_SUB);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_ADD);
                 nbslot = this.alloc_local(g"__bs_nb__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)nbslot);
-                this.emit_push(IDKVM_T_INT, (i64)1);
-                this.emit1(IDKVM_LOCAL_GET, (i64)nbslot);
+                this.emit1(IDKVM_LOCAL_SET, nbslot);
+                this.emit_push(IDKVM_T_INT, 1);
+                this.emit1(IDKVM_LOCAL_GET, nbslot);
                 this.emit0(IDKVM_SHL);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_SUB);
                 mslot = this.alloc_local(g"__bs_mask__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)mslot);
-                this.emit1(IDKVM_LOCAL_GET, (i64)vslot);
-                this.emit1(IDKVM_LOCAL_GET, (i64)ishift);
+                this.emit1(IDKVM_LOCAL_SET, mslot);
+                this.emit1(IDKVM_LOCAL_GET, vslot);
+                this.emit1(IDKVM_LOCAL_GET, ishift);
                 this.emit0(IDKVM_SHR);
-                this.emit1(IDKVM_LOCAL_GET, (i64)mslot);
+                this.emit1(IDKVM_LOCAL_GET, mslot);
                 this.emit0(IDKVM_BAND);
                 -> true;
             };
@@ -5915,12 +6654,12 @@ namespace IDEKA
                         {
                             case (true)
                             {
-                                this.emit_push(IDKVM_T_INT, (i64)shift_amt);
+                                this.emit_push(IDKVM_T_INT, shift_amt);
                                 this.emit0(IDKVM_SHR);
                             }
                             default {};
                         };
-                        this.emit_push(IDKVM_T_INT, (i64)1);
+                        this.emit_push(IDKVM_T_INT, 1);
                         this.emit0(IDKVM_BAND);
                         -> true;
                     }
@@ -5930,17 +6669,17 @@ namespace IDEKA
                 switch (total_bits >= 0) { case (true) { w = total_bits; } default {}; };
                 this.visit_expr(n.a);
                 vslot = this.alloc_local(g"__bia_val__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)vslot);
+                this.emit1(IDKVM_LOCAL_SET, vslot);
                 this.visit_expr(n.b);
                 islot = this.alloc_local(g"__bia_idx__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)islot);
+                this.emit1(IDKVM_LOCAL_SET, islot);
                 this.emit_push(IDKVM_T_INT, (i64)(w - 1));
-                this.emit1(IDKVM_LOCAL_GET, (i64)islot);
+                this.emit1(IDKVM_LOCAL_GET, islot);
                 this.emit0(IDKVM_SUB);
-                this.emit1(IDKVM_LOCAL_GET, (i64)vslot);
+                this.emit1(IDKVM_LOCAL_GET, vslot);
                 this.emit0(IDKVM_SWAP);
                 this.emit0(IDKVM_SHR);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_BAND);
                 -> true;
             };
@@ -5966,27 +6705,27 @@ namespace IDEKA
                 };
                 this.visit_expr(n.a);
                 aslot = this.alloc_local(g"__slice_arr__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)aslot);
-                this.emit(IDKVM_ARRAY_NEW, (i64)count, (i64)0, (i64)0, this.keep(g"int\0"));
+                this.emit1(IDKVM_LOCAL_SET, aslot);
+                this.emit(IDKVM_ARRAY_NEW, (i64)count, 0, 0, this.keep(g"int\0"));
                 rslot = this.alloc_local(g"__slice_result__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)rslot);
+                this.emit1(IDKVM_LOCAL_SET, rslot);
                 src = (int)s;
                 while (out_i < count)
                 {
-                    this.emit1(IDKVM_LOCAL_GET, (i64)aslot);
+                    this.emit1(IDKVM_LOCAL_GET, aslot);
                     this.emit_push(IDKVM_T_INT, (i64)src);
                     this.emit0(IDKVM_ARRAY_LOAD);
                     eslot = this.numbered_slot(g"__slice_e\0", out_i, g"__\0");
-                    this.emit1(IDKVM_LOCAL_SET, (i64)eslot);
-                    this.emit1(IDKVM_LOCAL_GET, (i64)rslot);
-                    this.emit_push(IDKVM_T_INT, (i64)out_i);
-                    this.emit1(IDKVM_LOCAL_GET, (i64)eslot);
+                    this.emit1(IDKVM_LOCAL_SET, eslot);
+                    this.emit1(IDKVM_LOCAL_GET, rslot);
+                    this.emit_push(IDKVM_T_INT, out_i);
+                    this.emit1(IDKVM_LOCAL_GET, eslot);
                     this.emit0(IDKVM_ARRAY_STORE);
-                    this.emit1(IDKVM_LOCAL_SET, (i64)rslot);
+                    this.emit1(IDKVM_LOCAL_SET, rslot);
                     src = src + step;
                     out_i++;
                 };
-                this.emit1(IDKVM_LOCAL_GET, (i64)rslot);
+                this.emit1(IDKVM_LOCAL_GET, rslot);
                 -> true;
             };
 
@@ -6034,9 +6773,9 @@ namespace IDEKA
                         };
                     };
                 };
-                this.emit(IDKVM_ARRAY_NEW, (i64)count, (i64)0, (i64)0, this.keep(g"int\0"));
+                this.emit(IDKVM_ARRAY_NEW, (i64)count, 0, 0, this.keep(g"int\0"));
                 rslot = this.alloc_local(g"__comp_result__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)rslot);
+                this.emit1(IDKVM_LOCAL_SET, rslot);
                 vslot = this.alloc_local(n.text);
                 while (i < count)
                 {
@@ -6045,18 +6784,18 @@ namespace IDEKA
                         case (true) { this.emit_push(IDKVM_T_INT, s + (i64)i); }
                         default { this.visit_expr(node_child(it, 0, i)); };
                     };
-                    this.emit1(IDKVM_LOCAL_SET, (i64)vslot);
+                    this.emit1(IDKVM_LOCAL_SET, vslot);
                     this.visit_expr(n.a);
                     eslot = this.numbered_slot(g"__comp_e\0", i, g"__\0");
-                    this.emit1(IDKVM_LOCAL_SET, (i64)eslot);
-                    this.emit1(IDKVM_LOCAL_GET, (i64)rslot);
+                    this.emit1(IDKVM_LOCAL_SET, eslot);
+                    this.emit1(IDKVM_LOCAL_GET, rslot);
                     this.emit_push(IDKVM_T_INT, (i64)i);
-                    this.emit1(IDKVM_LOCAL_GET, (i64)eslot);
+                    this.emit1(IDKVM_LOCAL_GET, eslot);
                     this.emit0(IDKVM_ARRAY_STORE);
-                    this.emit1(IDKVM_LOCAL_SET, (i64)rslot);
+                    this.emit1(IDKVM_LOCAL_SET, rslot);
                     i++;
                 };
-                this.emit1(IDKVM_LOCAL_GET, (i64)rslot);
+                this.emit1(IDKVM_LOCAL_GET, rslot);
                 -> true;
             };
 
@@ -6064,23 +6803,22 @@ namespace IDEKA
             visit_range_expression(Node* n) -> bool
             {
                 int rs = this.alloc_local(g"__range__\0");
-                int ss;
-                int es;
-                this.emit(IDKVM_ARRAY_NEW, (i64)2, (i64)0, (i64)0, this.keep(g"int\0"));
+                int ss, es;
+                this.emit(IDKVM_ARRAY_NEW, 2, 0, 0, this.keep(g"int\0"));
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
                 this.visit_expr(n.a);
                 ss = this.alloc_local(g"__range_start__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)ss);
+                this.emit1(IDKVM_LOCAL_SET, ss);
                 this.visit_expr(n.b);
                 es = this.alloc_local(g"__range_end__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)es);
                 this.emit1(IDKVM_LOCAL_GET, (i64)rs);
-                this.emit_push(IDKVM_T_INT, (i64)0);
-                this.emit1(IDKVM_LOCAL_GET, (i64)ss);
+                this.emit_push(IDKVM_T_INT, 0);
+                this.emit1(IDKVM_LOCAL_GET, ss);
                 this.emit0(IDKVM_ARRAY_STORE);
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
                 this.emit1(IDKVM_LOCAL_GET, (i64)rs);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit1(IDKVM_LOCAL_GET, (i64)es);
                 this.emit0(IDKVM_ARRAY_STORE);
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
@@ -6112,7 +6850,7 @@ namespace IDEKA
                     default
                     {
                         this.emit1(IDKVM_LOCAL_GET, *box);
-                        this.emit_push(IDKVM_T_INT, (i64)0);
+                        this.emit_push(IDKVM_T_INT, 0);
                         this.emit1(IDKVM_LOCAL_SET, *box);
                         -> true;
                     };
@@ -6151,9 +6889,9 @@ namespace IDEKA
                     default
                     {
                         this.emit1(IDKVM_LOCAL_GET, *box);
-                        this.emit_push(IDKVM_T_INT, (i64)0);
+                        this.emit_push(IDKVM_T_INT, 0);
                         this.emit0(IDKVM_CMP_EQ);
-                        skip = this.emit1(IDKVM_JNF, (i64)0);
+                        skip = this.emit1(IDKVM_JNF, 0);
                         this.visit_expr(n.b);
                         this.emit1(IDKVM_LOCAL_SET, *box);
                         this.patch_at(skip, IDKVM_JNF, this.ip());
@@ -6165,10 +6903,11 @@ namespace IDEKA
             // IDKVMCodegen._visit_break_switch: jumps past the enclosing switch
             visit_break_switch(Node* n) -> bool
             {
-                int idx = this.emit1(IDKVM_JMP, (i64)0);
-                switch (this.brks.len > 0)
+                int idx = this.emit1(IDKVM_JMP, 0);
+                int sc = this.brk_scope(true);
+                switch (sc >= 0)
                 {
-                    case (true) { pv_push((PtrVec*)this.brks.items[this.brks.len - 1], (void*)(u64)(idx + 1)); }
+                    case (true) { pv_push((PtrVec*)this.brks.items[sc], (void*)(u64)(idx + 1)); }
                     default {};
                 };
                 -> false;
@@ -6177,14 +6916,7 @@ namespace IDEKA
             // IDKVMCodegen._visit_for_in: iterates an array
             visit_for_in(Node* n) -> bool
             {
-                int it;
-                int ln;
-                int ix;
-                int vs;
-                int start;
-                int exit_patch;
-                int update_ip;
-                int after;
+                int it, ln, ix, vs, start, exit_patch, update_ip, after;
                 switch ((n.flags `& NF_BIT_ITER) != 0)
                 {
                     case (true)
@@ -6201,7 +6933,7 @@ namespace IDEKA
                 this.emit0(IDKVM_ARRAY_LEN);
                 ln = this.alloc_local(g"__forin_len__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)ln);
-                this.emit_push(IDKVM_T_INT, (i64)0);
+                this.emit_push(IDKVM_T_INT, 0);
                 ix = this.alloc_local(g"__forin_idx__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)ix);
                 vs = this.alloc_local(node_child(n, 0, 0).text);
@@ -6217,7 +6949,7 @@ namespace IDEKA
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ln);
                 this.emit0(IDKVM_CMP_LT);
-                exit_patch = this.emit1(IDKVM_JNF, (i64)0);
+                exit_patch = this.emit1(IDKVM_JNF, 0);
                 this.loop_push();
                 this.emit1(IDKVM_LOCAL_GET, (i64)it);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
@@ -6226,7 +6958,7 @@ namespace IDEKA
                 this.visit_stmts_direct(n.b);
                 update_ip = this.ip();
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
-                this.emit_push(IDKVM_T_INT, (i64)1);
+                this.emit_push(IDKVM_T_INT, 1);
                 this.emit0(IDKVM_ADD);
                 this.emit1(IDKVM_LOCAL_SET, (i64)ix);
                 this.emit1(IDKVM_JMP, (i64)start);
@@ -6239,26 +6971,21 @@ namespace IDEKA
             // IDKVMCodegen._visit_null_coalesce: left ?? right is left unless it is zero
             visit_null_coalesce(Node* n) -> bool
             {
-                int ls;
-                int rs;
-                int rr;
-                int jnf;
-                int merge;
-                int endj;
+                int ls, rs, rr, jnf, merge, endj;
                 this.visit_expr(n.a);
                 ls = this.alloc_local(g"__nc_left__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)ls);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ls);
-                jnf = this.emit1(IDKVM_JNF, (i64)0);
+                jnf = this.emit1(IDKVM_JNF, 0);
                 this.visit_expr(n.b);
                 rs = this.alloc_local(g"__nc_right__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)rs);
-                merge = this.emit1(IDKVM_JMP, (i64)0);
+                merge = this.emit1(IDKVM_JMP, 0);
                 this.patch_at(jnf, IDKVM_JNF, this.ip());
                 this.emit1(IDKVM_LOCAL_GET, (i64)ls);
                 rr = this.alloc_local(g"__nc_result__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)rr);
-                endj = this.emit1(IDKVM_JMP, (i64)0);
+                endj = this.emit1(IDKVM_JMP, 0);
                 this.patch_at(merge, IDKVM_JMP, this.ip());
                 this.emit1(IDKVM_LOCAL_GET, (i64)rs);
                 this.emit1(IDKVM_LOCAL_SET, (i64)rr);
@@ -6271,7 +6998,7 @@ namespace IDEKA
             visit_not_null(Node* n) -> bool
             {
                 this.visit_expr(n.a);
-                this.emit_push(IDKVM_T_INT, (i64)0);
+                this.emit_push(IDKVM_T_INT, 0);
                 this.emit0(IDKVM_CMP_EQ);
                 this.emit0(IDKVM_NOT);
                 -> true;
@@ -6285,7 +7012,7 @@ namespace IDEKA
                 switch (n.a != (Node*)0)
                 {
                     case (true) { this.visit_expr(n.a); }
-                    default { this.emit_push(IDKVM_T_PTR, (i64)0); };
+                    default { this.emit_push(IDKVM_T_PTR, 0); };
                 };
                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
                 nm_put(this.ltn, n.text, (void*)g"__funcptr__\0");
@@ -6373,7 +7100,7 @@ namespace IDEKA
                         {
                             case (true)
                             {
-                                this.emit_push(IDKVM_T_VOID, (i64)0);
+                                this.emit_push(IDKVM_T_VOID, 0);
                                 this.emit0(IDKVM_RET);
                             }
                             default {};
@@ -6388,10 +7115,52 @@ namespace IDEKA
             // are loaded into the local slots 0..N-1 by the VM call.
             visit_function_def(Node* n) -> bool
             {
-                IDKVMCodegen* f = this.make_child();
+                IDKVMCodegen* f;
                 int np = node_count(n, 0);
                 int i;
                 bool rec = (n.flags `& NF_RECURSIVE) != 0;
+                bool dyn = n.text == (byte*)0;
+                byte* nm = n.text;
+                FvmBuf b;
+                switch ((n.flags `& NF_PROTOTYPE) != 0 | n.a == (Node*)0) { case (true) { -> false; } default {}; };
+                switch (dyn)
+                {
+                    case (true)
+                    {
+                        // f-string name that the parser could not fold: the body is compiled under a
+                        // private name and FUNC_ALIAS gives it the evaluated name when the block runs
+                        switch (n.d == (Node*)0)
+                        {
+                            case (true)
+                            {
+                                this.fail(n, g"idkvmcodegen: comptime function has no name\0");
+                                -> false;
+                            }
+                            default {};
+                        };
+                        switch (n.d.kind != NodeKind.F_STRING_LITERAL)
+                        {
+                            case (true)
+                            {
+                                this.fail(n, g"idkvmcodegen: comptime function name must be a string or an f-string\0");
+                                -> false;
+                            }
+                            default {};
+                        };
+                        b.__init();
+                        b.put_str(g"__dynfn__\0");
+                        b.put_i64((i64)n.line);
+                        b.put_str(g"_\0");
+                        b.put_i64((i64)n.col);
+                        b.put_str(g"_\0");
+                        b.put_i64((i64)this.fnames.len);
+                        b.put(0);
+                        nm = this.keep(b.mem);
+                        b.__exit();
+                    }
+                    default {};
+                };
+                f = this.make_child();
                 while (i < np)
                 {
                     f.bind_param(node_child(n, 0, i));
@@ -6401,7 +7170,7 @@ namespace IDEKA
                 {
                     case (true)
                     {
-                        f.tail_self = this.keep(n.text);
+                        f.tail_self = this.keep(nm);
                         f.tail_argc = np;
                     }
                     default {};
@@ -6414,7 +7183,16 @@ namespace IDEKA
                         f.visit_body(n.a);
                         f.end_function_body(rec, np);
                         this.cf_adopt(f);
-                        this.cf_put(n.text, f);
+                        this.cf_put(nm, f);
+                        switch (dyn)
+                        {
+                            case (true)
+                            {
+                                this.visit_expr(n.d);
+                                this.emit(IDKVM_FUNC_ALIAS, 0, 0, 0, nm);
+                            }
+                            default {};
+                        };
                         -> false;
                     };
                 };
@@ -6567,7 +7345,7 @@ namespace IDEKA
                 src_slot = (int)*box;
                 this.emits(IDKVM_STRUCT_NEW, n.text);
                 tslot = this.alloc_local(g"__recast_tmp__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)tslot);
+                this.emit1(IDKVM_LOCAL_SET, tslot);
                 k = 0;
                 while (k < this.lay.scount[li])
                 {
@@ -6575,27 +7353,27 @@ namespace IDEKA
                     ft = this.lay.ftag[f];
                     fb = this.recast_bits(ft, this.lay.fsize[f]);
                     mask = ((i64)1 << (i64)fb) - (i64)1;
-                    this.emit1(IDKVM_LOCAL_GET, (i64)src_slot);
+                    this.emit1(IDKVM_LOCAL_GET, src_slot);
                     switch (bit_cursor != 0)
                     {
                         case (true)
                         {
-                            this.emit_push(IDKVM_T_INT, (i64)bit_cursor);
+                            this.emit_push(IDKVM_T_INT, bit_cursor);
                             this.emit0(IDKVM_SHR);
                         }
                         default {};
                     };
                     this.emit_push(IDKVM_T_LONG, mask);
                     this.emit0(IDKVM_BAND);
-                    this.emit(IDKVM_CAST, (i64)ft, (i64)0, (i64)0, (byte*)0);
-                    this.emit1(IDKVM_LOCAL_GET, (i64)tslot);
+                    this.emit(IDKVM_CAST, (i64)ft, 0, 0, (byte*)0);
+                    this.emit1(IDKVM_LOCAL_GET, tslot);
                     this.emit0(IDKVM_SWAP);
                     this.emits(IDKVM_STRUCT_STORE, this.lay.fname[f]);
-                    this.emit1(IDKVM_LOCAL_SET, (i64)tslot);
+                    this.emit1(IDKVM_LOCAL_SET, tslot);
                     bit_cursor = bit_cursor + fb;
                     k++;
                 };
-                this.emit1(IDKVM_LOCAL_GET, (i64)tslot);
+                this.emit1(IDKVM_LOCAL_GET, tslot);
                 switch (n.ival == (i64)0)
                 {
                     case (true)
@@ -6633,9 +7411,7 @@ namespace IDEKA
             visit_member_access(Node* n) -> bool
             {
                 byte* dotted = this.flatten_dotted_name(n);
-                byte* tn;
-                byte* prop;
-                byte* vn;
+                byte* tn, prop, vn;
                 bool produced;
                 Node* ed;
                 int ei;
@@ -6836,8 +7612,7 @@ namespace IDEKA
             visit_extern_block(Node* n) -> bool
             {
                 int i, j, np;
-                Node* d;
-                Node* pp;
+                Node* d, pp;
                 i64* ptg;
                 int rt;
                 while (i < node_count(n, 0))
@@ -6875,12 +7650,25 @@ namespace IDEKA
                     case (true) { b.put_str(g"void\0"); ->; }
                     default {};
                 };
-                switch (ts.base_type < 0)
+                // a named type is its own token, as in the mangled name of the compiler; an alias of a pointer
+                // or an array type is marked as one so a pointer argument scores for it
+                switch (ts.custom_typename != (byte*)0)
                 {
-                    case (true) { b.put_str(g"ptr\0"); ->; }
-                    default {};
+                    case (true)
+                    {
+                        b.put_str(ts.custom_typename);
+                        switch (this.alias_is_ptr(ts.custom_typename)) { case (true) { b.put_str(g"arr\0"); } default {}; };
+                    }
+                    default
+                    {
+                        switch (ts.base_type < 0)
+                        {
+                            case (true) { b.put_str(g"ptr\0"); ->; }
+                            default {};
+                        };
+                        b.put_str(datatype_text(ts.base_type));
+                    };
                 };
-                b.put_str(datatype_text(ts.base_type));
                 switch ((ts.flags `& TS_ARRAY) != 0)
                 {
                     case (true) { b.put_str(g"arr\0"); ->; }
@@ -6894,25 +7682,132 @@ namespace IDEKA
                 ->;
             };
 
+            // One function of the namespace nsn, compiled and registered under the names ns_def gives it: the
+            // signature keyed form first, then the mangled and the bare name when free. Forward declarations are
+            // skipped. vars are the variables of the namespace for a function that is pulled in on demand: the
+            // statement that declares them did not run at comptime, so the function initializes them once, when
+            // the first function of the namespace runs.
+            ns_fn(Node* fn, byte* nsn, PtrVec* vars) -> void
+            {
+                bool same;
+                int j, np, k, jj;
+                IDKVMCodegen* f;
+                bool fwd, named;
+                FvmBuf sb;
+                byte* key, mangled, flag;
+                Node* var;
+                i64* box;
+                f = this.make_child();
+                np = node_count(fn, 0);
+                j = 0;
+                while (j < np)
+                {
+                    f.bind_param(node_child(fn, 0, j));
+                    j++;
+                };
+                named = false;
+                j = 0;
+                while (j < np)
+                {
+                    if (node_child(fn, 0, j).text != (byte*)0) { named = true; };
+                    j++;
+                };
+                fwd = fn.a == (Node*)0 | (fn.a.kind == NodeKind.BLOCK & node_count(fn.a, 0) == 0 & !named);
+                if (fwd) { ->; };
+                f.curns = nsn;
+                if (vars != (PtrVec*)0)
+                {
+                    if (vars.len > 0)
+                    {
+                        sb.__init();
+                        sb.put_str(g"__nsinit__\0");
+                        sb.put_str(nsn);
+                        sb.put(0);
+                        flag = this.keep(sb.mem);
+                        sb.__exit();
+                        f.emits(IDKVM_GLOBAL_GET, flag);
+                        jj = f.emit1(IDKVM_JIF, 0);
+                        k = 0;
+                        while (k < vars.len)
+                        {
+                            var = (Node*)vars.items[k];
+                            f.visit_var_decl(var);
+                            box = (i64*)nm_get(f.locals, var.text);
+                            if (box != (i64*)0)
+                            {
+                                f.emit1(IDKVM_LOCAL_GET, *box);
+                                f.emits(IDKVM_GLOBAL_SET, var.text);
+                            };
+                            f.set_add(f.oglobals, f.keep(var.text));
+                            k++;
+                        };
+                        f.emit_push(IDKVM_T_BOOL, 1);
+                        f.emits(IDKVM_GLOBAL_SET, flag);
+                        f.patch_at(jj, IDKVM_JIF, f.ip());
+                        // the storage of a variable that the first function allocated: every function reads it back
+                        k = 0;
+                        while (k < vars.len)
+                        {
+                            var = (Node*)vars.items[k];
+                            box = (i64*)nm_get(f.locals, var.text);
+                            if (box != (i64*)0 & nm_has(f.hvars, var.text))
+                            {
+                                f.emits(IDKVM_GLOBAL_GET, var.text);
+                                f.emit1(IDKVM_LOCAL_SET, *box);
+                            };
+                            k++;
+                        };
+                    };
+                };
+                f.visit_body(fn.a);
+                f.end_function_body(false, np);
+                this.cf_adopt(f);
+                mangled = this.joined_name(nsn, fn.text);
+                sb.__init();
+                sb.put_str(mangled);
+                if (np > 0)
+                {
+                    sb.put_str(g"__$\0");
+                    j = 0;
+                    while (j < np)
+                    {
+                        if (j > 0) { sb.put(95); };
+                        this.sig_tag(node_child(fn, 0, j).ts, @sb);
+                        j++;
+                    };
+                };
+                sb.put(0);
+                key = this.keep(sb.mem);
+                sb.__exit();
+                // the bare and the mangled name stand for the first overload seen, a function without
+                // parameters takes them over so a call without arguments finds it
+                if (np == 0)
+                {
+                    same = this.cf_same(fn.text, mangled);
+                    this.cf_put(mangled, f);
+                    if (!this.cf_has(fn.text) | same) { this.cf_put(fn.text, f); };
+                    ->;
+                };
+                this.cf_put(key, f);
+                if (!this.cf_has(mangled)) { this.cf_put(mangled, f); };
+                if (!this.cf_has(fn.text)) { this.cf_put(fn.text, f); };
+                ->;
+            };
+
             // IDKVMCodegen._visit_namespace_def: variables, functions under their mangled names
             // (the signature keyed form first, then the mangled and the bare name when free),
             // structs, extern blocks and nested namespaces
             ns_def(Node* n, byte* prefix) -> void
             {
                 byte* nsn = this.joined_name(prefix, n.text);
-                int i;
-                int j;
-                int np;
+                int i, j, np;
                 Node* fn;
                 IDKVMCodegen* f;
-                bool fwd;
-                bool named;
+                bool fwd, named;
                 FvmBuf sb;
-                byte* key;
-                byte* mangled;
+                byte* key, mangled;
                 Node* var;
-                int nvars;
-                int nnest;
+                int nvars, nnest;
                 i = 0;
                 nvars = 0;
                 switch (n.a != (Node*)0) { case (true) { nvars = node_count(n.a, 0); } default {}; };
@@ -6928,59 +7823,8 @@ namespace IDEKA
                 {
                     fn = node_child(n, 0, i);
                     i++;
-                    switch (fn == (Node*)0)
-                    {
-                        case (true) { continue; }
-                        default {};
-                    };
-                    f = this.make_child();
-                    np = node_count(fn, 0);
-                    j = 0;
-                    while (j < np)
-                    {
-                        f.bind_param(node_child(fn, 0, j));
-                        j++;
-                    };
-                    named = false;
-                    j = 0;
-                    while (j < np)
-                    {
-                        switch (node_child(fn, 0, j).text != (byte*)0) { case (true) { named = true; } default {}; };
-                        j++;
-                    };
-                    fwd = fn.a == (Node*)0 | (fn.a.kind == NodeKind.BLOCK & node_count(fn.a, 0) == 0 & !named);
-                    switch (fwd)
-                    {
-                        case (true) { continue; }
-                        default {};
-                    };
-                    f.visit_body(fn.a);
-                    f.end_function_body(false, np);
-                    this.cf_adopt(f);
-                    mangled = this.joined_name(nsn, fn.text);
-                    sb.__init();
-                    sb.put_str(mangled);
-                    switch (np > 0)
-                    {
-                        case (true)
-                        {
-                            sb.put_str(g"__$\0");
-                            j = 0;
-                            while (j < np)
-                            {
-                                switch (j > 0) { case (true) { sb.put(95); } default {}; };
-                                this.sig_tag(node_child(fn, 0, j).ts, @sb);
-                                j++;
-                            };
-                        }
-                        default {};
-                    };
-                    sb.put(0);
-                    key = this.keep(sb.mem);
-                    sb.__exit();
-                    this.cf_put(key, f);
-                    switch (!this.cf_has(mangled)) { case (true) { this.cf_put(mangled, f); } default {}; };
-                    switch (!this.cf_has(fn.text)) { case (true) { this.cf_put(fn.text, f); } default {}; };
+                    if (fn == (Node*)0) { continue; };
+                    this.ns_fn(fn, nsn, (PtrVec*)0);
                 };
                 i = 0;
                 while (i < node_count(n, 1))
@@ -7059,8 +7903,7 @@ namespace IDEKA
             visit_not_using(Node* n) -> bool
             {
                 byte* ns = this.ns_name(n.text);
-                int i;
-                int j;
+                int i, j;
                 this.set_add(this.excluded, ns);
                 while (i < this.usings.len)
                 {
@@ -7091,11 +7934,8 @@ namespace IDEKA
             visit_switch(Node* n) -> bool
             {
                 int nc = node_count(n, 0);
-                int i;
-                int slot;
-                int skip;
-                Node* c;
-                Node* dflt;
+                int i, slot, skip;
+                Node* c, dflt;
                 this.visit_expr(n.a);
                 slot = this.alloc_local(g"__switch_subject__\0");
                 this.emit1(IDKVM_LOCAL_SET, (i64)slot);
@@ -7111,9 +7951,9 @@ namespace IDEKA
                             this.emit1(IDKVM_LOCAL_GET, (i64)slot);
                             this.visit_expr(c.a);
                             this.emit0(IDKVM_CMP_EQ);
-                            skip = this.emit1(IDKVM_JNF, (i64)0);
+                            skip = this.emit1(IDKVM_JNF, 0);
                             this.visit_stmts_direct(c.b);
-                            pv_push((PtrVec*)this.brks.items[this.brks.len - 1], (void*)(u64)(this.emit1(IDKVM_JMP, (i64)0) + 1));
+                            pv_push((PtrVec*)this.brks.items[this.brks.len - 1], (void*)(u64)(this.emit1(IDKVM_JMP, 0) + 1));
                             this.patch_at(skip, IDKVM_JNF, this.ip());
                         };
                     };
@@ -7133,8 +7973,7 @@ namespace IDEKA
             {
                 int start;
                 int exit_patch = -1;
-                int update_ip;
-                int after;
+                int update_ip, after;
                 switch (n.a != (Node*)0) { case (true) { this.visit_stmt(n.a); } default {}; };
                 start = this.ip();
                 switch (n.b != (Node*)0)
@@ -7142,7 +7981,7 @@ namespace IDEKA
                     case (true)
                     {
                         this.visit_expr(n.b);
-                        exit_patch = this.emit1(IDKVM_JNF, (i64)0);
+                        exit_patch = this.emit1(IDKVM_JNF, 0);
                     }
                     default {};
                 };
@@ -7162,7 +8001,7 @@ namespace IDEKA
             // for it are patched
             visit_label(Node* n) -> bool
             {
-                i64* box = (i64*)fmalloc((u64)8);
+                i64* box = (i64*)fmalloc(8);
                 int i;
                 PtrVec* ni = pv_new();
                 PtrVec* nn = pv_new();
@@ -7229,13 +8068,13 @@ namespace IDEKA
                                                     f.in_func = false;
                                                     this.cf_put(key, f);
                                                     f.visit_body(s);
-                                                    f.emit_push(IDKVM_T_VOID, (i64)0);
+                                                    f.emit_push(IDKVM_T_VOID, 0);
                                                     f.emit0(IDKVM_RET);
                                                     f.code.unit_end(f.unit);
                                                 }
                                                 default {};
                                             };
-                                            this.emit(IDKVM_CALL, (i64)0, (i64)0, (i64)0, key);
+                                            this.emit(IDKVM_CALL, 0, 0, 0, key);
                                             -> false;
                                         }
                                         default {};
@@ -7254,7 +8093,7 @@ namespace IDEKA
                     case (true) { this.emit1(IDKVM_JMP, *box - (i64)1); }
                     default
                     {
-                        i = this.emit1(IDKVM_JMP, (i64)0);
+                        i = this.emit1(IDKVM_JMP, 0);
                         pv_push(this.gp_idx, (void*)(u64)(i + 1));
                         pv_push(this.gp_name, (void*)n.text);
                     };
@@ -7278,7 +8117,7 @@ namespace IDEKA
                             case (true) { this.emit1(IDKVM_JMP, *box - (i64)1); }
                             default
                             {
-                                idx = this.emit1(IDKVM_JMP, (i64)0);
+                                idx = this.emit1(IDKVM_JMP, 0);
                                 pv_push(this.gp_idx, (void*)(u64)(idx + 1));
                                 pv_push(this.gp_name, (void*)n.a.text);
                             };
@@ -7306,8 +8145,7 @@ namespace IDEKA
             visit_do_while(Node* n) -> bool
             {
                 int start = this.ip();
-                int cond_ip;
-                int after;
+                int cond_ip, after;
                 this.loop_push();
                 this.visit_stmts_direct(n.b);
                 cond_ip = this.ip();
@@ -7363,7 +8201,7 @@ namespace IDEKA
                 vars.n = cnt;
                 t = this.keep(n.text);
                 this.cur_line = n.line;
-                this.emit(IDKVM_EMITIDEKA, (i64)cnt, (i64)0, idkvm_p2i((byte*)vars), t);
+                this.emit(IDKVM_EMITIDEKA, (i64)cnt, 0, idkvm_p2i((byte*)vars), t);
                 -> true;
             };
 
@@ -7421,7 +8259,7 @@ namespace IDEKA
                 byte* r;
                 b.__init();
                 b.put_str(g"__tmp_\0");
-                b.put_i64((i64)this.nlocals);
+                b.put_i64(this.nlocals);
                 b.put_str(g"__\0");
                 b.put(0);
                 r = this.keep(b.mem);
@@ -7434,8 +8272,7 @@ namespace IDEKA
             {
                 int i = scope.len - 1;
                 int j;
-                Node* d;
-                Node* x;
+                Node* d, x;
                 while (i >= 0)
                 {
                     d = (Node*)scope.items[i];
@@ -7508,33 +8345,30 @@ namespace IDEKA
                 int ttag = idkvmcg_datatype_ttag(dt);
                 int bits = idkvmcg_type_bits(dt, 32);
                 int n = last - first + 1;
-                int i;
-                int src_slot;
-                int slot;
-                int shift;
+                int i, src_slot, slot, shift;
                 i64 mask = ((i64)1 << (i64)bits) - (i64)1;
                 Node* d;
                 this.visit_expr(src);
                 src_slot = this.alloc_local(g"__unpack_src__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)src_slot);
+                this.emit1(IDKVM_LOCAL_SET, src_slot);
                 while (i < n)
                 {
                     d = node_child(b, 0, first + i);
                     slot = this.alloc_local(d.text);
                     shift = (n - 1 - i) * bits;
-                    this.emit1(IDKVM_LOCAL_GET, (i64)src_slot);
+                    this.emit1(IDKVM_LOCAL_GET, src_slot);
                     switch (shift > 0)
                     {
                         case (true)
                         {
-                            this.emit_push(IDKVM_T_INT, (i64)shift);
+                            this.emit_push(IDKVM_T_INT, shift);
                             this.emit0(IDKVM_SHR);
                         }
                         default {};
                     };
                     this.emit_push(IDKVM_T_LONG, mask);
                     this.emit0(IDKVM_BAND);
-                    this.emit1(IDKVM_CAST, (i64)ttag);
+                    this.emit1(IDKVM_CAST, ttag);
                     this.emit1(IDKVM_LOCAL_SET, (i64)slot);
                     switch (d.ts != (TypeSpec*)0)
                     {
@@ -7555,8 +8389,7 @@ namespace IDEKA
                 int ebits = 32;
                 int n = node_count(arr, 0);
                 int i = 1;
-                int shift;
-                int acc;
+                int shift, acc;
                 switch (target != (TypeSpec*)0) { case (true) { tdt = target.base_type; } default {}; };
                 ttag = idkvmcg_datatype_ttag(tdt);
                 switch (arr.ts != (TypeSpec*)0)
@@ -7568,7 +8401,7 @@ namespace IDEKA
                 {
                     case (true)
                     {
-                        this.emit_push(ttag, (i64)0);
+                        this.emit_push(ttag, 0);
                         ->;
                     }
                     default {};
@@ -7579,7 +8412,7 @@ namespace IDEKA
                 {
                     case (true)
                     {
-                        this.emit_push(IDKVM_T_INT, (i64)shift);
+                        this.emit_push(IDKVM_T_INT, shift);
                         this.emit0(IDKVM_SHL);
                     }
                     default {};
@@ -7594,7 +8427,7 @@ namespace IDEKA
                     {
                         case (true)
                         {
-                            this.emit_push(IDKVM_T_INT, (i64)shift);
+                            this.emit_push(IDKVM_T_INT, shift);
                             this.emit0(IDKVM_SHL);
                         }
                         default {};
@@ -7605,7 +8438,7 @@ namespace IDEKA
                     i++;
                 };
                 this.emit1(IDKVM_LOCAL_GET, (i64)acc);
-                this.emit1(IDKVM_CAST, (i64)ttag);
+                this.emit1(IDKVM_CAST, ttag);
                 ->;
             };
 
@@ -7637,8 +8470,7 @@ namespace IDEKA
             // IDKVMCodegen._type_bit_width: structs are tightly packed
             type_bit_width(TypeSpec* ts) -> int
             {
-                int elem;
-                int li;
+                int elem, li;
                 switch (ts == (TypeSpec*)0)
                 {
                     case (true) { -> 32; }
@@ -7714,8 +8546,7 @@ namespace IDEKA
             // IDKVMCodegen._type_ttag_from_ts
             type_ttag_from_ts(TypeSpec* ts) -> int
             {
-                int bits;
-                int pa;
+                int bits, pa;
                 bool sg;
                 switch (ts == (TypeSpec*)0) { case (true) { -> IDKVM_T_INT; } default {}; };
                 switch ((ts.flags `& TS_POINTER) != 0) { case (true) { -> IDKVM_T_PTR; } default {}; };

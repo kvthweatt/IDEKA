@@ -167,12 +167,12 @@ namespace IDEKA
             };
         };
 
-        pp_is_alpha_us(int c) -> bool -> (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | c == '_';
+        inline pp_is_alpha_us(int c) -> bool -> (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | c == '_';
 
-        pp_is_word(int c) -> bool -> (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | (c >= '0' & c <= '9') | c == '_';
+        inline pp_is_word(int c) -> bool -> (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | (c >= '0' & c <= '9') | c == '_';
 
         // Characters that end a token in _substitute_constants
-        pp_is_delim(int c) -> bool -> c == '.' | c == ',' | c == ';' | c == ':' | c == '(' | c == ')' | c == '[' | c == ']' | c == '{' | c == '}' | c == '+' | c == '-' | c == '*' | c == '/' | c == '%' | c == '=' | c == '!' | c == '<' | c == '>' | c == '|' | c == '&' | c == '^' | c == '~';
+        inline pp_is_delim(int c) -> bool -> c == '.' | c == ',' | c == ';' | c == ':' | c == '(' | c == ')' | c == '[' | c == ']' | c == '{' | c == '}' | c == '+' | c == '-' | c == '*' | c == '/' | c == '%' | c == '=' | c == '!' | c == '<' | c == '>' | c == '|' | c == '&' | c == '^' | c == '~';
 
         // Length in bytes of the Unicode whitespace character at s[i], 0 if none
         // (the set str.isspace() accepts).
@@ -700,7 +700,7 @@ namespace IDEKA
                 };
             };
 
-            put(int b) -> void
+            inline put(int b) -> void
             {
                 switch (!this.reserve(1))
                 {

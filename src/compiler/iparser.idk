@@ -1323,7 +1323,7 @@ namespace IDEKA
 
             // ===== LOOKAHEAD PREDICATES =====
 
-            // (NO_MANGLE)? IDENTIFIER '(' ... ')' '->'
+            // (NO_MANGLE)? (IDENTIFIER | F_STRING | I_STRING) '(' ... ')' '->'
             is_bare_function_def() -> bool
             {
                 int m = this.mark();
@@ -1338,7 +1338,7 @@ namespace IDEKA
                     return r;
                 };
                 if (this.expect(TokenType.NO_MANGLE)) { this.advance(); };
-                if (!this.expect(TokenType.IDENTIFIER))
+                if (!this.expect3(TokenType.IDENTIFIER, TokenType.F_STRING, TokenType.I_STRING))
                 {
                     this.reset(m);
                     return false;
@@ -1605,14 +1605,14 @@ namespace IDEKA
                             default {};
                         };
 
-                        while (this.expect(TokenType.MULTIPLY)) { this.advance(); };
+                        while (this.expect2(TokenType.MULTIPLY, TokenType.BITSTAR)) { this.advance(); };
 
                         while (this.expect(TokenType.LEFT_BRACKET))
                         {
                             this.skip_brackets();
                         };
 
-                        while (this.expect(TokenType.MULTIPLY)) { this.advance(); };
+                        while (this.expect2(TokenType.MULTIPLY, TokenType.BITSTAR)) { this.advance(); };
 
                         switch (this.expect(TokenType.AS))
                         {
@@ -1736,7 +1736,7 @@ namespace IDEKA
                             default {};
                         };
 
-                        while (this.expect(TokenType.MULTIPLY)) { this.advance(); };
+                        while (this.expect2(TokenType.MULTIPLY, TokenType.BITSTAR)) { this.advance(); };
 
                         while (this.expect(TokenType.LEFT_BRACKET))
                         {
@@ -1786,7 +1786,7 @@ namespace IDEKA
                     };
                 };
 
-                while (this.expect(TokenType.MULTIPLY)) { this.advance(); };
+                while (this.expect2(TokenType.MULTIPLY, TokenType.BITSTAR)) { this.advance(); };
 
                 switch (this.expect(TokenType.LEFT_BRACKET))
                 {
@@ -8795,6 +8795,21 @@ namespace IDEKA
             // Returns null with the error recorded on failure.
             type_spec() -> TypeSpec*
             {
+                TypeSpec* ts = this.type_spec_impl();
+                switch (this.failed) { case (true) { -> ts; } default {}; };
+                switch (this.expect(TokenType.BITSTAR))
+                {
+                    case (true) {
+                        this.advance();
+                        ts.flags = ts.flags `| TS_BITPTR;
+                    }
+                    default {};
+                };
+                -> ts;
+            };
+
+            type_spec_impl() -> TypeSpec*
+            {
                 TypeSpec* t = typespec_new();
                 switch (t == (TypeSpec*)0)
                 {
@@ -10262,6 +10277,19 @@ namespace IDEKA
                 }
                     default
                     {
+                        switch (c == TokenType.BITSTAR)
+                        {
+                            case (true) {
+                            this.advance();
+                            operand = this.cast_expression();
+                            switch (this.failed) { case (true) { -> operand; } default {}; };
+                            n = this.mk(NodeKind.BIT_POINTER_DEREF, line, col);
+                            switch (this.failed) { case (true) { -> operand; } default {}; };
+                            n.a = operand;
+                            -> n;
+                        }
+                            default {};
+                        };
                         switch (c == TokenType.MULTIPLY)
                         {
                             case (true) {
@@ -18753,6 +18781,11 @@ namespace IDEKA
                     default
                     {
                         n.op = -1;
+                        switch (bytes_eq(this.cur_value(), g"cstruct", 7))
+                        {
+                            case (true) { n.flags = n.flags `| NF_CSTRUCT; }
+                            default {};
+                        };
                         this.advance();
                         n.text = this.ident();
                         switch (this.failed)

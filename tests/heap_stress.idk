@@ -955,6 +955,125 @@ def test_throughput_fastpath() -> void
 // =========================================================================
 // Test 20: frealloc pressure - 1000 cycles of grow/shrink on a live block
 // =========================================================================
+// Test 19b: Memory bandwidth - bytes actually written and read back
+//           (the throughput tests above never touch the blocks)
+// =========================================================================
+def bw_print(byte* what, i64 bytes, i64 ns) -> void
+{
+    i64      us, mbs, frac;
+    byte[64] buf;
+    us = ns / 1000;
+    if (us <= 0) { us = 1; };
+    mbs  = (bytes * 1000000) / us / 1048576;
+    frac = ((bytes * 1000000) / us % 1048576) * 10 / 1048576;
+    print(what);
+    i64str(mbs, @buf[0]); print(@buf[0]); print(".");
+    i64str(frac, @buf[0]); print(@buf[0]); print(" MB/s\n");
+    return;
+};
+
+def test_bandwidth() -> void
+{
+    PCG32    rng;
+    i64      t0, t1, touched, ns;
+    size_t   k, n, sz, w, j, rounds;
+    u64      p, sum, expect;
+    u64*     q;
+    u32      rval;
+    u64      rval64;
+    bool     ok;
+    byte[64] buf;
+
+    print("-- bandwidth: bytes written and read back --\n");
+    n  = 1000000;
+    ok = true;
+
+    // 1M x 64-byte pairs, every word written then read
+    k = 0; sum = 0; expect = 0; touched = 0;
+    t0 = time_now();
+    while (k < n)
+    {
+        p = fmalloc(64);
+        if (!(@)p) { ok = false; break; };
+        q = (u64*)p;
+        j = 0;
+        while (j < 8) { q[j] = k + j; j++; };
+        j = 0;
+        while (j < 8) { sum = sum + q[j]; j++; };
+        expect = expect + k * 8 + 28;
+        ffree(p);
+        touched = touched + 128;
+        k++;
+    };
+    t1 = time_now();
+    check(ok & sum == expect, "64-byte write/read-back sums match");
+    bw_print("  64-byte pairs:  ", touched, t1 - t0);
+
+    // 1M mixed-size pairs, every whole word written then read
+    pcg32_init(@rng);
+    k = 0; sum = 0; expect = 0; touched = 0;
+    t0 = time_now();
+    while (k < n)
+    {
+        rval   = pcg32_next(@rng);
+        rval64 = rval;
+        sz     = (rval64 % 4096) + 1;
+        p      = fmalloc(sz);
+        if (!(@)p) { ok = false; break; };
+        q = (u64*)p;
+        w = sz / 8;
+        if (w == 0) { w = 1; };
+        j = 0;
+        while (j < w) { q[j] = k + j; j++; };
+        j = 0;
+        while (j < w) { sum = sum + q[j]; j++; };
+        expect = expect + k * w + (w * (w - 1)) / 2;
+        ffree(p);
+        touched = touched + (i64)w * 16;
+        k++;
+    };
+    t1 = time_now();
+    check(ok & sum == expect, "mixed write/read-back sums match");
+    bw_print("  mixed pairs:    ", touched, t1 - t0);
+
+    // Streaming over one large block, 4 passes each
+    sz = 64 * 1024 * 1024;
+    p  = fmalloc(sz);
+    check(p != 0, "64 MB block allocated");
+    if (p != 0)
+    {
+        q = (u64*)p;
+        w = sz / 8;
+        rounds = 0;
+        t0 = time_now();
+        while (rounds < 4)
+        {
+            j = 0;
+            while (j < w) { q[j] = j + rounds; j++; };
+            rounds++;
+        };
+        t1 = time_now();
+        bw_print("  stream write:   ", (i64)sz * 4, t1 - t0);
+
+        sum = 0; rounds = 0;
+        t0 = time_now();
+        while (rounds < 4)
+        {
+            j = 0;
+            while (j < w) { sum = sum + q[j]; j++; };
+            rounds++;
+        };
+        t1 = time_now();
+        // last write pass stored j + 3 in word j
+        expect = ((u64)w * (w - 1) / 2 + (u64)w * 3) * 4;
+        check(sum == expect, "stream read-back sum matches");
+        bw_print("  stream read:    ", (i64)sz * 4, t1 - t0);
+        ffree(p);
+    };
+    return;
+};
+
+// =========================================================================
 def test_frealloc_pressure() -> void
 {
     PCG32    rng;
@@ -1092,6 +1211,7 @@ def main() -> int
     test_throughput_small();
     test_throughput_mixed();
     test_throughput_fastpath();
+    test_bandwidth();
     test_frealloc_pressure();
     test_slab_exhaustion_recovery();
 

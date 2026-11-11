@@ -1,4 +1,4 @@
 // IDEKA Compiler Version Information
-const byte* IDEKA_COMPILER_VERSION      = g"2.1.0",
-            IDEKA_VERSION_NAME          = g"Pearled Pinecone",
-            IDEKA_COMPILER_RELEASE_DATE = g"20261028"; // YYYYMMDD
+const byte* IDEKA_COMPILER_VERSION      = g"2.2.0",
+            IDEKA_VERSION_NAME          = g"Blazing Bulldog",
+            IDEKA_COMPILER_RELEASE_DATE = g"20261110"; // YYYYMMDD

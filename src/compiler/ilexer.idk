@@ -172,6 +172,7 @@ namespace IDEKA
             MODULO_ASSIGN,
             EXPONENT_ASSIGN,
             BACKTICK,
+            BITSTAR,
             BITNOT_OP,
             BITAND_OP,
             BITOR_OP,
@@ -348,6 +349,7 @@ namespace IDEKA
         keyword_type(byte* s, int n) -> int
         {
             switch (kw_is(s, n, g"idkvm\0")) { case (true) { -> TokenType.IDEKAVM; } default {}; };
+            switch (kw_is(s, n, g"cstruct\0")) { case (true) { -> TokenType.STRUCT; } default {}; };
             switch (kw_is(s, n, g"emitideka\0")) { case (true) { -> TokenType.EMITIDEKA; } default {}; };
             switch (n == 2)
             {
@@ -1198,6 +1200,7 @@ namespace IDEKA
                 case (TokenType.MODULO_ASSIGN) { -> g"MODULO_ASSIGN\0"; }
                 case (TokenType.EXPONENT_ASSIGN) { -> g"EXPONENT_ASSIGN\0"; }
                 case (TokenType.BACKTICK) { -> g"BACKTICK\0"; }
+                case (TokenType.BITSTAR) { -> g"BITSTAR\0"; }
                 case (TokenType.BITNOT_OP) { -> g"BITNOT_OP\0"; }
                 case (TokenType.BITAND_OP) { -> g"BITAND_OP\0"; }
                 case (TokenType.BITOR_OP) { -> g"BITOR_OP\0"; }
@@ -1349,7 +1352,7 @@ namespace IDEKA
             // ===== SOURCE CURSOR =====
 
             // Current byte as 0..255, or -1 at end of input
-            cur() -> int
+            inline cur() -> int
             {
                 switch (this.position >= this.length)
                 {
@@ -1361,7 +1364,7 @@ namespace IDEKA
                 };
             };
 
-            peek(int offset) -> int
+            inline peek(int offset) -> int
             {
                 int p = this.position + offset;
                 switch (p >= this.length)
@@ -2401,6 +2404,7 @@ namespace IDEKA
             match_op(int* ttype) -> int
             {
                 int avail = this.length - this.position;
+                switch (this.match(g"`*", 2)) { case (true) { *ttype = TokenType.BITSTAR; -> 2; } default {}; };
             switch (avail >= 6)
             {
                 case (true) {

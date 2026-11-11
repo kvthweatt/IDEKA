@@ -136,7 +136,7 @@ class Op(Enum):
     COMPILER_INPUT      = auto()   # compiler.io.console.input() -> byte*
     COMPILER_READFILE   = auto()   # compiler.io.readfile(path: byte*) -> byte*
     COMPILER_WRITEFILE      = auto()   # compiler.io.writefile(path: byte*, content: byte*, flags: byte*)
-    COMPILER_FVM_DUMP       = auto()   # compiler.idkvm.dump(path: byte*) - serialise current comptime to .fvm
+    COMPILER_FVM_DUMP       = auto()   # compiler.idkvm.dump(path: byte*) - serialise current comptime to .idkvm
     COMPILER_FVM_TRACE_BEGIN = auto()  # compiler.idkvm.trace.begin() - enable per-instruction VM tracing
     COMPILER_FVM_TRACE_END   = auto()  # compiler.idkvm.trace.end() - disable per-instruction VM tracing
     COMPILER_FVM_SETBP       = auto()  # compiler.idkvm.setbp() - comptime breakpoint: print stack and pause
@@ -838,15 +838,15 @@ class IDEKAVM:
         elif op == Op.EMIT_GLOBAL: self._op_emit_global(o[0])
         elif op == Op.EMIT_TYPE:   self._op_emit_type()
         elif op == Op.EMITIDEKA:             self._op_emitideka(o[0], o[1])
-        elif op == Op.COMPILER_FVM_DUMP:    self._op_compiler_fvm_dump()
-        elif op == Op.COMPILER_FVM_BINDUMP: self._op_compiler_fvm_bindump()
+        elif op == Op.COMPILER_FVM_DUMP:    self._op_compiler_idkvm_dump()
+        elif op == Op.COMPILER_FVM_BINDUMP: self._op_compiler_idkvm_bindump()
         elif op == Op.COMPILER_FVM_TRACE_BEGIN:
             self._trace_enabled = True
             self._trace_remaining = 2000
         elif op == Op.COMPILER_FVM_TRACE_END:
             self._trace_enabled = False
             self._trace_remaining = 0
-        elif op == Op.COMPILER_FVM_SETBP:    self._op_compiler_fvm_setbp()
+        elif op == Op.COMPILER_FVM_SETBP:    self._op_compiler_idkvm_setbp()
         elif op == Op.COMPILER_IMPORT_STDLIB: self._op_compiler_import_stdlib()
         elif op == Op.COMPILER_LOADLIB:       self._op_compiler_loadlib()
         elif op == Op.COMPILER_IMPORT_LOCAL:  self._op_compiler_import_local()
@@ -2120,7 +2120,7 @@ class IDEKAVM:
         except OSError as e:
             raise VMError(f'compiler.io.writefile: {e}')
 
-    def _op_compiler_fvm_setbp(self):
+    def _op_compiler_idkvm_setbp(self):
         """compiler.idkvm.setbp() -- comptime breakpoint.
         Prints the current stack and locals, then waits for a keypress."""
         import sys as _sys
@@ -2169,25 +2169,25 @@ class IDEKAVM:
             all_instrs.extend(_rebase_block(before_dump, len(all_instrs)))
         return all_instrs
 
-    def _op_compiler_fvm_dump(self):
+    def _op_compiler_idkvm_dump(self):
         path_val = self._pop()
         path     = self._read_vm_string(path_val)
         path     = path.replace('\\', '/')
         all_instrs = self._dump_collect()
-        text = serialise_fvm(all_instrs, self._comptime_log_locals, self._functions, self.struct_layouts)
+        text = serialise_idkvm(all_instrs, self._comptime_log_locals, self._functions, self.struct_layouts)
         try:
             with open(path, 'w', encoding='utf-8') as fh:
                 fh.write(text)
         except OSError as e:
             raise VMError(f'compiler.idkvm.dump: {e}')
 
-    def _op_compiler_fvm_bindump(self):
+    def _op_compiler_idkvm_bindump(self):
         path_val = self._pop()
         path     = self._read_vm_string(path_val)
         path     = path.replace('\\', '/')
         all_instrs = self._dump_collect()
         try:
-            data = serialise_fvm_bin(all_instrs, self._comptime_log_locals, self._functions, self.struct_layouts)
+            data = serialise_idkvm_bin(all_instrs, self._comptime_log_locals, self._functions, self.struct_layouts)
             with open(path, 'wb') as fh:
                 fh.write(data)
         except OSError as e:
@@ -3209,14 +3209,14 @@ def _str_to_ttag(type_name: str) -> TTag:
     return _map.get(type_name, TTag.PTR)
 
 # ---------------------------------------------------------------------------
-# .fvm serialiser
+# .idkvm serialiser
 # ---------------------------------------------------------------------------
 
 def _serialise_val(v) -> str:
     """Render a Val as a type:value token suitable for a PUSH operand.
 
     For PTR values carrying struct meta (stack_slot pointer), the meta is
-    encoded as a bracketed suffix so it can be round-tripped through .fvm:
+    encoded as a bracketed suffix so it can be round-tripped through .idkvm:
 
         ptr:29[struct_type=TB,stack_slot,a:0,b:1,c:2]
 
@@ -3271,7 +3271,7 @@ def _serialise_val(v) -> str:
 
 
 def _serialise_instr(instr) -> str:
-    """Render one Instr as a .fvm source line."""
+    """Render one Instr as a .idkvm source line."""
     op = instr.op
     o  = instr.operands
 
@@ -3403,15 +3403,15 @@ def _rebase_block(instrs, offset):
     return result
 
 
-def serialise_fvm(
+def serialise_idkvm(
     instructions:    'List[Instr]',
     local_count:     int,
     functions:       'Dict[str, List[Instr]]',
     struct_layouts:  'Dict[str, StructLayout]' = None,
 ) -> str:
     """
-    Serialise a set of VM instructions and function definitions to .fvm text.
-    This is the inverse of parse_fvm_source().
+    Serialise a set of VM instructions and function definitions to .idkvm text.
+    This is the inverse of parse_idkvm_source().
     """
     lines = ['# Generated by compiler.idkvm.dump', '']
 
@@ -3446,7 +3446,7 @@ def serialise_fvm(
 
 
 # ---------------------------------------------------------------------------
-# IDKB binary format (compiler.idkvm.bindump), loaded by idkvm in place of .fvm text
+# IDKB binary format (compiler.idkvm.bindump), loaded by idkvm in place of .idkvm text
 #
 #   "IDKB" u8 version (2) u8 flags (1: the payload is compressed) varint raw_length payload
 #
@@ -3501,7 +3501,7 @@ _BIN_TS = {Op.CAST, Op.BITCAST}
 
 _TTAGS = list(TTag)
 _OP_LIST = list(Op)
-# the tags a value operand can not be loaded back as (the type tag map of _parse_fvm_val)
+# the tags a value operand can not be loaded back as (the type tag map of _parse_idkvm_val)
 _BIN_OPAQUE = {TTag.DATA, TTag.STRUCT, TTag.ENUM, TTag.ARRAY, TTag.FFI_LIB, TTag.FFI_SYM, TTag.FILE}
 
 
@@ -3745,7 +3745,7 @@ def _lz_decompress(c: bytes, raw_len: int) -> bytes:
     return bytes(out)
 
 
-def serialise_fvm_bin(
+def serialise_idkvm_bin(
     instructions:    'List[Instr]',
     local_count:     int,
     functions:       'Dict[str, List[Instr]]',
@@ -3753,7 +3753,7 @@ def serialise_fvm_bin(
 ) -> bytes:
     """
     Serialise a set of VM instructions and function definitions to the IDKB
-    binary format. The same content as serialise_fvm, the same HALT rule.
+    binary format. The same content as serialise_idkvm, the same HALT rule.
     """
     layouts = list((struct_layouts or {}).values())
     _bin_strings.clear()
@@ -3925,10 +3925,10 @@ class _BinReader:
         return Instr(op, [src, binds])
 
 
-def parse_fvm_binary(data: bytes, lenient: bool = False, strings_out: Optional[list] = None):
+def parse_idkvm_binary(data: bytes, lenient: bool = False, strings_out: Optional[list] = None):
     """
     Parse an IDKB file into (instructions, local_count, functions, struct_layouts),
-    the same result parse_fvm_source gives for the text form.
+    the same result parse_idkvm_source gives for the text form.
     """
     if data[:4] != FVM_BIN_MAGIC:
         raise VMError('.idkb: bad magic')
@@ -3973,30 +3973,30 @@ def parse_fvm_binary(data: bytes, lenient: bool = False, strings_out: Optional[l
     return instructions, local_count, functions, struct_layouts
 
 
-def compile_fvm_text(source: str) -> bytes:
+def compile_idkvm_text(source: str) -> bytes:
     """
-    Compile .fvm text to an IDKB file, the inverse of decompile_fvm_bin. The same binary a
+    Compile .idkvm text to an IDKB file, the inverse of decompile_idkvm_bin. The same binary a
     compiler.idkvm.bindump of that point writes.
     """
-    instructions, local_count, functions, struct_layouts = parse_fvm_source(source)
-    return serialise_fvm_bin(instructions, local_count, functions, struct_layouts)
+    instructions, local_count, functions, struct_layouts = parse_idkvm_source(source)
+    return serialise_idkvm_bin(instructions, local_count, functions, struct_layouts)
 
 
-def decompile_fvm_bin(data: bytes) -> str:
+def decompile_idkvm_bin(data: bytes) -> str:
     """
-    Decompile an IDKB file back to .fvm text, the exact text serialise_fvm gives for the
+    Decompile an IDKB file back to .idkvm text, the exact text serialise_idkvm gives for the
     same content. Runtime value operands, which a load refuses, are shown as their text.
     """
-    instructions, local_count, functions, struct_layouts = parse_fvm_binary(data, True)
-    return serialise_fvm(instructions, local_count, functions, struct_layouts)
+    instructions, local_count, functions, struct_layouts = parse_idkvm_binary(data, True)
+    return serialise_idkvm(instructions, local_count, functions, struct_layouts)
 
 
 # ---------------------------------------------------------------------------
-# .fvm source file parser
+# .idkvm source file parser
 # ---------------------------------------------------------------------------
 
-def _fvm_unescape(s: str) -> bytes:
-    """Unescape a .fvm string literal body (between the quotes) to bytes."""
+def _idkvm_unescape(s: str) -> bytes:
+    """Unescape a .idkvm string literal body (between the quotes) to bytes."""
     result = bytearray()
     i = 0
     while i < len(s):
@@ -4015,7 +4015,7 @@ def _fvm_unescape(s: str) -> bytes:
     return bytes(result)
 
 
-def _parse_fvm_val(token: str) -> Val:
+def _parse_idkvm_val(token: str) -> Val:
     """
     Parse a typed literal token into a Val.
 
@@ -4028,11 +4028,11 @@ def _parse_fvm_val(token: str) -> Val:
     """
     # Bare quoted string -> BYTES
     if token.startswith('"') and token.endswith('"') and len(token) >= 2:
-        raw = _fvm_unescape(token[1:-1])
+        raw = _idkvm_unescape(token[1:-1])
         return Val(TTag.BYTES, raw)
 
     if ':' not in token:
-        raise VMError(f'.fvm: cannot parse value token {token!r} (expected type:value)')
+        raise VMError(f'.idkvm: cannot parse value token {token!r} (expected type:value)')
 
     type_str, _, rest = token.partition(':')
     type_str = type_str.strip().lower()
@@ -4072,7 +4072,7 @@ def _parse_fvm_val(token: str) -> Val:
                 fname, _, fval_str = rest.partition('=')
                 if 'fields' not in meta:
                     meta['fields'] = {}
-                meta['fields'][fname] = _parse_fvm_val(fval_str)
+                meta['fields'][fname] = _parse_idkvm_val(fval_str)
             elif item.startswith('e:') and '=' in item:
                 # Array element: e:idx=type:value
                 rest = item[2:]
@@ -4080,7 +4080,7 @@ def _parse_fvm_val(token: str) -> Val:
                 idx = int(idx_str)
                 if 'elements' not in meta:
                     meta['elements'] = {}
-                meta['elements'][idx] = _parse_fvm_val(eval_str)
+                meta['elements'][idx] = _parse_idkvm_val(eval_str)
             elif ':' in item:
                 fname, _, foffset = item.partition(':')
                 if 'field_bit_offsets' not in meta:
@@ -4089,7 +4089,7 @@ def _parse_fvm_val(token: str) -> Val:
 
     if type_str == 'bytes':
         if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
-            raw = _fvm_unescape(raw[1:-1])
+            raw = _idkvm_unescape(raw[1:-1])
         else:
             raw = raw.encode('utf-8')
         return Val(TTag.BYTES, raw)
@@ -4103,7 +4103,7 @@ def _parse_fvm_val(token: str) -> Val:
         'void':   TTag.VOID,
     }
     if type_str not in tag_map:
-        raise VMError(f'.fvm: unknown type tag {type_str!r} in {token!r}')
+        raise VMError(f'.idkvm: unknown type tag {type_str!r} in {token!r}')
 
     tag = tag_map[type_str]
     if tag in (TTag.FLOAT, TTag.DOUBLE):
@@ -4115,7 +4115,7 @@ def _parse_fvm_val(token: str) -> Val:
             return Val(tag, 1)
         elif raw.lower() in ('false', '0'):
             return Val(tag, 0)
-        raise VMError(f'.fvm: invalid bool value {raw!r}')
+        raise VMError(f'.idkvm: invalid bool value {raw!r}')
     else:
         # Convert elements sparse dict to ordered list
         if 'elements' in meta and isinstance(meta['elements'], dict):
@@ -4130,7 +4130,7 @@ def _parse_ttag(token: str) -> TTag:
     """Parse a bare type-tag name into a TTag."""
     _map = {t.value: t for t in TTag}
     if token not in _map:
-        raise VMError(f'.fvm: unknown TTag {token!r}')
+        raise VMError(f'.idkvm: unknown TTag {token!r}')
     return _map[token]
 
 
@@ -4140,9 +4140,9 @@ class FVMParseError(Exception):
         self.lineno = lineno
 
 
-def _fvm_split(line: str) -> list:
+def _idkvm_split(line: str) -> list:
     """
-    Split a .fvm source line into tokens, keeping quoted strings and
+    Split a .idkvm source line into tokens, keeping quoted strings and
     bracketed meta suffixes intact.
 
     Token forms:
@@ -4183,9 +4183,9 @@ def _fvm_split(line: str) -> list:
     return tokens
 
 
-def parse_fvm_source(source: str):
+def parse_idkvm_source(source: str):
     """
-    Parse a .fvm text file into (instructions, local_count, functions, struct_layouts).
+    Parse a .idkvm text file into (instructions, local_count, functions, struct_layouts).
     """
     instructions: List[Instr] = []
     functions:    Dict[str, List[Instr]] = {}
@@ -4209,7 +4209,7 @@ def parse_fvm_source(source: str):
         if not line:
             continue
 
-        tokens = _fvm_split(line)
+        tokens = _idkvm_split(line)
         if not tokens:
             continue
         directive = tokens[0].upper()
@@ -4305,7 +4305,7 @@ def parse_fvm_source(source: str):
 
 def _parse_operand_token(token: str):
     if (token.startswith('"') and token.endswith('"')) or ':' in token:
-        return _parse_fvm_val(token)
+        return _parse_idkvm_val(token)
     try:
         return int(token, 0)
     except ValueError:
@@ -4356,7 +4356,7 @@ def _parse_operands(op: Op, raw_tokens: List[str], lineno: int) -> list:
             if not fused.endswith(']'):
                 fused += ']'
             token = fused
-        return [_parse_fvm_val(token)]
+        return [_parse_idkvm_val(token)]
 
     if op == Op.CALL_PTR:
         if not raw_tokens:
@@ -4631,14 +4631,14 @@ def lint_IDEKA_source(text: str, depth: int):
     return lines, depth
 
 
-def strings_fvm(raw: bytes) -> bytes:
-    """The string table of an IDKB file, or of the IDKB form of .fvm text: one string per line in
+def strings_idkvm(raw: bytes) -> bytes:
+    """The string table of an IDKB file, or of the IDKB form of .idkvm text: one string per line in
     order of first use, with \\, newline, return, tab and other control bytes escaped."""
     strs: List[bytes] = []
     if raw[:4] == FVM_BIN_MAGIC:
-        parse_fvm_binary(raw, True, strs)
+        parse_idkvm_binary(raw, True, strs)
     else:
-        compile_fvm_text(raw.decode('utf-8'))
+        compile_idkvm_text(raw.decode('utf-8'))
         strs = list(_bin_strings)
     out = bytearray()
     for s in strs:
@@ -4659,14 +4659,14 @@ def strings_fvm(raw: bytes) -> bytes:
     return bytes(out)
 
 
-def inspect_fvm(path: str, raw: bytes) -> str:
-    """A summary of an IDKB or .fvm file: format, sizes, structs, functions and instruction counts."""
+def inspect_idkvm(path: str, raw: bytes) -> str:
+    """A summary of an IDKB or .idkvm file: format, sizes, structs, functions and instruction counts."""
     def pl(n, word):
         return f'{n} {word}' + ('' if n == 1 else 's')
 
     out = [f'file: {path}']
     if raw[:4] == FVM_BIN_MAGIC:
-        instructions, local_count, functions, layouts = parse_fvm_binary(raw, True)
+        instructions, local_count, functions, layouts = parse_idkvm_binary(raw, True)
         hdr = _BinReader(raw)
         hdr.p = 6
         raw_len = hdr.u32()
@@ -4678,7 +4678,7 @@ def inspect_fvm(path: str, raw: bytes) -> str:
         out.append(f'payload: {pl(raw_len, "byte")}')
         out.append(f'strings: {_BinReader(body).u32()}')
     else:
-        instructions, local_count, functions, layouts = parse_fvm_source(raw.decode('utf-8'))
+        instructions, local_count, functions, layouts = parse_idkvm_source(raw.decode('utf-8'))
         out.append('format: IDKVM text')
         out.append(f'size: {pl(len(raw), "byte")}')
     out.append(f'structs: {len(layouts)}')
@@ -4692,30 +4692,30 @@ def inspect_fvm(path: str, raw: bytes) -> str:
     return '\n'.join(out) + '\n'
 
 
-def _fvm_main():
+def _idkvm_main():
     import sys as _sys
 
     if len(_sys.argv) < 2:
         print('IDEKA VM')
-        print('Usage: python idkvm.py <program.fvm>')
+        print('Usage: python idkvm.py <program.idkvm>')
         print('       python idkvm.py <program.idkb>')
-        print('       python idkvm.py <program.fvm> -o <out.idkb>')
-        print('       python idkvm.py <program.idkb> -o <out.fvm>')
-        print('       python idkvm.py --compile <program.fvm> [out.idkb]')
-        print('       python idkvm.py --decompile <program.idkb> [out.fvm]')
-        print('       python idkvm.py --inspect <program.fvm|program.idkb>')
-        print('       python idkvm.py --strings <program.fvm|program.idkb>')
+        print('       python idkvm.py <program.idkvm> -o <out.idkb>')
+        print('       python idkvm.py <program.idkb> -o <out.idkvm>')
+        print('       python idkvm.py --compile <program.idkvm> [out.idkb]')
+        print('       python idkvm.py --decompile <program.idkb> [out.idkvm]')
+        print('       python idkvm.py --inspect <program.idkvm|program.idkb>')
+        print('       python idkvm.py --strings <program.idkvm|program.idkb>')
         print()
-        print('Runs a .fvm opcode file or an IDKB binary on the IDEKA Virtual Machine.')
+        print('Runs a .idkvm opcode file or an IDKB binary on the IDEKA Virtual Machine.')
         print('The file type is detected from its contents (IDKB binaries start with IDKB).')
         print()
-        print('Convert: -o writes the converted file instead of running: .fvm text becomes an IDKB')
-        print('binary and an IDKB binary becomes .fvm text, which parses back to the same binary.')
+        print('Convert: -o writes the converted file instead of running: .idkvm text becomes an IDKB')
+        print('binary and an IDKB binary becomes .idkvm text, which parses back to the same binary.')
         print()
-        print('Compile: --compile turns .fvm text into an IDKB binary, written to out.idkb, to the')
+        print('Compile: --compile turns .idkvm text into an IDKB binary, written to out.idkb, to the')
         print('-o file, or to program.idkb next to the input when no output is given.')
         print()
-        print('Decompile: --decompile prints an IDKB binary as .fvm text, or writes it to out.fvm.')
+        print('Decompile: --decompile prints an IDKB binary as .idkvm text, or writes it to out.idkvm.')
         print()
         print('Inspect: --inspect prints the format, sizes, structs, functions and instruction counts.')
         print()
@@ -4741,7 +4741,7 @@ def _fvm_main():
         elif a == '-o':
             i += 1
             if i >= len(args):
-                print('fvm: -o needs a file', file=_sys.stderr)
+                print('idkvm: -o needs a file', file=_sys.stderr)
                 _sys.exit(1)
             out = args[i]
             oflag = True
@@ -4753,9 +4753,9 @@ def _fvm_main():
     if mode == 'run' and oflag:
         mode = 'convert'
     if src is None:
-        what = {'compile': '--compile needs a .fvm file', 'decompile': '--decompile needs an IDKB file',
+        what = {'compile': '--compile needs a .idkvm file', 'decompile': '--decompile needs an IDKB file',
                 'inspect': '--inspect needs a file', 'strings': '--strings needs a file', 'convert': '-o needs an input file'}.get(mode, 'no input file')
-        print(f'fvm: {what}', file=_sys.stderr)
+        print(f'idkvm: {what}', file=_sys.stderr)
         _sys.exit(1)
 
     if mode != 'run':
@@ -4763,30 +4763,30 @@ def _fvm_main():
             with open(src, 'rb') as fh:
                 raw = fh.read()
         except OSError as e:
-            print(f'fvm: cannot open {src!r}: {e}', file=_sys.stderr)
+            print(f'idkvm: cannot open {src!r}: {e}', file=_sys.stderr)
             _sys.exit(1)
         binary = raw[:4] == FVM_BIN_MAGIC
         if mode == 'convert':
             mode = 'decompile' if binary else 'compile'
         try:
             if mode == 'inspect':
-                _sys.stdout.write(inspect_fvm(src, raw))
+                _sys.stdout.write(inspect_idkvm(src, raw))
                 _sys.exit(0)
             if mode == 'strings':
                 _sys.stdout.flush()
-                _sys.stdout.buffer.write(strings_fvm(raw))
+                _sys.stdout.buffer.write(strings_idkvm(raw))
                 _sys.stdout.flush()
                 _sys.exit(0)
             if mode == 'compile':
-                data = compile_fvm_text(raw.decode('utf-8'))
+                data = compile_idkvm_text(raw.decode('utf-8'))
                 if out is None:
                     out = os.path.splitext(src)[0] + '.idkb'
                 wmode, payload = 'wb', data
             else:
-                text = decompile_fvm_bin(raw)
+                text = decompile_idkvm_bin(raw)
                 wmode, payload = 'w', text
         except (FVMParseError, VMError) as e:
-            print(f'fvm: parse error in {src}: {e}', file=_sys.stderr)
+            print(f'idkvm: parse error in {src}: {e}', file=_sys.stderr)
             _sys.exit(1)
         if out is None:
             _sys.stdout.write(payload)
@@ -4795,7 +4795,7 @@ def _fvm_main():
             with open(out, wmode, **({} if wmode == 'wb' else {'encoding': 'utf-8'})) as fh:
                 fh.write(payload)
         except OSError as e:
-            print(f'fvm: cannot write {out!r}: {e}', file=_sys.stderr)
+            print(f'idkvm: cannot write {out!r}: {e}', file=_sys.stderr)
             _sys.exit(1)
         _sys.exit(0)
 
@@ -4804,17 +4804,17 @@ def _fvm_main():
         with open(path, 'rb') as fh:
             raw = fh.read()
     except OSError as e:
-        print(f'fvm: cannot open {path!r}: {e}', file=_sys.stderr)
+        print(f'idkvm: cannot open {path!r}: {e}', file=_sys.stderr)
         _sys.exit(1)
 
-    # the IDKB magic selects the binary form, anything else is .fvm text
+    # the IDKB magic selects the binary form, anything else is .idkvm text
     try:
         if raw[:4] == FVM_BIN_MAGIC:
-            instructions, local_count, functions, struct_layouts = parse_fvm_binary(raw)
+            instructions, local_count, functions, struct_layouts = parse_idkvm_binary(raw)
         else:
-            instructions, local_count, functions, struct_layouts = parse_fvm_source(raw.decode('utf-8'))
+            instructions, local_count, functions, struct_layouts = parse_idkvm_source(raw.decode('utf-8'))
     except (FVMParseError, VMError) as e:
-        print(f'fvm: parse error in {path}: {e}', file=_sys.stderr)
+        print(f'idkvm: parse error in {path}: {e}', file=_sys.stderr)
         _sys.exit(1)
 
     vm = IDEKAVM(struct_layouts=struct_layouts)
@@ -4834,7 +4834,7 @@ def _fvm_main():
     try:
         result = vm.execute(instructions, local_count)
     except VMError as e:
-        print(f'fvm: runtime error: {e}', file=_sys.stderr)
+        print(f'idkvm: runtime error: {e}', file=_sys.stderr)
         _sys.exit(1)
 
     lint_depth = 0
@@ -4854,5 +4854,5 @@ def _fvm_main():
 
 if __name__ == '__main__':
     import sys as _sys
-    _sys.modules.setdefault('fvm', _sys.modules['__main__'])
-    _fvm_main()
+    _sys.modules.setdefault('idkvm', _sys.modules['__main__'])
+    _idkvm_main()

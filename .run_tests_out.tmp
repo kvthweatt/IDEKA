@@ -1,0 +1,33 @@
+IDEKA Compiler Pearled Pinecone v2.1.0
+Release date: 20261028 // YYYYMMDD
+
+=== IDEKA Compiler Debug Log ===
+Working directory: C:\Users\kvthw\IDEKA
+Arguments: idkc tests/64bit_pinpoint.idk
+========================================
+START DEBUG
+Target platform: Windows
+Module triple: x86_64-pc-windows-msvc
+END DEBUG
+[INFO] ==================================================
+[INFO]   Preprocessing IDEKA file: tests/64bit_pinpoint.idk
+[INFO] ==================================================
+[INFO] [lexer] ► Lexical analysis
+[INFO] [parser] ► Parsing
+[INFO] [parser] ► AST generated.
+[INFO] [dce] ► Dead code elimination
+[DCE] Eliminated 228 unreferenced namespace declaration(s).
+[INFO] [codegen] ► x86_64 assembly generation
+[AST] Begining codegen for IDEKA program ...
+[AST] Total statements in AST: 101
+[AST] Namespace definitions: 11
+[AST] Pass 1: Processing using statements...
+[AST] Pass 2: Processing not using statements...
+[AST] Pre-pass: Registering all object types and extern blocks...
+[AST] Pass 3: Processing all other statements...
+[AST] Pass 4: Re-emitting pending bodies...
+[INFO] [compiler] ► Compiling to object file (Windows)
+[INFO] [assembler] ► Assembling with iasm
+[INFO] [linker] ► Linking executable: build\64bit_pinpoint\64bit_pinpoint.exe
+[INFO] ✓ Compilation completed: build\64bit_pinpoint\64bit_pinpoint.exe
+✓ Compilation successful: build\64bit_pinpoint\64bit_pinpoint.exe (executable)

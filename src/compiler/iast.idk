@@ -53,6 +53,7 @@
 #def NF_NO_OVERRIDE 262144;
 #def NF_TEMPLATE 524288;
 #def NF_INSTANCE 1048576;    // instantiated template function appended after the program
+#def NF_CSTRUCT 16777216;     // cstruct: C ABI layout (natural alignment, tail padding)
 #def NF_ASYNC 2097152;       // async function (definition or prototype)
 #def NF_NAKED 8388608;        // } # naked; no prologue or epilogue, body is inline asm only
 #def NF_BIT_ITER 4194304;     // for (`x in value): bit iteration
@@ -66,6 +67,7 @@
 #def TS_POINTER 64;
 #def TS_CONST_POINTER 128;
 #def TS_NO_FUNCTIONS 256;
+#def TS_BITPTR 512;
 
 namespace IDEKA
 {
@@ -222,6 +224,7 @@ namespace IDEKA
             BIT_SLICE,    // BitSlice: a = value, b = start, c = end
             BIT_INDEX_ACCESS,    // BitIndexAccess: a = value, b = index
             POINTER_DEREF,    // PointerDeref: a = pointer
+            BIT_POINTER_DEREF,    // `*p: a = bit pointer
             ADDRESS_OF,    // AddressOf: a = expression
             STRINGIFY,    // Stringify: text = name, text2 = member
             CODIFY,    // Codify: a = operand
@@ -710,6 +713,7 @@ namespace IDEKA
                 case (NodeKind.BIT_SLICE) { return g"BIT_SLICE\0"; }
                 case (NodeKind.BIT_INDEX_ACCESS) { return g"BIT_INDEX_ACCESS\0"; }
                 case (NodeKind.POINTER_DEREF) { return g"POINTER_DEREF\0"; }
+                case (NodeKind.BIT_POINTER_DEREF) { return g"BIT_POINTER_DEREF\0"; }
                 case (NodeKind.ADDRESS_OF) { return g"ADDRESS_OF\0"; }
                 case (NodeKind.STRINGIFY) { return g"STRINGIFY\0"; }
                 case (NodeKind.CODIFY) { return g"CODIFY\0"; }

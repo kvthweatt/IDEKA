@@ -20,8 +20,8 @@
 //
 // Bootstrap method: every VM feature that is not ported yet is a stub that is
 // counted by name in vm.stubs and makes execution fail with a message. After a
-// run, vm.stubs.report(...) shows what is missing. Inline ASM is never ported
-// (it needs an own backend, the way Keystone is used by the Python VM).
+// run, vm.stubs.report(...) shows what is missing. Inline ASM is assembled with iasm
+// and run from executable memory, the way Keystone is used by the Python VM.
 
 #ifndef IDEKA_STANDARD
 #import <standard.idk>;
@@ -34,6 +34,11 @@
 #ifndef IDEKA_STANDARD_WATCHDOG
 #import <watchdog.idk>;
 #endif;
+
+#ifndef IDEKA_IASM_CORE
+#import "src/compiler/iasm_core.idk";
+#endif;
+using IDEKA::iasm;
 
 #ifndef IDEKA_IDKVM
 #def IDEKA_IDKVM 1;
@@ -160,7 +165,8 @@
 #def IDKVM_EMITIDEKA 117;
 #def IDKVM_INLINE_ASM 118;
 #def IDKVM_COMPILER_IDKVM_BINDUMP 119;
-#def IDKVM_OP_COUNT 120;
+#def IDKVM_FUNC_ALIAS 120;
+#def IDKVM_OP_COUNT 121;
 
 // ===== IDKB BINARY FORMAT: operand shapes (see serialise_idkvm_bin in idkvm.py) =====
 
@@ -381,6 +387,7 @@ namespace IDEKA
                 case (117) { -> g"EMITIDEKA\0"; }
                 case (118) { -> g"INLINE_ASM\0"; }
                 case (119) { -> g"COMPILER_IDKVM_BINDUMP\0"; }
+                case (120) { -> g"FUNC_ALIAS\0"; }
                 default { -> g"?\0"; };
             };
         };
@@ -394,7 +401,7 @@ namespace IDEKA
                 case (true) { -> IDKVM_BS_I; }
                 default {};
             };
-            switch (op == IDKVM_SIZEOF | op == IDKVM_ALIGNOF | op == IDKVM_ENDIANOF | op == IDKVM_STRUCT_NEW | op == IDKVM_STRUCT_LOAD | op == IDKVM_STRUCT_STORE | op == IDKVM_ENUM_NEW | op == IDKVM_GLOBAL_GET | op == IDKVM_GLOBAL_SET | op == IDKVM_FFI_LOAD | op == IDKVM_FFI_SYM)
+            switch (op == IDKVM_SIZEOF | op == IDKVM_ALIGNOF | op == IDKVM_ENDIANOF | op == IDKVM_STRUCT_NEW | op == IDKVM_STRUCT_LOAD | op == IDKVM_STRUCT_STORE | op == IDKVM_ENUM_NEW | op == IDKVM_GLOBAL_GET | op == IDKVM_GLOBAL_SET | op == IDKVM_FFI_LOAD | op == IDKVM_FFI_SYM | op == IDKVM_FUNC_ALIAS)
             {
                 case (true) { -> IDKVM_BS_S; }
                 default {};
@@ -1317,6 +1324,142 @@ namespace IDEKA
             };
             -> sym;
 #endif;
+        };
+
+        // ===== INLINE ASM at comptime =====
+
+        // Register names of the asm operands: 14 registers by 4 widths (8, 4, 2 and 1 bytes), cells of 5
+        // characters. Register index: 0 rax, 1 rcx, 2 rdx, 3 rsi, 4 rdi, 5 to 8 r8 to r11, 9 rbx, 10 to 13 r12 to r15
+        idkvm_atab() -> byte* -> g"rax  eax  ax   al   rcx  ecx  cx   cl   rdx  edx  dx   dl   rsi  esi  si   sil  rdi  edi  di   dil  r8   r8d  r8w  r8b  r9   r9d  r9w  r9b  r10  r10d r10w r10b r11  r11d r11w r11b rbx  ebx  bx   bl   r12  r12d r12w r12b r13  r13d r13w r13b r14  r14d r14w r14b r15  r15d r15w r15b \0";
+
+        // Appends the name of register r at sz bytes, with its % prefix
+        idkvm_aput(FvmBuf* o, int r, int sz) -> void
+        {
+            byte* t = idkvm_atab();
+            int k = 0;
+            int p, e;
+            if (sz == 4) { k = 1; };
+            if (sz == 2) { k = 2; };
+            if (sz == 1) { k = 3; };
+            p = (r * 4 + k) * 5;
+            e = p + 5;
+            o.put(37);
+            while (p < e & t[p] != ' ') { o.put((int)t[p]); p++; };
+            ->;
+        };
+
+        // Register index of the name nm[0, n) such as rax, eax, ax or al; -1 when there is none
+        idkvm_areg(byte* nm, int n) -> int
+        {
+            byte* t = idkvm_atab();
+            int c, p, i;
+            bool same;
+            while (c < 56)
+            {
+                p = c * 5;
+                same = true;
+                i = 0;
+                while (i < n)
+                {
+                    if (t[p + i] != nm[i]) { same = false; break; };
+                    i++;
+                };
+                if (same & (n >= 5 | t[p + n] == ' ')) { -> c / 4; };
+                c++;
+            };
+            -> -1;
+        };
+
+        // First register not in the mask used, the caller saved ones first
+        idkvm_apick(int used) -> int
+        {
+            int r;
+            while (r < 14)
+            {
+                if ((used `& (1 << r)) == 0) { -> r; };
+                r++;
+            };
+            -> 13;
+        };
+
+        // The address of a function an asm body calls: the loaded libraries of the host, kernel32 first on Windows
+        idkvm_asym(byte* name) -> byte*
+        {
+            byte* sym = (byte*)0;
+#ifdef __WINDOWS__
+            void* hl = LoadLibraryA(g"kernel32.dll\0");
+            if (hl != (void*)0) { sym = GetProcAddress(hl, name); };
+#endif;
+            if (sym == (byte*)0) { sym = idkvm_find_sym(name); };
+            -> sym;
+        };
+
+        // Executable memory of n bytes; null when the host refuses it
+        idkvm_xalloc(int n) -> byte*
+        {
+            byte* sym;
+            i64 r;
+#ifdef __WINDOWS__
+            void* hl = LoadLibraryA(g"kernel32.dll\0");
+            if (hl == (void*)0) { -> (byte*)0; };
+            sym = GetProcAddress(hl, g"VirtualAlloc\0");
+            if (sym == (byte*)0) { -> (byte*)0; };
+            def{}* va(i64, i64, i64, i64) -> i64 = sym;
+            r = va((i64)0, (i64)n, (i64)12288, (i64)64);
+            -> idkvm_i2p(r);
+#endif;
+#ifdef __LINUX__
+            sym = idkvm_find_sym(g"mmap\0");
+            if (sym == (byte*)0) { -> (byte*)0; };
+            def{}* mm(i64, i64, i64, i64, i64, i64) -> i64 = sym;
+            r = mm((i64)0, (i64)n, (i64)7, (i64)34, (i64)0 - (i64)1, (i64)0);
+            if (r == (i64)0 - (i64)1) { -> (byte*)0; };
+            -> idkvm_i2p(r);
+#endif;
+        };
+
+        idkvm_xfree(byte* p, int n) -> void
+        {
+            byte* sym;
+            i64 r;
+#ifdef __WINDOWS__
+            void* hl = LoadLibraryA(g"kernel32.dll\0");
+            if (hl == (void*)0) { ->; };
+            sym = GetProcAddress(hl, g"VirtualFree\0");
+            if (sym == (byte*)0) { ->; };
+            def{}* vf(i64, i64, i64) -> i64 = sym;
+            r = vf(idkvm_p2i(p), (i64)0, (i64)32768);
+#endif;
+#ifdef __LINUX__
+            sym = idkvm_find_sym(g"munmap\0");
+            if (sym == (byte*)0) { ->; };
+            def{}* um(i64, i64) -> i64 = sym;
+            r = um(idkvm_p2i(p), (i64)n);
+#endif;
+            ->;
+        };
+
+        // True when the asm body has a label named tok[0, n): the name, then a colon, at the start of a word
+        idkvm_ahas_label(byte* body, byte* tok, int n) -> bool
+        {
+            int i, k;
+            bool same;
+            while (body[i] != 0)
+            {
+                if (i == 0 | body[i - 1] == ' ' | body[i - 1] == 9 | body[i - 1] == 10)
+                {
+                    same = true;
+                    k = 0;
+                    while (k < n)
+                    {
+                        if (body[i + k] != tok[k]) { same = false; break; };
+                        k++;
+                    };
+                    if (same & body[i + n] == ':') { -> true; };
+                };
+                i++;
+            };
+            -> false;
         };
 
         // pow of the C math library, the way idkvm.py's a ** b reaches it; ok is false when
@@ -3394,6 +3537,8 @@ namespace IDEKA
 
         object IDEKAVM
         {
+            i64* epl;               // element address buffers of the call in flight: native, array, index, count
+            int epn;
             FvmHeap vheap;
             FvmCode code;
             FvmCode mp;             // main block while a .ivm file is parsed
@@ -3853,6 +3998,15 @@ namespace IDEKA
             };
 
             // Text of a string-like value (BYTES or a PTR into the VM heap), null otherwise
+            // An ARRAY value whose elements are bytes or chars reads as text
+            arr_is_text(int tag, i64 d) -> bool
+            {
+                i64* ab;
+                switch (tag != IDKVM_T_ARRAY | d == (i64)0) { case (true) { -> false; } default {}; };
+                ab = (i64*)idkvm_i2p(d);
+                -> ab[1] == (i64)IDKVM_T_BYTE | ab[1] == (i64)IDKVM_T_CHAR;
+            };
+
             str_of(int tag, i64 d) -> byte*
             {
                 int k;
@@ -3860,6 +4014,22 @@ namespace IDEKA
                 switch (tag == IDKVM_T_BYTES)
                 {
                     case (true) { -> idkvm_i2p(d); }
+                    default {};
+                };
+                switch (this.arr_is_text(tag, d))
+                {
+                    case (true) {
+                        // array of bytes or chars: its text up to the first NUL
+                        i64* ab = (i64*)idkvm_i2p(d);
+                        this.osb.clear();
+                        k = 0;
+                        while (k < (int)ab[0])
+                        {
+                            b = ab[3 + k * 3];
+                            switch (b == (i64)0) { case (true) { k = (int)ab[0]; } default { this.osb.put((int)(b `& (i64)255)); k++; }; };
+                        };
+                        -> this.osb.mem;
+                    }
                     default {};
                 };
                 switch (tag == IDKVM_T_PTR & this.ptr_is_os(d))
@@ -4276,6 +4446,24 @@ namespace IDEKA
                 -> this.run();
             };
 
+            // Back to an idle machine after a failed run, for a host that keeps the VM and runs more
+            // code: the frames, the stack, the handlers, a pending request and the error are dropped.
+            // Functions, globals and the heap stay.
+            recover() -> void
+            {
+                this.failed = false;
+                this.throwing = false;
+                this.nframes = 0;
+                this.lc_top = 0;
+                this.nh = 0;
+                this.sp = 0;
+                this.host_kind = 0;
+                switch (this.host_arg != (byte*)0) { case (true) { ffree(this.host_arg); } default {}; };
+                this.host_arg = (byte*)0;
+                this.errb.clear();
+                ->;
+            };
+
             // Continues the run after the host served a request
             resume() -> bool
             {
@@ -4400,7 +4588,7 @@ namespace IDEKA
                                 default {};
                             };
                             this.dispatch(op, pc, fi);
-                            switch (this.throwing & !this.failed)
+                                            switch (this.throwing & !this.failed)
                             {
                                 case (true) { this.unwind(); }
                                 default {};
@@ -4472,6 +4660,15 @@ namespace IDEKA
                 {
                     case (true) {
                         this.fbinop(op, at, am, ad, bt, bm, bd);
+                        ->;
+                    }
+                    default {};
+                };
+                // a pointer into a stack slot moves along the elements of the array in it
+                switch (at == IDKVM_T_PTR & am >= (i64)1125899906842624 & (op == IDKVM_ADD | op == IDKVM_SUB) & (bt == IDKVM_T_INT | bt == IDKVM_T_UINT | bt == IDKVM_T_LONG | bt == IDKVM_T_ULONG))
+                {
+                    case (true) {
+                        switch (op == IDKVM_ADD) { case (true) { this.push(IDKVM_T_PTR, ad, am + bd); } default { this.push(IDKVM_T_PTR, ad, am - bd); }; };
                         ->;
                     }
                     default {};
@@ -5125,6 +5322,37 @@ namespace IDEKA
             // _sig_score of _call: the argument tags against the tokens of an overload signature.
             // A BYTES argument likes an 'arr' token, a PTR a 'ptr' token, any other argument a
             // plain one.
+            // true when the type name sig[ts, te) is a name of the value tag: the overload takes exactly that type
+            sig_exact(int tag, byte* sig, int ts, int te) -> bool
+            {
+                int n = te - ts;
+                byte* p = sig + ts;
+                switch (tag)
+                {
+                    case (IDKVM_T_INT) { -> this.sig_is(p, n, g"int\0") | this.sig_is(p, n, g"i32\0") | this.sig_is(p, n, g"sint\0"); }
+                    case (IDKVM_T_UINT) { -> this.sig_is(p, n, g"uint\0") | this.sig_is(p, n, g"u32\0"); }
+                    case (IDKVM_T_LONG) { -> this.sig_is(p, n, g"long\0") | this.sig_is(p, n, g"i64\0") | this.sig_is(p, n, g"slong\0"); }
+                    case (IDKVM_T_ULONG) { -> this.sig_is(p, n, g"ulong\0") | this.sig_is(p, n, g"u64\0"); }
+                    case (IDKVM_T_FLOAT) { -> this.sig_is(p, n, g"float\0"); }
+                    case (IDKVM_T_DOUBLE) { -> this.sig_is(p, n, g"double\0"); }
+                    case (IDKVM_T_BOOL) { -> this.sig_is(p, n, g"bool\0"); }
+                    case (IDKVM_T_BYTE) { -> this.sig_is(p, n, g"byte\0") | this.sig_is(p, n, g"u8\0"); }
+                    case (IDKVM_T_CHAR) { -> this.sig_is(p, n, g"char\0"); }
+                    default { -> false; };
+                };
+            };
+
+            sig_is(byte* p, int n, byte* name) -> bool
+            {
+                int i;
+                while (i < n)
+                {
+                    if (name[i] == 0 | name[i] != p[i]) { -> false; };
+                    i++;
+                };
+                -> name[n] == 0;
+            };
+
             sig_score(byte* sig, int argc) -> int
             {
                 int score, a, i, ts, te, tag;
@@ -5146,7 +5374,7 @@ namespace IDEKA
                         case (true) { score = score + 2; }
                         default
                         {
-                            switch (tag == IDKVM_T_PTR & te - ts >= 3 & sig[te - 3] == 'p' & sig[te - 2] == 't' & sig[te - 1] == 'r')
+                            switch ((tag == IDKVM_T_PTR | tag == IDKVM_T_ARRAY) & arr)
                             {
                                 case (true) { score = score + 2; }
                                 default
@@ -5156,6 +5384,7 @@ namespace IDEKA
                             };
                         };
                     };
+                    switch (this.sig_exact(tag, sig, ts, te)) { case (true) { score = score + 4; } default {}; };
                     switch (sig[i] == '_') { case (true) { i++; } default {}; };
                     a++;
                 };
@@ -5169,6 +5398,500 @@ namespace IDEKA
                 i32* fp = (i32*)@f;
                 i64 b = (i64)(u32)(*fp);
                 -> idkvm_bits_dbl(b);
+            };
+
+            // INLINE_ASM: the body is assembled with iasm and run from executable memory. The operands are bound
+            // to registers the way the SSA code generator binds them (issa s_inline): outputs first, then the
+            // inputs, a clobbered register is never picked. desc lists the operands, comma separated, as
+            // "<bytes>:<constraint>" (an output starts with '=') and the clobbers as "~{reg}". The nin input values
+            // are on the stack, the nout outputs are pushed in order.
+            op_inline_asm(byte* body, int nin, int nout, byte* desc) -> void
+            {
+                int[40] opreg;
+                int[40] opkind;
+                int[40] opsz;
+                int[16] itag;
+                i64[16] ival;
+                i64[16] imeta;
+                int i, j, k, r, c, cb, ce2, cs, nop, no, ni, used, sz, frame, ls, le, ts, te, pl, tk0, tk1, modc, xl, xn;
+                bool first, brace, lab;
+                byte* cp;
+                byte* code;
+                byte* sym;
+                byte* xmem;
+                byte* res;
+                byte* nm;
+                i64 ret, v;
+                Asm* a;
+                FvmBuf t;
+                FvmBuf ln;
+                if (body == (byte*)0 | desc == (byte*)0)
+                {
+                    this.fail(g"INLINE_ASM without a body\0");
+                    ->;
+                };
+                if (nin > 16 | nout > 16)
+                {
+                    this.fail(g"INLINE_ASM: too many operands\0");
+                    ->;
+                };
+                k = nin - 1;
+                while (k >= 0)
+                {
+                    this.pop_val();
+                    itag[k] = this.pt;
+                    ival[k] = this.pd;
+                    imeta[k] = this.pm;
+                    k--;
+                };
+                if (this.failed) { ->; };
+                // the operand list
+                i = 0;
+                while (desc[i] != 0)
+                {
+                    cb = i;
+                    while (desc[i] != 0 & desc[i] != ',') { i++; };
+                    ce2 = i;
+                    if (desc[cb] == '~')
+                    {
+                        j = cb + 2;
+                        k = j;
+                        while (k < ce2 & desc[k] != '}') { k++; };
+                        r = idkvm_areg(desc + j, k - j);
+                        if (r >= 0) { used = used `| (1 << r); };
+                    }
+                    else
+                    {
+                        sz = 0;
+                        j = cb;
+                        while (j < ce2 & desc[j] != ':') { sz = sz * 10 + ((int)desc[j] - 48); j++; };
+                        j++;
+                        cs = j;
+                        if (nop >= 40)
+                        {
+                            this.fail(g"INLINE_ASM: too many operands\0");
+                            ->;
+                        };
+                        opsz[nop] = sz;
+                        opreg[nop] = -1;
+                        if (desc[cs] == '=')
+                        {
+                            opkind[nop] = 1;
+                            j = cs + 1;
+                            while (j < ce2)
+                            {
+                                if (desc[j] == '{')
+                                {
+                                    k = j + 1;
+                                    while (k < ce2 & desc[k] != '}') { k++; };
+                                    r = idkvm_areg(desc + j + 1, k - j - 1);
+                                    if (r < 0)
+                                    {
+                                        this.fail_parts(g"INLINE_ASM: register not supported in an output constraint: \0", desc + cs, g"\0", g"\0");
+                                        ->;
+                                    };
+                                    opreg[nop] = r;
+                                    used = used `| (1 << r);
+                                    j = k;
+                                };
+                                if (desc[j] == '&') { opkind[nop] = 3; };
+                                if (desc[j] == 'm' | desc[j] == 'x')
+                                {
+                                    this.fail(g"INLINE_ASM: memory and vector outputs are not supported at comptime\0");
+                                    ->;
+                                };
+                                j++;
+                            };
+                            nop++;
+                            no++;
+                        }
+                        else
+                        {
+                            opkind[nop] = 2;
+                            if (desc[cs] == '{')
+                            {
+                                k = cs + 1;
+                                while (k < ce2 & desc[k] != '}') { k++; };
+                                r = idkvm_areg(desc + cs + 1, k - cs - 1);
+                                if (r < 0)
+                                {
+                                    this.fail_parts(g"INLINE_ASM: register not supported in an input constraint: \0", desc + cs, g"\0", g"\0");
+                                    ->;
+                                };
+                                opreg[nop] = r;
+                                used = used `| (1 << r);
+                            };
+                            if (desc[cs] >= '0' & desc[cs] <= '9')
+                            {
+                                opkind[nop] = 4;
+                                opreg[nop] = (int)desc[cs] - 48;
+                            };
+                            if (desc[cs] == 'm' | desc[cs] == 'i' | desc[cs] == 'n' | desc[cs] == 'x')
+                            {
+                                this.fail(g"INLINE_ASM: memory, constant and vector inputs are not supported at comptime\0");
+                                ->;
+                            };
+                            nop++;
+                            ni++;
+                        };
+                    };
+                    if (desc[i] == ',') { i++; };
+                };
+                if (no != nout | ni != nin)
+                {
+                    this.fail(g"INLINE_ASM: operand count does not match the constraints\0");
+                    ->;
+                };
+                // registers of the inputs, of the tied ones, of the outputs
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 2 & opreg[i] < 0)
+                    {
+                        r = idkvm_apick(used);
+                        opreg[i] = r;
+                        used = used `| (1 << r);
+                    };
+                    i++;
+                };
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 4)
+                    {
+                        k = opreg[i];
+                        if (k >= no)
+                        {
+                            this.fail(g"INLINE_ASM: a tied operand names no output\0");
+                            ->;
+                        };
+                        if (opreg[k] < 0)
+                        {
+                            r = idkvm_apick(used);
+                            opreg[k] = r;
+                            used = used `| (1 << r);
+                        };
+                        opreg[i] = opreg[k];
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < no)
+                {
+                    if (opreg[i] < 0)
+                    {
+                        r = -1;
+                        if (opkind[i] != 3)
+                        {
+                            j = no;
+                            while (j < nop & r < 0)
+                            {
+                                if (opkind[j] == 2 & opreg[j] >= 0)
+                                {
+                                    // an input register no tied input points at is shared with the output
+                                    lab = false;
+                                    k = no;
+                                    while (k < nop)
+                                    {
+                                        if (opkind[k] == 4 & opreg[k] == opreg[j]) { lab = true; };
+                                        k++;
+                                    };
+                                    if (!lab)
+                                    {
+                                        r = opreg[j];
+                                        opkind[j] = 6;
+                                    };
+                                };
+                                j++;
+                            };
+                        };
+                        if (r < 0)
+                        {
+                            r = idkvm_apick(used);
+                            used = used `| (1 << r);
+                        };
+                        opreg[i] = r;
+                    };
+                    i++;
+                };
+                // the value of each input as the register holds it
+                i = 0;
+                while (i < nin)
+                {
+                    k = itag[i];
+                    v = ival[i];
+                    if (k == IDKVM_T_ARRAY) { k = IDKVM_T_PTR; imeta[i] = (i64)1099511627776; };
+                    if (k == IDKVM_T_INT) { v = (i64)(int)v; }
+                    else
+                    {
+                        if (k == IDKVM_T_UINT) { v = v `& (i64)4294967295; }
+                        else
+                        {
+                            if (k == IDKVM_T_BOOL) { if (v != (i64)0) { v = 1; } else { v = 0; }; }
+                            else
+                            {
+                                if (k == IDKVM_T_BYTE | k == IDKVM_T_CHAR) { v = v `& (i64)255; }
+                                else
+                                {
+                                    if (k == IDKVM_T_PTR) { v = this.host_addr(v, imeta[i]); };
+                                    if (k == IDKVM_T_BYTES)
+                                    {
+                                        cp = idkvm_alloc((int)imeta[i] + 1);
+                                        if (cp == (byte*)0)
+                                        {
+                                            this.fail(g"allocation failed\0");
+                                            ->;
+                                        };
+                                        idkvm_copy(cp, idkvm_i2p(v), (int)imeta[i]);
+                                        this.pin_keep(cp);
+                                        v = idkvm_p2i(cp);
+                                    }
+                                    else
+                                    {
+                                        if (!(k == IDKVM_T_LONG | k == IDKVM_T_ULONG | k == IDKVM_T_PTR))
+                                        {
+                                            this.fail_parts(g"INLINE_ASM: an operand of type TTag.\0", idkvm_ttag_name(k), g" cannot be passed in a register\0", g"\0");
+                                            ->;
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                    ival[i] = v;
+                    if (opsz[no + i] == 0)
+                    {
+                        sz = 8;
+                        if (k == IDKVM_T_INT | k == IDKVM_T_UINT) { sz = 4; };
+                        if (k == IDKVM_T_BOOL | k == IDKVM_T_BYTE | k == IDKVM_T_CHAR) { sz = 1; };
+                        opsz[no + i] = sz;
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < no)
+                {
+                    if (opsz[i] == 0) { opsz[i] = 8; };
+                    i++;
+                };
+                // the code: frame, saved registers, inputs, the body, outputs, the way out
+                res = idkvm_alloc(8 * (nout + 1));
+                if (res == (byte*)0)
+                {
+                    this.fail(g"allocation failed\0");
+                    ->;
+                };
+                frame = 64 + 8 * no;
+                frame = ((frame + 15) / 16) * 16;
+                t.__init();
+                ln.__init();
+                t.put_str(g"pushq %rbp\nmovq %rsp, %rbp\nsubq $\0");
+                t.put_int(frame);
+                t.put_str(g", %rsp\nmovq %rbx, -8(%rbp)\nmovq %rsi, -16(%rbp)\nmovq %rdi, -24(%rbp)\nmovq %r12, -32(%rbp)\nmovq %r13, -40(%rbp)\nmovq %r14, -48(%rbp)\nmovq %r15, -56(%rbp)\n\0");
+                i = no;
+                while (i < nop)
+                {
+                    if (opkind[i] == 2 | opkind[i] == 4 | opkind[i] == 6)
+                    {
+                        t.put_str(g"movabsq $\0");
+                        t.put_i64(ival[i - no]);
+                        t.put_str(g", \0");
+                        idkvm_aput(@t, opreg[i], 8);
+                        t.put(10);
+                    };
+                    i++;
+                };
+                // body lines: operands substituted, a call outside the body goes through the address of its target
+                i = 0;
+                first = true;
+                while (first)
+                {
+                    ls = i;
+                    while (body[i] != 0 & body[i] != 10) { i++; };
+                    le = i;
+                    ts = ls;
+                    te = le;
+                    while (ts < te & (body[ts] == ' ' | body[ts] == 9 | body[ts] == 13)) { ts++; };
+                    while (te > ts & (body[te - 1] == ' ' | body[te - 1] == 9 | body[te - 1] == 13)) { te--; };
+                    if (te > ts & !(body[ts] == '/' & body[ts + 1] == '/'))
+                    {
+                        ln.clear();
+                        j = ts;
+                        while (j < te)
+                        {
+                            c = (int)body[j];
+                            if (c == '$')
+                            {
+                                if (body[j + 1] == '$')
+                                {
+                                    ln.put(36);
+                                    j = j + 2;
+                                }
+                                else
+                                {
+                                    j++;
+                                    brace = false;
+                                    modc = 0;
+                                    if (body[j] == '{') { brace = true; j++; };
+                                    k = 0;
+                                    while (body[j] >= '0' & body[j] <= '9')
+                                    {
+                                        k = k * 10 + ((int)body[j] - 48);
+                                        j++;
+                                    };
+                                    if (brace)
+                                    {
+                                        if (body[j] == ':') { j++; modc = (int)body[j]; j++; };
+                                        if (body[j] == '}') { j++; };
+                                    };
+                                    if (k >= nop)
+                                    {
+                                        this.fail(g"INLINE_ASM: operand out of range\0");
+                                        t.__exit();
+                                        ln.__exit();
+                                        ffree(res);
+                                        ->;
+                                    };
+                                    sz = opsz[k];
+                                    if (modc == 'q') { sz = 8; };
+                                    if (modc == 'k') { sz = 4; };
+                                    if (modc == 'w') { sz = 2; };
+                                    if (modc == 'b') { sz = 1; };
+                                    idkvm_aput(@ln, opreg[k], sz);
+                                };
+                            }
+                            else
+                            {
+                                ln.put(c);
+                                j++;
+                            };
+                        };
+                        // call name: a function of the host, reached through its address
+                        cp = ln.mem;
+                        xl = 0;
+                        if (cp[0] == 'c' & cp[1] == 'a' & cp[2] == 'l' & cp[3] == 'l' & (cp[4] == ' ' | cp[4] == 9))
+                        {
+                            xl = 4;
+                            while (cp[xl] == ' ' | cp[xl] == 9) { xl++; };
+                            if (cp[xl] != '*' & cp[xl] != '%' & cp[xl] != '$' & cp[xl] != 0)
+                            {
+                                xn = xl;
+                                while (cp[xn] != 0 & cp[xn] != ' ' & cp[xn] != 9) { xn++; };
+                                if (!idkvm_ahas_label(body, cp + xl, xn - xl))
+                                {
+                                    nm = idkvm_dup(cp + xl, xn - xl);
+                                    sym = idkvm_asym(nm);
+                                    if (sym == (byte*)0)
+                                    {
+                                        this.fail_parts(g"INLINE_ASM: cannot resolve symbol '\0", nm, g"'\0", g"\0");
+                                        ffree(nm);
+                                        t.__exit();
+                                        ln.__exit();
+                                        ffree(res);
+                                        ->;
+                                    };
+                                    ffree(nm);
+                                    t.put_str(g"movabsq $\0");
+                                    t.put_i64(idkvm_p2i(sym));
+                                    t.put_str(g", %rax\ncallq *%rax\n\0");
+                                    xl = -1;
+                                };
+                            };
+                        };
+                        if (xl != -1)
+                        {
+                            t.put_n(ln.mem, ln.len);
+                            t.put(10);
+                        };
+                    };
+                    if (body[i] == 0) { first = false; }
+                    else { i++; };
+                };
+                i = 0;
+                while (i < no)
+                {
+                    t.put_str(g"movq \0");
+                    idkvm_aput(@t, opreg[i], 8);
+                    t.put_str(g", -\0");
+                    t.put_int(64 + 8 * i);
+                    t.put_str(g"(%rbp)\n\0");
+                    i++;
+                };
+                t.put_str(g"movq -8(%rbp), %rbx\nmovq -16(%rbp), %rsi\nmovq -24(%rbp), %rdi\nmovq -32(%rbp), %r12\nmovq -40(%rbp), %r13\nmovq -48(%rbp), %r14\nmovq -56(%rbp), %r15\nmovabsq $\0");
+                t.put_i64(idkvm_p2i(res));
+                t.put_str(g", %rax\n\0");
+                i = 0;
+                while (i < no)
+                {
+                    t.put_str(g"movq -\0");
+                    t.put_int(64 + 8 * i);
+                    t.put_str(g"(%rbp), %rcx\nmovq %rcx, \0");
+                    t.put_int(8 * i);
+                    t.put_str(g"(%rax)\n\0");
+                    i++;
+                };
+                t.put_str(g"movq %rbp, %rsp\npopq %rbp\nretq\n\0");
+                a = iasm_new();
+                if (!iasm_assemble(a, t.mem, t.len))
+                {
+                    this.fail_parts(g"INLINE_ASM: assembly failed: \0", a.err, g"\nASM:\n\0", t.mem);
+                    t.__exit();
+                    ln.__exit();
+                    ffree(res);
+                    ->;
+                };
+                if (!iasm_finish(a))
+                {
+                    this.fail_parts(g"INLINE_ASM: assembly failed: \0", a.err, g"\nASM:\n\0", t.mem);
+                    t.__exit();
+                    ln.__exit();
+                    ffree(res);
+                    ->;
+                };
+                if (a.secs[0].nrel > 0)
+                {
+                    this.fail_parts(g"INLINE_ASM: the body refers to a symbol outside of itself\nASM:\n\0", t.mem, g"\0", g"\0");
+                    t.__exit();
+                    ln.__exit();
+                    ffree(res);
+                    ->;
+                };
+                sz = (int)a.secs[0].size;
+                xmem = idkvm_xalloc(sz);
+                if (xmem == (byte*)0)
+                {
+                    this.fail(g"INLINE_ASM: no executable memory\0");
+                    t.__exit();
+                    ln.__exit();
+                    ffree(res);
+                    ->;
+                };
+                idkvm_copy(xmem, a.secs[0].out, sz);
+                def{}* afn() -> i64 = xmem;
+                ret = afn();
+                idkvm_xfree(xmem, sz);
+                this.ep_sync();
+                i = 0;
+                while (i < no)
+                {
+                    v = ((i64*)res)[i];
+                    sz = opsz[i];
+                    if (sz >= 8) { this.push(IDKVM_T_LONG, v, 0); }
+                    else
+                    {
+                        if (sz == 4) { this.push(IDKVM_T_INT, (i64)(int)v, 0); }
+                        else
+                        {
+                            if (sz == 2) { this.push(IDKVM_T_UINT, v `& (i64)65535, 0); }
+                            else { this.push(IDKVM_T_BYTE, v `& (i64)255, 0); };
+                        };
+                    };
+                    i++;
+                };
+                t.__exit();
+                ln.__exit();
+                ffree(res);
+                ->;
             };
 
             // An extern call through the C runtime: the symbol comes from dlsym, the call goes
@@ -5223,6 +5946,8 @@ namespace IDEKA
                     t = (int)av[k * 3];
                     d = av[k * 3 + 1];
                     m = av[k * 3 + 2];
+                    // a whole VM array passed as a pointer is the address of its first element
+                    switch (t == IDKVM_T_ARRAY) { case (true) { t = IDKVM_T_PTR; m = (i64)1099511627776; } default {}; };
                     // the declared parameter type, past it the default promotion of a float
                     switch (t != IDKVM_T_BYTES & t != IDKVM_T_PTR)
                     {
@@ -5284,7 +6009,7 @@ namespace IDEKA
                                         case (IDKVM_T_BOOL) { switch (d != (i64)0) { case (true) { iv[ni] = 1; } default { iv[ni] = 0; }; }; }
                                         case (IDKVM_T_BYTE) { iv[ni] = d `& (i64)255; }
                                         case (IDKVM_T_CHAR) { iv[ni] = d `& (i64)255; }
-                                        case (IDKVM_T_PTR) { iv[ni] = d; }
+                                        case (IDKVM_T_PTR) { iv[ni] = this.host_addr(d, m); }
                                         case (IDKVM_T_BYTES)
                                         {
                                             cp = idkvm_alloc((int)m + 1);
@@ -5352,6 +6077,7 @@ namespace IDEKA
                                 r = fi(iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], fv[0], fv[1], fv[2], fv[3], fv[4], fv[5], fv[6], fv[7], iv[6], iv[7], iv[8], iv[9], iv[10], iv[11]);
                             };
                         };
+                        this.ep_sync();
                         // the value of the declared return type
                         switch (ret)
                         {
@@ -5417,6 +6143,51 @@ namespace IDEKA
                     default {};
                 };
                 ffree((byte*)av);
+                ->;
+            };
+
+            // A call of comptime code: the exact name, an extern, or "<namespace>__<name>" for a
+            // namespace of the null terminated array uses (latest using first). A name that is
+            // only the last part of some other function does not match.
+            do_call_using(byte* name, int argc, i64 uses) -> void
+            {
+                byte** u = (byte**)idkvm_i2p(uses);
+                int k, idx;
+                byte* key;
+                idx = this.funcs.find(name);
+                // a bare name that only stands for a function of a namespace (the codegen registers
+                // both) is not an exact match: such a function needs its namespace in a using
+                if (idx >= 0)
+                {
+                    while (k < this.funcs.n)
+                    {
+                        if (k != idx & this.funcs.units[k] == this.funcs.units[idx] & idkvm_ends_dunder(this.funcs.names[k], name)) { idx = -1; break; };
+                        k++;
+                    };
+                    k = 0;
+                };
+                if (idx >= 0 | this.extern_find(name) >= 0)
+                {
+                    this.do_call(name, argc);
+                    ->;
+                };
+                while (u != (byte**)0 & u[k] != (byte*)0)
+                {
+                    this.tmp.clear();
+                    this.tmp.put_str(u[k]);
+                    this.tmp.put_str(g"__\0");
+                    this.tmp.put_str(name);
+                    this.tmp.put(0);
+                    idx = this.funcs.find(this.tmp.mem);
+                    if (idx >= 0)
+                    {
+                        key = this.funcs.names[idx];
+                        this.do_call(key, argc);
+                        ->;
+                    };
+                    k++;
+                };
+                this.fail_parts(g"Unknown comptime function: '\0", name, g"'\0", g"\0");
                 ->;
             };
 
@@ -6097,6 +6868,28 @@ namespace IDEKA
             };
 
             // compiler.io.readfile: the file as a NUL terminated block in the VM heap
+            // FUNC_ALIAS: the function compiled under the private name os also answers to the text
+            // on the stack (a function whose f-string name is evaluated when the block runs)
+            op_func_alias(byte* os) -> void
+            {
+                byte* nm = this.pop_text();
+                int idx;
+                switch (this.failed | nm == (byte*)0) { case (true) { ->; } default {}; };
+                idx = this.funcs.find(os);
+                switch (idx < 0)
+                {
+                    case (true) { this.fail(g"FUNC_ALIAS: unknown function \0"); ->; }
+                    default {};
+                };
+                nm = idkvm_dup(nm, idkvm_strlen(nm));
+                switch (nm == (byte*)0 | !this.funcs.add(nm, this.funcs.units[idx]))
+                {
+                    case (true) { this.fail(g"allocation failed\0"); }
+                    default {};
+                };
+                ->;
+            };
+
             op_readfile() -> void
             {
                 byte* path = this.pop_text();
@@ -6650,6 +7443,7 @@ namespace IDEKA
                 {
                     case (IDKVM_GLOBAL_GET) { o.put(32); o.put_str(s); }
                     case (IDKVM_GLOBAL_SET) { o.put(32); o.put_str(s); }
+                    case (IDKVM_FUNC_ALIAS) { o.put(32); o.put_str(s); }
                     case (IDKVM_EXTERN_DECL)
                     {
                         o.put(32);
@@ -7053,12 +7847,11 @@ namespace IDEKA
                     case (IDKVM_BS_V) { this.bin_val(o, (int)a, b, c); }
                     case (IDKVM_BS_A)
                     {
-                        // the bootstrapped VM keeps no INLINE_ASM operands: body, constraints,
-                        // n_inputs, n_outputs and no output names
-                        o.put_u32(0);
-                        o.put_u32(0);
-                        o.put_iv(0);
-                        o.put_iv(0);
+                        // body, the operand list the VM binds (c), n_inputs, n_outputs and no output names
+                        switch (s == (byte*)0) { case (true) { this.bin_str(o, g"\0", 0); } default { this.bin_str(o, s, idkvm_strlen(s)); }; };
+                        switch (c == (i64)0) { case (true) { this.bin_str(o, g"\0", 0); } default { this.bin_str(o, idkvm_i2p(c), idkvm_strlen(idkvm_i2p(c))); }; };
+                        o.put_iv(a);
+                        o.put_iv(b);
                         o.put_u32(0);
                     }
                     case (IDKVM_BS_E)
@@ -7730,15 +8523,14 @@ namespace IDEKA
                     }
                     case (IDKVM_BS_A)
                     {
-                        // body, constraints, n_inputs, n_outputs and the output names are read
-                        // past, like the text loader keeps nothing of INLINE_ASM
-                        this.rd_skip_blob();
-                        this.rd_skip_blob();
-                        this.rd_i64();
-                        this.rd_i64();
+                        // body, the operand list, n_inputs, n_outputs; the output names are read past
+                        s1 = this.rd_blob((int*)0);
+                        s2 = this.rd_blob((int*)0);
+                        a = this.rd_i64();
+                        b = this.rd_i64();
                         n = this.rd_count();
                         while (n > 0 & !this.failed) { this.rd_skip_blob(); n--; };
-                        this.code.add(op, 0, 0, 0, (byte*)0, 0);
+                        this.code.add(op, a, b, idkvm_p2i(s2), s1, 0);
                     }
                     case (IDKVM_BS_E)
                     {
@@ -8289,7 +9081,7 @@ namespace IDEKA
                             case (true) { this.push(IDKVM_T_BYTES, ad, bd); }
                             default
                             {
-                                switch (at == IDKVM_T_PTR)
+                                switch (at == IDKVM_T_PTR | this.arr_is_text(at, ad))
                                 {
                                     case (true) {
                                         a = this.str_of(at, ad);
@@ -8448,6 +9240,17 @@ namespace IDEKA
             {
                 this.pop_val();
                 switch (this.failed) { case (true) { ->; } default {}; };
+                // a pointer into a stack slot: the array in the slot
+                switch (this.pt == IDKVM_T_PTR & this.pm >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        switch (this.pd < (i64)0 | this.pd >= (i64)this.lc_top) { case (true) { this.fail(g"stack pointer: the frame is gone\0"); ->; } default {}; };
+                        this.pt = this.lc_tag[(int)this.pd];
+                        this.pm = this.lc_meta[(int)this.pd];
+                    }
+                    default {};
+                };
                 switch (this.pt == IDKVM_T_ARRAY)
                 {
                     case (true) { this.push(IDKVM_T_INT, this.pm, 0); }
@@ -8525,6 +9328,152 @@ namespace IDEKA
             };
 
             // The memory of a pointer: OS memory is always reachable, the VM heap is bounds checked
+            // The value a pointer into a stack slot names: element idx of the array in the slot, or the slot itself
+            stk_read(int slot, i64 idx) -> void
+            {
+                i64* b;
+                switch (slot < 0 | slot >= this.lc_top) { case (true) { this.fail(g"stack pointer: the frame is gone\0"); ->; } default {}; };
+                switch (this.lc_tag[slot] == IDKVM_T_ARRAY)
+                {
+                    case (true)
+                    {
+                        b = (i64*)this.lc_data[slot];
+                        switch (idx < (i64)0 | idx >= b[0]) { case (true) { this.fail_index(g"stack pointer: index \0", idx, b[0]); ->; } default {}; };
+                        this.push((int)b[2 + (int)idx * 3], b[3 + (int)idx * 3], b[4 + (int)idx * 3]);
+                        ->;
+                    }
+                    default {};
+                };
+                switch (this.lc_tag[slot] == IDKVM_T_BYTES)
+                {
+                    case (true)
+                    {
+                        switch (idx < (i64)0 | idx >= this.lc_meta[slot]) { case (true) { this.fail_index(g"stack pointer: index \0", idx, this.lc_meta[slot]); ->; } default {}; };
+                        this.push(IDKVM_T_BYTE, (i64)idkvm_i2p(this.lc_data[slot])[(int)idx], 0);
+                        ->;
+                    }
+                    default {};
+                };
+                this.push(this.lc_tag[slot], this.lc_data[slot], this.lc_meta[slot]);
+                ->;
+            };
+
+            // Stores through a pointer into a stack slot: an element of the array in it, or the slot itself
+            stk_write(int slot, i64 idx, int vt, i64 vd, i64 vm) -> void
+            {
+                i64* b;
+                i64* nb;
+                int n, i;
+                switch (slot < 0 | slot >= this.lc_top) { case (true) { this.fail(g"stack pointer: the frame is gone\0"); ->; } default {}; };
+                switch (this.lc_tag[slot] == IDKVM_T_ARRAY)
+                {
+                    case (true)
+                    {
+                        b = (i64*)this.lc_data[slot];
+                        switch (idx < (i64)0 | idx >= b[0]) { case (true) { this.fail_index(g"stack pointer: index \0", idx, b[0]); ->; } default {}; };
+                        n = (int)b[0];
+                        nb = this.arr_make(n, (int)b[1]);
+                        switch (this.failed) { case (true) { ->; } default {}; };
+                        i = 0;
+                        while (i < n * 3) { nb[2 + i] = b[2 + i]; i++; };
+                        nb[2 + (int)idx * 3] = (i64)vt;
+                        nb[3 + (int)idx * 3] = vd;
+                        nb[4 + (int)idx * 3] = vm;
+                        this.lc_data[slot] = (i64)nb;
+                        this.lc_meta[slot] = (i64)n;
+                        ->;
+                    }
+                    default {};
+                };
+                this.lc_tag[slot] = vt;
+                this.lc_set[slot] = 1;
+                this.lc_data[slot] = vd;
+                this.lc_meta[slot] = vm;
+                ->;
+            };
+
+            // The host address of a VM pointer: an address of the VM heap is a offset into its arena,
+            // anything else (an OS pointer) is already the host address
+            host_addr(i64 d, i64 m) -> i64
+            {
+                i64* b;
+                i64 idx;
+                int cnt, j;
+                byte* buf;
+                switch (d != (i64)0 & m >= (i64)1099511627776 & m < (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        // the address of an element of a VM array: the elements go to a native buffer for the
+                        // duration of the call and are copied back after it
+                        b = (i64*)d;
+                        idx = m - (i64)1099511627776;
+                        cnt = (int)(b[0] - idx);
+                        switch (cnt < 0 | this.epn >= 16) { case (true) { this.fail(g"element address: index out of range or too many buffers in one call\0"); -> 0; } default {}; };
+                        buf = idkvm_alloc(cnt + 8);
+                        switch (buf == (byte*)0) { case (true) { this.fail(g"allocation failed\0"); -> 0; } default {}; };
+                        j = 0;
+                        while (j < cnt) { buf[j] = (byte)b[3 + ((int)idx + j) * 3]; j++; };
+                        buf[cnt] = 0;
+                        switch (this.epl == (i64*)0) { case (true) { this.epl = (i64*)idkvm_alloc(16 * 4 * 8); } default {}; };
+                        this.epl[this.epn * 4] = idkvm_p2i(buf);
+                        this.epl[this.epn * 4 + 1] = d;
+                        this.epl[this.epn * 4 + 2] = idx;
+                        this.epl[this.epn * 4 + 3] = (i64)cnt;
+                        this.epn++;
+                        -> idkvm_p2i(buf);
+                    }
+                    default {};
+                };
+                // a pointer into a stack slot that holds an array is the address of its elements
+                switch (m >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        switch (d >= (i64)0 & d < (i64)this.lc_top)
+                        {
+                            case (true)
+                            {
+                                switch (this.lc_tag[(int)d] == IDKVM_T_ARRAY) { case (true) { -> this.host_addr(this.lc_data[(int)d], (i64)1099511627776 + (m - (i64)1125899906842624)); } default {}; };
+                            }
+                            default {};
+                        };
+                        this.fail(g"a pointer to a stack variable cannot be passed to native code\0");
+                        -> 0;
+                    }
+                    default {};
+                };
+                switch (d >= (i64)IDKVM_HEAP_BASE & d < (i64)this.vheap.size) { case (true) { -> idkvm_p2i(this.vheap.mem) + d; } default {}; };
+                -> d;
+            };
+
+            // Copies the element buffers of a finished native call back into their VM arrays
+            ep_sync() -> void
+            {
+                int e, j, cnt;
+                i64* b;
+                i64 idx;
+                byte* buf;
+                e = 0;
+                while (e < this.epn)
+                {
+                    buf = idkvm_i2p(this.epl[e * 4]);
+                    b = (i64*)this.epl[e * 4 + 1];
+                    idx = this.epl[e * 4 + 2];
+                    cnt = (int)this.epl[e * 4 + 3];
+                    j = 0;
+                    while (j < cnt)
+                    {
+                        switch ((i64)buf[j] != (b[3 + ((int)idx + j) * 3] `& (i64)255)) { case (true) { b[3 + ((int)idx + j) * 3] = (i64)buf[j]; } default {}; };
+                        j++;
+                    };
+                    ffree(buf);
+                    e++;
+                };
+                this.epn = 0;
+                ->;
+            };
+
             mem_ok(i64 p, int sz) -> bool
             {
                 switch (this.ptr_is_os(p)) { case (true) { -> true; } default {}; };
@@ -8628,7 +9577,7 @@ namespace IDEKA
 
             op_array_load() -> void
             {
-                i64 idx;
+                i64 idx, am_b;
                 i64* b;
                 int fi = this.nframes - 1;
                 int slot, at;
@@ -8638,7 +9587,27 @@ namespace IDEKA
                 this.pop_val();
                 at = this.pt;
                 ad = this.pd;
+                am_b = this.pm;
                 switch (this.failed) { case (true) { ->; } default {}; };
+                // a pointer into a stack slot: the slot of any frame still running
+                switch (at == IDKVM_T_PTR & am_b >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        slot = (int)ad;
+                        switch (slot >= 0 & slot < this.lc_top)
+                        {
+                            case (true)
+                            {
+                                switch (this.lc_tag[slot] == IDKVM_T_PTR) { case (true) { this.heap_byte_push(this.lc_data[slot] + (am_b - (i64)1125899906842624) + idx); ->; } default {}; };
+                            }
+                            default {};
+                        };
+                        this.stk_read(slot, (am_b - (i64)1125899906842624) + idx);
+                        ->;
+                    }
+                    default {};
+                };
                 // a PTR: an OS pointer, a slot of this frame (@var), or an address of the VM heap
                 switch (at == IDKVM_T_PTR)
                 {
@@ -8670,6 +9639,21 @@ namespace IDEKA
                                 ->;
                             };
                         };
+                    }
+                    default {};
+                };
+                // BYTES: the byte at idx of the buffer, bounded by its length
+                switch (at == IDKVM_T_BYTES)
+                {
+                    case (true)
+                    {
+                        switch (idx < (i64)0 | idx >= am_b)
+                        {
+                            case (true) { this.fail_index(g"ARRAY_LOAD: index \0", idx, am_b); ->; }
+                            default {};
+                        };
+                        this.push(IDKVM_T_BYTE, (i64)idkvm_i2p(ad)[(int)idx], 0);
+                        ->;
                     }
                     default {};
                 };
@@ -8721,6 +9705,27 @@ namespace IDEKA
                 ad = this.pd;
                 am = this.pm;
                 switch (this.failed) { case (true) { ->; } default {}; };
+                switch (at == IDKVM_T_PTR & am >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        slot = (int)ad;
+                        switch (slot >= 0 & slot < this.lc_top & this.lc_tag[slot] == IDKVM_T_PTR)
+                        {
+                            case (true)
+                            {
+                                switch (this.heap_byte_write(this.lc_data[slot] + (am - (i64)1125899906842624) + idx, this.store_byte_of((int)vt, vd))) { case (true) { this.push(IDKVM_T_PTR, ad, am); } default {}; };
+                            }
+                            default
+                            {
+                                this.stk_write(slot, (am - (i64)1125899906842624) + idx, (int)vt, vd, vm);
+                                switch (!this.failed) { case (true) { this.push(IDKVM_T_PTR, ad, am); } default {}; };
+                            };
+                        };
+                        ->;
+                    }
+                    default {};
+                };
                 switch (at == IDKVM_T_PTR)
                 {
                     case (true)
@@ -9414,6 +10419,17 @@ namespace IDEKA
                 int li, k;
                 this.pop_val();
                 switch (this.failed) { case (true) { ->; } default {}; };
+                // a pointer into a stack slot names the struct in the slot
+                switch (this.pt == IDKVM_T_PTR & this.pm >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        this.stk_read((int)this.pd, this.pm - (i64)1125899906842624);
+                        switch (this.failed) { case (true) { ->; } default {}; };
+                        this.pop_val();
+                    }
+                    default {};
+                };
                 switch (this.pt != IDKVM_T_STRUCT)
                 {
                     case (true)
@@ -9448,12 +10464,28 @@ namespace IDEKA
                 i64 vt, vd, vm;
                 i64* b, nb;
                 int li, k, i, n;
+                bool viastk;
+                i64 sad, sam;
                 this.pop_val();
                 vt = (i64)this.pt;
                 vd = this.pd;
                 vm = this.pm;
                 this.pop_val();
                 switch (this.failed) { case (true) { ->; } default {}; };
+                // a pointer into a stack slot: the struct in the slot is changed and stored back
+                switch (this.pt == IDKVM_T_PTR & this.pm >= (i64)1125899906842624)
+                {
+                    case (true)
+                    {
+                        viastk = true;
+                        sad = this.pd;
+                        sam = this.pm;
+                        this.stk_read((int)sad, sam - (i64)1125899906842624);
+                        switch (this.failed) { case (true) { ->; } default {}; };
+                        this.pop_val();
+                    }
+                    default {};
+                };
                 switch (this.pt != IDKVM_T_STRUCT)
                 {
                     case (true)
@@ -9492,6 +10524,16 @@ namespace IDEKA
                 nb[2 + k * 3] = vt;
                 nb[3 + k * 3] = vd;
                 nb[4 + k * 3] = vm;
+                switch (viastk)
+                {
+                    case (true)
+                    {
+                        this.stk_write((int)sad, sam - (i64)1125899906842624, IDKVM_T_STRUCT, (i64)nb, (i64)li);
+                        switch (!this.failed) { case (true) { this.push(IDKVM_T_PTR, sad, sam); } default {}; };
+                        ->;
+                    }
+                    default {};
+                };
                 this.push(IDKVM_T_STRUCT, (i64)nb, (i64)li);
                 ->;
             };
@@ -9515,7 +10557,11 @@ namespace IDEKA
                 switch (op)
                 {
                     // Stack
-                    case (IDKVM_PUSH) { this.push(oa, ob, oc); }
+                    case (IDKVM_PUSH)
+                    {
+                        // a pointer to a slot of the frame running: the absolute slot, so another frame can use it
+                        switch (oa == (i64)IDKVM_T_PTR & oc == (i64)1125899906842624) { case (true) { this.push(IDKVM_T_PTR, (i64)this.fr_base[fi] + ob, oc); } default { this.push(oa, ob, oc); }; };
+                    }
                     case (IDKVM_POP) { this.pop_val(); }
                     case (IDKVM_DUP)
                     {
@@ -9644,7 +10690,14 @@ namespace IDEKA
                             default { this.fr_ip[fi] = oa; };
                         };
                     }
-                    case (IDKVM_CALL) { this.do_call(os, oa); }
+                    case (IDKVM_CALL)
+                    {
+                        switch (ob != (i64)0)
+                        {
+                            case (true) { this.do_call_using(os, oa, oc); }
+                            default { this.do_call(os, oa); };
+                        };
+                    }
                     case (IDKVM_CALL_PTR)
                     {
                         this.pop_val();
@@ -9738,6 +10791,10 @@ namespace IDEKA
                         this.pop_val();
                         at = this.pt;
                         ad = this.pd;
+                        switch (at == IDKVM_T_PTR & this.pm >= (i64)1125899906842624)
+                        {
+                            case (true) { this.stk_read((int)ad, this.pm - (i64)1125899906842624); }
+                            default {
                         switch (at == IDKVM_T_BYTES)
                         {
                             case (true) {
@@ -9759,6 +10816,8 @@ namespace IDEKA
                                 };
                             };
                         };
+                            };
+                        };
                     }
                     case (IDKVM_LOCAL_DEREF_SET)
                     {
@@ -9773,6 +10832,11 @@ namespace IDEKA
                             case (true) {}
                             default
                             {
+                                switch (this.pm >= (i64)1125899906842624)
+                                {
+                                    case (true) { this.stk_write((int)ad, this.pm - (i64)1125899906842624, bt, bd, cd); ->; }
+                                    default {};
+                                };
                                 switch (ad < (i64)0 | ad >= (i64)this.fr_nloc[fi])
                                 {
                                     case (true)
@@ -9800,6 +10864,7 @@ namespace IDEKA
                             default { this.push(this.g_tag[e], this.g_data[e], this.g_meta[e]); };
                         };
                     }
+                    case (IDKVM_FUNC_ALIAS) { this.op_func_alias(os); }
                     case (IDKVM_GLOBAL_SET)
                     {
                         this.pop_val();
@@ -9824,7 +10889,10 @@ namespace IDEKA
                                 switch (k == 0)
                                 {
                                     case (true) { this.fail(g"VMHeap: invalid size or out of memory\0"); }
-                                    default { this.push(IDKVM_T_PTR, (i64)k, 0); };
+                                    default
+                                    {
+                                        this.push(IDKVM_T_PTR, (i64)k, 0);
+                                    };
                                 };
                             };
                         };
@@ -9854,8 +10922,19 @@ namespace IDEKA
                         this.pop_val();
                         switch (this.pt == IDKVM_T_BYTES)
                         {
-                            case (true) { this.stub(g"OFFSET on BYTES (pinned native buffers)\0"); }
-                            default { this.push(IDKVM_T_PTR, this.pd + bd, 0); };
+                            case (true)
+                            {
+                                bd = this.pin_bytes(this.pd, this.pm, bd);
+                                switch (!this.failed) { case (true) { this.push(IDKVM_T_PTR, bd, 0); } default {}; };
+                            }
+                            default
+                            {
+                                switch (this.pt == IDKVM_T_ARRAY)
+                                {
+                                    case (true) { this.push(IDKVM_T_PTR, this.pd, (i64)1099511627776 + bd); }
+                                    default { this.push(IDKVM_T_PTR, this.pd + bd, 0); };
+                                };
+                            };
                         };
                     }
 
@@ -10045,7 +11124,7 @@ namespace IDEKA
                                 switch (sp1 != (byte*)0)
                                 {
                                     case (true) { standard::io::console::println(sp1); }
-                                    default { standard::io::console::print(this.pd); standard::io::console::println(g"\0"); };
+                                    default { standard::io::console::print(this.pd); standard::io::console::print(); };
                                 };
                             }
                             default {};
@@ -10110,10 +11189,7 @@ namespace IDEKA
                     case (IDKVM_ARRAY_LOAD) { this.op_array_load(); }
                     case (IDKVM_ARRAY_STORE) { this.op_array_store(); }
                     case (IDKVM_EMITIDEKA) { this.op_emitideka(os, (FvmVars*)idkvm_i2p(oc)); }
-                    case (IDKVM_INLINE_ASM)
-                    {
-                        this.stub(g"INLINE_ASM (needs an own backend, never ported)\0");
-                    }
+                    case (IDKVM_INLINE_ASM) { this.op_inline_asm(os, (int)oa, (int)ob, idkvm_i2p(oc)); }
                     default
                     {
                         // Everything else is not ported yet: counted by opcode name
@@ -11117,7 +12193,7 @@ namespace IDEKA
                     default {};
                 };
                 // Single name operand (type names and globals)
-                switch (op == IDKVM_SIZEOF | op == IDKVM_ALIGNOF | op == IDKVM_ENDIANOF | op == IDKVM_STRUCT_NEW | op == IDKVM_STRUCT_LOAD | op == IDKVM_STRUCT_STORE | op == IDKVM_ENUM_NEW | op == IDKVM_GLOBAL_GET | op == IDKVM_GLOBAL_SET | op == IDKVM_FFI_SYM | op == IDKVM_COMPILER_SYMTABLE_FILTERED | op == IDKVM_COMPILER_TARGET_GET)
+                switch (op == IDKVM_SIZEOF | op == IDKVM_ALIGNOF | op == IDKVM_ENDIANOF | op == IDKVM_STRUCT_NEW | op == IDKVM_STRUCT_LOAD | op == IDKVM_STRUCT_STORE | op == IDKVM_ENUM_NEW | op == IDKVM_GLOBAL_GET | op == IDKVM_GLOBAL_SET | op == IDKVM_FFI_SYM | op == IDKVM_FUNC_ALIAS | op == IDKVM_COMPILER_SYMTABLE_FILTERED | op == IDKVM_COMPILER_TARGET_GET)
                 {
                     case (true) {
                         switch (rc < 1)

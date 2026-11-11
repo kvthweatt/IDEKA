@@ -1,10 +1,10 @@
 @echo off
 echo
-idkc idkc.idk --backend x64
+idkc idkc.idk
 copy build\idkc\windows\release\idkc.exe idkc.exe /Y
-idkc idkc.idk --backend x64
+idkc idkc.idk
 copy build\idkc\windows\release\idkc.exe idkc.exe /Y
-idkc idkc.idk --backend x64
+idkc idkc.idk
 
 echo Copying IDEKA compiler executable to compiler root ...
 copy build\idkc\windows\release\idkc.exe idkc.exe /Y

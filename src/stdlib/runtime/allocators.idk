@@ -193,85 +193,54 @@ namespace standard
                     #endif;
                 } # effect {*Alloc.Virtual};
 
-                def size_class(size_t size) -> size_t # effect {Pure};
-                def size_class(size_t size) -> size_t
+                // Index of the highest set bit of x, x must not be zero
+                inline def bit_scan_rev(size_t x) -> size_t
                 {
-                    // Fast reject for large blocks (>4096)
-                    switch (size > 4096) { case (1) { return (size_t)9; } default {}; };
-
-                    // Classes map to power-of-two ceilings: 16,32,64,128,256,512,1024,2048,4096
-                    // which are 1<<4 through 1<<12.
-                    // Round size up to the nearest class ceiling, then find the position
-                    // of its highest set bit via successive halving (no inline asm).
-                    // bit_pos(16)=4 -> class 0, bit_pos(4096)=12 -> class 8.
-
-                    // Round size up to the smallest class ceiling >= size.
-                    // Equivalent to: s = size <= 16 ? 16 : next_pow2_ceil(size) clamped to 4096.
-                    // We compute via: s-1, then fill all lower bits, then +1.
-                    size_t s = size - 1;
-                    s |= (s >> 1);
-                    s |= (s >> 2);
-                    s |= (s >> 4);
-                    s |= (s >> 8);
-                    s += 1;
-                    // s is now the next power of two >= size (or size itself if already pow2).
-                    // Clamp to 16 minimum.
-                    switch (s < 16) { case (1) { s = 16; } default {}; };
-
-                    // Find bit position of s (which is a power of two) via right-shifts.
-                    // We know s is in [16..4096] = [1<<4..1<<12].
-                    size_t bit, tmp = s;
-                    switch (tmp >> 8  != 0) { case (1) { bit += 8;  tmp >>= 8;  } default {}; };
-                    switch (tmp >> 4  != 0) { case (1) { bit += 4;  tmp >>= 4;  } default {}; };
-                    switch (tmp >> 2  != 0) { case (1) { bit += 2;  tmp >>= 2;  } default {}; };
-                    switch (tmp >> 1  != 0) { case (1) { bit += 1;              } default {}; };
-
-                    // bit is the index of the highest set bit (4..12).
-                    // class = bit - 4  maps [4..12] -> [0..8].
-                    return bit - 4;
-                };
-
-                def class_block_size(size_t cls) -> size_t # effect {Pure};
-                def class_block_size(size_t cls) -> size_t
-                {
-                    switch (cls)
+                    size_t r;
+                    asm
                     {
-                        case (0) { return 16;   }
-                        case (1) { return 32;   }
-                        case (2) { return 64;   }
-                        case (3) { return 128;  }
-                        case (4) { return 256;  }
-                        case (5) { return 512;  }
-                        case (6) { return 1024; }
-                        case (7) { return 2048; }
-                        case (8) { return 4096; }
-                        default  { return 4096; };
-                    };
-                    return 0;
-                };
+                        bsrq $1, $0
+                    } : "=r"(r) : "r"(x) : "cc";
+                    return r;
+                } # effect {Pure};
 
-                def bin_pop(size_t cls) -> FreeNode* # effect {Pure};
-                def bin_pop(size_t cls) -> FreeNode*
+                inline def size_class(size_t size) -> size_t
+                {
+                    // Classes are the power-of-two ceilings 16,32,64,...,4096 (classes 0-8),
+                    // anything larger is class 9.
+                    switch (size > 4096) { case (1) { return (size_t)9; } default {}; };
+                    // Sizes up to 16 are class 0. For larger sizes the ceiling's bit position
+                    // is one above the highest set bit of size-1, and class = position - 4.
+                    switch (size <= 16) { case (1) { return (size_t)0; } default {}; };
+                    return bit_scan_rev(size - 1) - 3;
+                } # effect {Pure};
+
+                inline def class_block_size(size_t cls) -> size_t
+                {
+                    // Classes 0-8 are the power-of-two sizes 16 through 4096, anything else is 4096
+                    switch (cls > 8) { case (1) { return 4096; } default {}; };
+                    return (size_t)16 << cls;
+                } # effect {Pure};
+
+                inline def bin_pop(size_t cls) -> FreeNode*
                 {
                     switch (cls > 8) { case (1) { return NP_FREENODE; } default {}; };
                     FreeNode* n = g_bins[cls];
                     switch (n!?) { case (1) { g_bins[cls] = n.next; } default {}; };
                     return n;
-                };
+                } # effect {Pure};
 
-                def bin_push(size_t cls, FreeNode* node) -> void # effect {Pure};
-                def bin_push(size_t cls, FreeNode* node) -> void
+                inline def bin_push(size_t cls, FreeNode* node) -> void
                 {
                     switch (cls > 8) { case (1) { return; } default {}; };
                     node.next = g_bins[cls];
                     g_bins[cls] = node;
-                };
+                } # effect {Pure};
 
                 // Block table
 
                 // Hash a pointer to a table slot index
-                def table_hash(u64 ptr, size_t cap) -> size_t # effect {Pure};
-                def table_hash(u64 ptr, size_t cap) -> size_t
+                inline def table_hash(u64 ptr, size_t cap) -> size_t
                 {
                     // All pointers are 16-byte aligned so bits 0-3 are always zero.
                     // Shift them out first, then mix with a 64-bit Fibonacci multiplier
@@ -280,11 +249,9 @@ namespace standard
                     h = h * 0x9E3779B97F4A7C15;
                     h = h `^| (h >> (size_t)32);
                     return h & (cap - (size_t)1);
-                };
+                } # effect {Pure};
 
                 // Insert into a raw table buffer (used by both insert and grow)
-                def table_raw_insert(BlockEntry* tbl, size_t cap,
-                                     u64 key, size_t size, u64 kind, u64 slab) -> void # effect {Pure};
                 def table_raw_insert(BlockEntry* tbl, size_t cap,
                                      u64 key, size_t size, u64 kind, u64 slab) -> void
                 {
@@ -301,10 +268,9 @@ namespace standard
                         .kind = kind;
                         .slab = slab;
                     };
-                };
+                } # effect {Pure};
 
                 // Grow the table slab when load factor exceeds 0.5
-                def table_grow() -> bool # effect {*Alloc.Virtual};
                 def table_grow() -> bool
                 {
                     size_t new_cap  = g_table_cap * 2;
@@ -317,14 +283,8 @@ namespace standard
                         default  {};
                     };
 
-                    // Zero the new table (table entries must start null)
-                    byte* p = (byte*)raw;
-                    size_t i, j;
-                    while (i < new_bytes)
-                    {
-                        p[i] = '\0';
-                        i++;
-                    };
+                    // Fresh pages from the OS are already zero, which is what empty table entries need
+                    size_t j;
 
                     BlockEntry* new_tbl = (BlockEntry*)raw;
 
@@ -458,10 +418,9 @@ namespace standard
                     g_table_count++;
 
                     return true;
-                };
+                } # effect {*Alloc.Virtual};
 
                 // Initialise the table on first use
-                def table_init() -> bool # effect {*Alloc.Virtual};
                 def table_init() -> bool
                 {
                     size_t initial_cap   = 1024,
@@ -498,29 +457,27 @@ namespace standard
                     g_table_count++;
 
                     return true;
-                };
+                } # effect {*Alloc.Virtual};
 
-                def table_insert(u64 key, size_t size, u64 kind, u64 slab) -> bool # effect {*Alloc.Virtual};
                 def table_insert(u64 key, size_t size, u64 kind, u64 slab) -> bool
                 {
-                    if (g_table == NP_BLOCKENTRY)
-                    {
-                        if (!table_init()) { return false; };
-                    };
+                    switch (g_table == NP_BLOCKENTRY)
+                    { case (1) {
+                        switch (!table_init()) { case (1) { return false; } default {}; };
+                    } default {}; };
 
                     // Grow if load > 50%
-                    if (g_table_count * 2 >= g_table_cap)
-                    {
+                    switch (g_table_count * 2 >= g_table_cap)
+                    { case (1) {
                             switch (!table_grow()) { case (1) { return false; } default {}; };
-                    };
+                    } default {}; };
 
                     table_raw_insert(g_table, g_table_cap, key, size, kind, slab);
                     g_table_count++;
                     return true;
-                };
+                } # effect {*Alloc.Virtual};
 
-                def table_find(u64 key) -> BlockEntry* # effect {Pure};
-                def table_find(u64 key) -> BlockEntry*
+                inline def table_find(u64 key) -> BlockEntry*
                 {
                     switch (g_table == NP_BLOCKENTRY) { case (1) { return NP_BLOCKENTRY; } default {}; };
 
@@ -535,9 +492,8 @@ namespace standard
                         idx = (idx + 1) `& (g_table_cap - 1);
                     };
                     return NP_BLOCKENTRY;
-                };
+                } # effect {Pure};
 
-                def table_remove(u64 key) -> void # effect {Pure};
                 def table_remove(u64 key) -> void
                 {
                     switch (g_table == NP_BLOCKENTRY) { case (1) { return; } default {}; };
@@ -645,9 +601,8 @@ namespace standard
                         };
                         idx = (idx + 1) `& (g_table_cap - 1);
                     };
-                };
+                } # effect {Pure};
 
-                def heap_new_slab(size_t min_capacity) -> Slab* # effect {*Alloc.Virtual};
                 def heap_new_slab(size_t min_capacity) -> Slab*
                 {
                     size_t sz = g_next_slab_size;
@@ -683,145 +638,69 @@ namespace standard
                     g_next_slab_size = next;
 
                     return slab;
-                };
+                } # effect {*Alloc.Virtual};
 
-                def bump_alloc(size_t bytes) -> u64 # effect {Pure};
-                def bump_alloc(size_t bytes) -> u64
+                inline def bump_alloc(size_t bytes) -> u64
                 {
                     Slab* slab = g_slab_head;
                     bool b = slab == NP_SLAB;
-                    if (b) { return 0; };
+                    switch (b) { case (1) { return 0; } default {}; };
                     bool ret = ((slab!?) `& (slab.frontier + bytes <= slab.capacity));
                     u64 ptr       = (u64)((byte*)slab.base + slab.frontier);
                     slab.frontier = slab.frontier + bytes;
                     return ptr * ret;
-                };
+                } # effect {Pure};
 
-                def fmalloc_fast(size_t cls) -> u64 # effect {Pure};
-                def fmalloc_fast(size_t cls) -> u64
+                inline def fmalloc_fast(size_t cls) -> u64
                 {
                     FreeNode* head = g_bins[cls];
-                    if (head == NP_FREENODE) { return 0; };
+                    switch (head == NP_FREENODE) { case (1) { return 0; } default {}; };
                     g_bins[cls] = head.next;
                     return (u64)head;
-                };
+                } # effect {Pure};
 
                 // Public API
 
-                def fmalloc(size_t size) -> u64 # effect {*Alloc.Heap};
-                def fmalloc(size_t size) -> u64
+                // Blocks above the largest size class get a dedicated OS slab, no bump involvement
+                def fmalloc_large(size_t size) -> u64
                 {
-                    if (size is void) { return size; };
+                    u64 raw = heap_os_alloc(size);
+                    switch (raw == 0) { case (1) { return 0; } default {}; };
 
-                    // Fast path: bypass size_class() for the three most common sizes.
-                    // Each branch resolves cls and the bin head as constants, so no
-                    // switch dispatch overhead inside fmalloc_fast.
-                    if (size <= 32)
-                    {
-                        if (size > 16)   // exactly class 1 (17..32 bytes)
-                        {
-                            u64 fast = fmalloc_fast(1);
-                            if (fast!?) { return fast; };
-                            // Bin empty: fall through to bump path with cls already known.
-                            size_t cls = 1;
-                            u64 ptr = bump_alloc(32);
-                            if (ptr is void)
-                            {
-                                    if (heap_new_slab(32) is NP_SLAB) { return 0; };
-                                    ptr = bump_alloc(32);
-                                    if (ptr is void) { return 0; };
-                            };
-
-                            if (!table_insert(ptr, cls, 0, (u64)g_slab_head))
-                            {
-                                return 0;
-                            };
-                            g_slab_head.used++;
-                            return ptr;
-                        };
-                    };
-
-                    if (size <= 64)
-                    {
-                        if (size > 32)   // exactly class 2 (33..64 bytes)
-                        {
-                            u64 fast = fmalloc_fast(2);
-                            if (fast!?) { return fast; };
-                            size_t cls = 2;
-                            u64 ptr = bump_alloc(64);
-                            if (ptr is void)
-                            {
-                                if (heap_new_slab(64) is NP_SLAB) { return 0; };
-                                ptr = bump_alloc(64);
-                                if (ptr is void) { return 0; };
-                            };
-
-                            if (!table_insert(ptr, cls, 0, (u64)g_slab_head))
-                            {
-                                return 0;
-                            };
-                            g_slab_head.used++;
-                            return ptr;
-                        };
-                    };
-
-                    if (size <= 128)
-                    {
-                        if (size > 64)   // exactly class 3 (65..128 bytes)
-                        {
-                            u64 fast = fmalloc_fast(3);
-                            if (fast!?) { return fast; };
-                            size_t cls = 3;
-                            u64 ptr = bump_alloc(128);
-                            if (ptr is void)
-                            {
-                                    if (heap_new_slab(128) == NP_SLAB) { return 0; };
-                                    ptr = bump_alloc(128);
-                                    if (ptr is void) { return 0; };
-                            };
-                            if (!table_insert(ptr, cls, 0, (u64)g_slab_head))
-                            {
-                                return 0;
-                            };
-                            g_slab_head.used++;
-                            return ptr;
-                        };
-                    };
-
-                    // Slow path: all other sizes go through the full size_class() dispatch.
-                    size_t cls = size_class(size);
-
-                    switch (cls == 9)
+                    // slab field stores OS allocation size so ffree can release correctly
+                    switch (!table_insert(raw, size, 1, size))
                     {
                         case (1)
                         {
-                            // Large: dedicated OS slab, no bump involvement
-                            u64 raw = heap_os_alloc(size);
-                            switch (raw == 0) { case (1) { return 0; } default {}; };
-
-                            // slab field stores OS allocation size so ffree can release correctly
-                            switch (!table_insert(raw, size, 1, size))
-                            {
-                                case (1)
-                                {
-                                    heap_os_free(raw, size);
-                                    return 0;
-                                }
-                                default {};
-                            };
-
-                            g_large_used++;
-                            return raw;
+                            heap_os_free(raw, size);
+                            return 0;
                         }
                         default {};
                     };
 
-                    // Small: try free list bin first — return directly, no table_find needed.
-                    FreeNode* node = bin_pop(cls);
+                    g_large_used++;
+                    return raw;
+                } # effect {*Alloc.Heap};
+
+                def fmalloc(size_t size) -> u64
+                {
+                    switch (size is void) { case (1) { return size; } default {}; };
+                    switch (size > 4096) { case (1) { return fmalloc_large(size); } default {}; };
+
+                    // The size class is the position of the highest set bit of (size - 1), at least 4,
+                    // minus 3: one bit scan finds it for every size from 1 to 4096.
+                    size_t cls = bit_scan_rev((size - 1) | 15) - 3;
+
+                    // Try the free list bin first, no table_find needed.
+                    FreeNode* node = g_bins[cls];
                     switch (node!?)
                     {
-                        case (1) { return (u64)node; }
-                        default  {};
+                        case (1)
+                        {
+                            g_bins[cls] = node.next;
+                            return (u64)node;
+                        }
+                        default {};
                     };
 
                     // Bump allocate from current slab
@@ -846,15 +725,13 @@ namespace standard
 
                     g_slab_head.used++;
                     return ptr;
-                };
+                } # effect {*Alloc.Heap};
 
-                def fmalloc(ulong size) -> u64 # effect {*Alloc.Heap};
                 def fmalloc(ulong size) -> u64
                 {
                     return fmalloc((size_t)size);
-                };
+                } # effect {*Alloc.Heap};
 
-                def ffree(u64 ptr) -> void # effect {*Alloc.Heap};
                 def ffree(u64 ptr) -> void
                 {
                     switch (ptr is void) { case (1) { return; } default {}; };
@@ -883,15 +760,13 @@ namespace standard
                     // Table entry stays alive so coalesce_heap can find the owning slab.
                     entry.kind = (u64)3;
                     bin_push(size, (FreeNode*)ptr);
-                };
+                } # effect {*Alloc.Heap};
 
-                def ffree(byte* ptr) -> void # effect {*Alloc.Heap};
                 def ffree(byte* ptr) -> void
                 {
                     ffree((u64)ptr);
-                };
+                } # effect {*Alloc.Heap};
 
-                def frealloc(u64 ptr, size_t new_size) -> u64 # effect {*Alloc.Heap};
                 def frealloc(u64 ptr, size_t new_size) -> u64
                 {
                     switch (ptr is void) { case (1) { return fmalloc(new_size); } default {}; };
@@ -1006,13 +881,12 @@ namespace standard
                     while (i < copy_size) { dst[i] = src[i]; i++; };
                     ffree(ptr);
                     return new_ptr;
-                };
+                } # effect {*Alloc.Heap};
 
                 // Walk all small-block slabs and release any whose used counter
                 // has reached zero back to the OS.  Free-list nodes belonging to
                 // released slabs are removed from their bins before the slab is
                 // freed so dangling pointers are never left in the bins.
-                def coalesce_heap() -> void # effect {*Alloc.Virtual};
                 def coalesce_heap() -> void
                 {
                     size_t bin_idx;
@@ -1102,13 +976,12 @@ namespace standard
 
                         slab = next;
                     };
-                };
+                } # effect {*Alloc.Virtual};
 
                 // Returns a fragmentation estimate in the range [0.0, 1.0].
                 // The value is the ratio of free (binned) small-block bytes plus
                 // live large-block count to total tracked capacity.
                 // 0.0 means no fragmentation, 1.0 means entirely fragmented.
-                def check_fragmentation() -> float # effect {Pure};
                 def check_fragmentation() -> float
                 {
                     // Sum usable capacity and live bytes across all small slabs.
@@ -1176,8 +1049,7 @@ namespace standard
                     free_bytes = committed - used_bytes;
 
                     return float(free_bytes) / float(committed);
-                };
-
+                } # effect {Pure};
             };
 
             namespace stdstack

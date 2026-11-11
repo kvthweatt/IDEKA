@@ -190,7 +190,8 @@ namespace standard
                     movq $1, %rsi
                     movq $2, %rdx
                     syscall
-                } : "r"(bytes_read) : "r"(buffer), "r"(count)
+                movq %rax, $0
+                } : "=r"(bytes_read) : "r"(buffer), "r"(count)
                   : "rax","rdi","rsi","rdx","rcx","r11","memory";
 #endif; // ARCH X86_64
 #ifdef __ARCH_ARM64__
@@ -204,7 +205,8 @@ namespace standard
                     ldr x1, [sp]
                     ldr x2, [sp, #8]
                     svc #0
-                } : "r"(bytes_read) : "r"(buffer), "r"(count)
+                mov $0, x0
+                } : "=r"(bytes_read) : "r"(buffer), "r"(count)
                   : "x0","x1","x2","x3","x4","x5",
                     "x6","x7","x8","x9","x10","x11",
                     "x12","x13","x14","x15","x16",
@@ -316,10 +318,17 @@ namespace standard
             def win_print(byte* msg, int x) -> void
             {
 #ifdef __ARCH_X86_64__
+                // The handle is asked from the OS on every write instead of read from
+                // WIN_STDOUT_HANDLE: that global is only set by FRTStartup, so it is 0 in any
+                // program that did not run it (comptime code on the VM).
                 volatile asm
                 {
-                    // BOOL ok = WriteFile(WIN_STDOUT_HANDLE, msg, x, NULL, NULL)
-                    movq $2, %rcx           // RCX = WIN_STDOUT_HANDLE (operand 2)
+                    // BOOL ok = WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), msg, x, NULL, NULL)
+                    movq $$-11, %rcx        // STD_OUTPUT_HANDLE
+                    subq $$32, %rsp
+                    call GetStdHandle
+                    addq $$32, %rsp
+                    movq %rax, %rcx         // RCX = stdout handle
                     movq $0, %rdx           // RDX = lpBuffer (operand 0 = msg)
                     movl $1, %r8d           // R8D = nNumberOfBytesToWrite (operand 1 = x, DWORD)
                     xorq %r9, %r9           // R9 = lpNumberOfBytesWritten = NULL
@@ -327,7 +336,7 @@ namespace standard
                     movq %r9, 32(%rsp)      // *(rsp+32) = lpOverlapped = NULL
                     call WriteFile
                     addq $$40, %rsp
-                } : : "r"(msg), "r"(x), "r"(WIN_STDOUT_HANDLE)
+                } : : "r"(msg), "r"(x)
                     : "rax","rcx","rdx","r8","r9","r10","r11","memory";
 #endif; // ARCH 86 64
 #ifdef __ARCH_ARM64__
@@ -795,6 +804,8 @@ namespace standard
 #ifdef __MACOS__
                 out_write("\n", 1);
 #endif;
+                // a newline ends the line: line buffered, so every println reaches the OS at once
+                flush();
                 return;
             };
         };      // CONSOLE //

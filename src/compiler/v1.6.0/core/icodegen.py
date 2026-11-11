@@ -1050,6 +1050,62 @@ class CodegenVisitor:
             return gvar
         return None
 
+    def _bitptr_locate(self, builder, bp, node, module):
+        """Element pointer, element type and MSB-first shift of the bit a bit pointer names.
+        The pointer is (origin pointer to T, bit index); T holds w bits, the index counts
+        from the most significant bit of the T at the origin and continues into the next T."""
+        origin = builder.extract_value(bp, 0, name="bp_origin")
+        idx = builder.extract_value(bp, 1, name="bp_index")
+        t = origin.type.pointee
+        if not isinstance(t, ir.IntType):
+            raise IDEKACodegenError("A bit pointer must point into an integer", node, module)
+        w = t.width
+        i64 = ir.IntType(64)
+        elem = builder.udiv(idx, ir.Constant(i64, w), name="bp_elem")
+        bit = builder.urem(idx, ir.Constant(i64, w), name="bp_bit")
+        eptr = builder.gep(origin, [elem], name="bp_eptr")
+        shift = builder.sub(ir.Constant(i64, w - 1), bit, name="bp_shift")
+        if w < 64:
+            shift = builder.trunc(shift, t, name="bp_shift_t")
+        return eptr, t, shift
+
+    def _bitptr_value(self, builder, bp):
+        # a variable may come back as its address
+        if isinstance(bp.type, ir.PointerType) and isinstance(bp.type.pointee, ir.LiteralStructType):
+            bp = builder.load(bp, name="bp_val")
+        return bp
+
+    def visit_BitPointerDeref(self, node, builder, module):
+        bp = self._bitptr_value(builder, self.visit(node.pointer, builder, module))
+        if not (isinstance(bp.type, ir.LiteralStructType) and len(bp.type.elements) == 2
+                and isinstance(bp.type.elements[0], ir.PointerType)):
+            raise IDEKACodegenError("Cannot dereference a value that is not a bit pointer", node, module)
+        eptr, t, shift = self._bitptr_locate(builder, bp, node, module)
+        v = builder.load(eptr, name="bp_load")
+        if t.width < 64:
+            shift_use = shift
+        else:
+            shift_use = shift
+        bit = builder.and_(builder.lshr(v, shift_use, name="bp_shr"), ir.Constant(t, 1), name="bp_and")
+        i8 = ir.IntType(8)
+        if t.width > 8:
+            return builder.trunc(bit, i8, name="bp_bit8")
+        return builder.zext(bit, i8, name="bp_bit8") if t.width < 8 else bit
+
+    def _bitptr_store(self, builder, bp, val, node, module):
+        eptr, t, shift = self._bitptr_locate(builder, bp, node, module)
+        if isinstance(val.type, ir.IntType):
+            nz = builder.icmp_unsigned('!=', val, ir.Constant(val.type, 0), name="bp_nz")
+        else:
+            raise IDEKACodegenError("A bit can only be assigned an integer", node, module)
+        old = builder.load(eptr, name="bp_old")
+        one = ir.Constant(t, 1)
+        mask = builder.shl(one, shift, name="bp_mask")
+        cleared = builder.and_(old, builder.not_(mask), name="bp_clr")
+        newbit = builder.shl(builder.zext(nz, t, name="bp_nz_t") if t.width > 1 else nz, shift, name="bp_new")
+        builder.store(builder.or_(cleared, newbit, name="bp_res"), eptr)
+        return val
+
     def visit_PointerDeref(self, node, builder, module):
         ptr_val = self.visit(node.pointer, builder, module)
         if not isinstance(ptr_val.type, ir.PointerType):
@@ -1062,6 +1118,22 @@ class CodegenVisitor:
                           ArrayAccess, FunctionCall, NotNull, AddressOf,
                           StringLiteral, FStringLiteral, ArrayLiteral, StructLiteral)
         expr = node.expression
+        from iast import BitIndexAccess as _BIA2
+        if isinstance(expr, _BIA2):
+            # @x[`n]: the bit pointer (address of x, bit index n)
+            inner = AddressOf(expr.value)
+            inner.source_line = node.source_line
+            inner.source_col = node.source_col
+            origin = self.visit(inner, builder, module)
+            idx = self.visit(expr.index, builder, module)
+            i64 = ir.IntType(64)
+            if idx.type.width < 64:
+                idx = builder.zext(idx, i64, name="bp_idx_ext")
+            elif idx.type.width > 64:
+                idx = builder.trunc(idx, i64, name="bp_idx_trunc")
+            st = ir.LiteralStructType([origin.type, i64])
+            bp = builder.insert_value(ir.Constant(st, ir.Undefined), origin, 0, name="bp_o")
+            return builder.insert_value(bp, idx, 1, name="bp_i")
         # Parser bug workaround: `@x!?` is mis-parsed as AddressOf(NotNull(x))
         # instead of the correct NotNull(AddressOf(x)).  Detect and re-route.
         if isinstance(expr, NotNull):
@@ -5287,7 +5359,7 @@ class CodegenVisitor:
 
     def visit_Assignment(self, node, builder, module):
         from iast import (ArrayLiteral, StructLiteral, Identifier, MemberAccess, ArrayAccess,
-                          PointerDeref, BitSlice, BitIndexAccess, RangeExpression, Literal)
+                          PointerDeref, BitSlice, BitIndexAccess, RangeExpression, Literal, BitPointerDeref)
         # Seed element_type on ArrayLiteral from target's type_spec so large
         # unsigned literals aren't promoted to i64 when target is e.g. u32[N].
         if isinstance(node.value, ArrayLiteral) and node.value.element_type is None:
@@ -5539,6 +5611,10 @@ class CodegenVisitor:
                     return val
             return AssignmentTypeHandler.handle_array_element_assignment(
                 builder, module, node.target.array, node.target.index, node.value, val)
+
+        elif isinstance(node.target, BitPointerDeref):
+            bp = self._bitptr_value(builder, self.visit(node.target.pointer, builder, module))
+            return self._bitptr_store(builder, bp, val, node, module)
 
         elif isinstance(node.target, PointerDeref):
             ptr = self.visit(node.target.pointer, builder, module)

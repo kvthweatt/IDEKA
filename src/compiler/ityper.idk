@@ -4338,11 +4338,118 @@ namespace IDEKA
                     }; };
             };
 
+            // Source text of a macro argument for $name when it is not a plain identifier. False for a
+            // form it does not print.
+            mac_render(Node* e, Buf* b) -> bool
+            {
+                int k, i, cnt;
+                switch (e == (Node*)0) { case (true) { -> false; } default {}; };
+                k = e.kind;
+                switch (k == NodeKind.IDENTIFIER)
+                {
+                    case (true) { b.put_str(e.text); -> true; }
+                    default {};
+                };
+                switch (k == NodeKind.LITERAL)
+                {
+                    case (true)
+                    {
+                        switch (e.text != (byte*)0) { case (true) { b.put_str(e.text); -> true; } default {}; };
+                        switch (e.op == DataType.SINT | e.op == DataType.UINT | e.op == DataType.SLONG | e.op == DataType.ULONG | e.op == DataType.BYTE)
+                        {
+                            case (true) { b.put_int((int)e.ival); -> true; }
+                            default {};
+                        };
+                        -> false;
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.STRING_LITERAL)
+                {
+                    case (true) { b.put('"'); b.put_str(e.text); b.put('"'); -> true; }
+                    default {};
+                };
+                switch (k == NodeKind.MEMBER_ACCESS)
+                {
+                    case (true)
+                    {
+                        switch (!this.mac_render(e.a, b)) { case (true) { -> false; } default {}; };
+                        b.put('.');
+                        b.put_str(e.text);
+                        -> true;
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.METHOD_CALL | k == NodeKind.FUNCTION_CALL)
+                {
+                    case (true)
+                    {
+                        switch (k == NodeKind.METHOD_CALL)
+                        {
+                            case (true)
+                            {
+                                switch (!this.mac_render(e.a, b)) { case (true) { -> false; } default {}; };
+                                b.put('.');
+                            }
+                            default {};
+                        };
+                        b.put_str(e.text);
+                        b.put('(');
+                        cnt = node_count(e, 0);
+                        while (i < cnt)
+                        {
+                            switch (i > 0) { case (true) { b.put_str(g", \0"); } default {}; };
+                            switch (!this.mac_render(node_child(e, 0, i), b)) { case (true) { -> false; } default {}; };
+                            i++;
+                        };
+                        b.put(')');
+                        -> true;
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.ARRAY_ACCESS)
+                {
+                    case (true)
+                    {
+                        switch (!this.mac_render(e.a, b)) { case (true) { -> false; } default {}; };
+                        b.put('[');
+                        switch (!this.mac_render(e.b, b)) { case (true) { -> false; } default {}; };
+                        b.put(']');
+                        -> true;
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.BINARY_OP)
+                {
+                    case (true)
+                    {
+                        switch (!this.mac_render(e.a, b)) { case (true) { -> false; } default {}; };
+                        b.put(' ');
+                        b.put_str(operator_text(e.op));
+                        b.put(' ');
+                        -> this.mac_render(e.b, b);
+                    }
+                    default {};
+                };
+                switch (k == NodeKind.POINTER_DEREF | k == NodeKind.ADDRESS_OF)
+                {
+                    case (true)
+                    {
+                        switch (k == NodeKind.POINTER_DEREF) { case (true) { b.put('*'); } default { b.put('@'); }; };
+                        -> this.mac_render(e.a, b);
+                    }
+                    default {};
+                };
+                -> false;
+            };
+
             // _macro_substitute on an already cloned tree
             mac_subst(Node* b, NameMap* sm) -> Node*
             {
                 int k, m, i, cnt;
                 Node* arg, r;
+                Buf rb;
+                byte* tx;
                 switch (b == (Node*)0) { case (true) { -> (Node*)0; } default
                     {
                         k = b.kind;
@@ -4352,7 +4459,36 @@ namespace IDEKA
                             arg = (Node*)nm_get(sm, b.text);
                             switch (arg == (Node*)0) { case (true) { -> b; } default {}; };
                             // Python falls back to repr(arg) for a non identifier argument
-                            switch (arg.kind != NodeKind.IDENTIFIER) { case (true) { this.mac_fail = true; -> b; } default {}; };
+                            switch (arg.kind != NodeKind.IDENTIFIER)
+                            {
+                                case (true)
+                                {
+                                    // an expression argument: its source text as a string
+                                    rb.__init();
+                                    switch (this.mac_render(arg, @rb))
+                                    {
+                                        case (true)
+                                        {
+                                            rb.put(0);
+                                            tx = (byte*)fmalloc((u64)(pp_cstrlen(rb.mem) + 1));
+                                            pv_push(this.blobs, (void*)tx);
+                                            k = 0;
+                                            while (rb.mem[k] != 0) { tx[k] = rb.mem[k]; k++; };
+                                            tx[k] = 0;
+                                            r = node_new(NodeKind.STRING_LITERAL, b.line, b.col);
+                                            r.text = tx;
+                                            pv_push(this.anodes, (void*)r);
+                                            rb.__exit();
+                                            -> r;
+                                        }
+                                        default {};
+                                    };
+                                    rb.__exit();
+                                    this.mac_fail = true;
+                                    -> b;
+                                }
+                                default {};
+                            };
                             r = node_clone(b);
                             r.text = arg.text;
                             -> r;
@@ -4416,12 +4552,12 @@ namespace IDEKA
                 int i, cnt;
                 n.a = (Node*)0;
                 d = (Node*)nm_get(this.macro_defs, n.text);
-                switch (d == (Node*)0) { case (true) { ->; } default
+                switch (d == (Node*)0) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' is not defined at this point\0"); this.report(Severity.WARNING, n); ->; } default
                     {
                         cnt = node_count(d, 0);
-                        switch (cnt != node_count(n, 0)) { case (true) { ->; } default
+                        switch (cnt != node_count(n, 0)) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' argument count mismatch\0"); this.report(Severity.WARNING, n); ->; } default
                             {
-                                switch (this.mac_selfref(d.a, n.text) | this.mac_depth >= 64) { case (true) { ->; } default
+                                switch (this.mac_selfref(d.a, n.text) | this.mac_depth >= 64) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' is self-referential or nested too deeply\0"); this.report(Severity.WARNING, n); ->; } default
                                     {
                                         sm = nm_new();
                                         while (i < cnt)
@@ -4432,7 +4568,7 @@ namespace IDEKA
                                         this.mac_fail = false;
                                         body = this.mac_subst(node_clone(d.a), sm);
                                         nm_free(sm);
-                                        switch (this.mac_fail) { case (true) { ->; } default
+                                        switch (this.mac_fail) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' substitution failed (unsupported argument form)\0"); this.report(Severity.WARNING, n); ->; } default
                                             {
                                                 this.mac_depth++;
                                                 this.type_of(body);

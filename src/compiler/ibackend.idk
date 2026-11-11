@@ -137,6 +137,13 @@ namespace IDEKA
                 -> 0;
             };
 
+            // Where and why each unsupported construct was found, empty for LLVM IR
+            unsupported_log() -> PtrVec*
+            {
+                if (this.kind == BK.X64) { -> this.xm.ulog; };
+                -> (PtrVec*)0;
+            };
+
             emit(Buf* out) -> void
             {
                 if (this.kind == BK.X64) { this.xm.emit(out); ->; };

@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comptime Reflection - IDEKA Documentation</title>
+<meta name="description" content="IDEKA programming language documentation: Comptime Reflection">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400..800&display=swap" rel="stylesheet">
+<style>
+:root {
+    --black:    #050608;
+    --dark:     #080a0f;
+    --panel:    #0b0e16;
+    --border:   #0f1520;
+    --border2:  #1a2235;
+    --blue:     #00aaff;
+    --blue-dim: #0066bb;
+    --blue-glow:#00aaff44;
+    --blue-soft:#00aaff12;
+    --text:     #c8d4e8;
+    --text-dim: #5a6880;
+    --text-mute:#2a3445;
+    --mono:     'Space Mono', monospace;
+    --sans:     'DM Sans', sans-serif;
+    --display:  'Syne', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: var(--black);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 0 40px; }
+
+/* Nav */
+nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    height: 64px;
+    padding: 0 40px;
+    background: rgba(5,6,8,0.92);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    gap: 32px;
+}
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    flex-shrink: 0;
+}
+.nav-logo-mark { width: 26px; height: 26px; }
+.nav-logo-text {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.06em;
+}
+.nav-links {
+    display: flex;
+    list-style: none;
+    gap: 28px;
+}
+.nav-links a {
+    font-size: 13px;
+    color: var(--text-dim);
+    text-decoration: none;
+    letter-spacing: 0.02em;
+    transition: color 0.15s;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-spacer { flex: 1; }
+.nav-cta {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--blue);
+    background: transparent;
+    border: 1px solid var(--blue-dim);
+    padding: 7px 16px;
+    border-radius: 2px;
+    text-decoration: none;
+    transition: background 0.2s, box-shadow 0.2s;
+}
+.nav-cta:hover {
+    background: var(--blue-soft);
+    box-shadow: 0 0 20px var(--blue-glow);
+    text-decoration: none;
+}
+.nav-hamburger {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    width: 36px; height: 36px;
+    padding: 6px;
+    background: none; border: none;
+    cursor: pointer; flex-shrink: 0;
+}
+.nav-hamburger span {
+    display: block; height: 1.5px;
+    background: var(--text-dim); border-radius: 2px;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+    transform-origin: center;
+}
+.nav-hamburger.open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); background: var(--text); }
+.nav-hamburger.open span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+.nav-hamburger.open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); background: var(--text); }
+.nav-mobile-menu {
+    display: none;
+    flex-direction: column;
+    position: fixed;
+    top: 64px; left: 0; right: 0;
+    background: rgba(5,6,8,0.97);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border2);
+    z-index: 99;
+    transform: translateY(-8px); opacity: 0;
+    pointer-events: none;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+}
+.nav-mobile-menu.open { transform: translateY(0); opacity: 1; pointer-events: auto; }
+.nav-mobile-link {
+    display: flex; align-items: center;
+    padding: 16px 24px; font-size: 13px; font-weight: 500;
+    color: var(--text-dim); text-decoration: none;
+    border-bottom: 1px solid var(--border);
+    transition: color 0.15s, background 0.15s;
+}
+.nav-mobile-link:last-child { border-bottom: none; }
+.nav-mobile-link:active { background: var(--panel); color: var(--text); }
+.nav-mobile-link.cta {
+    color: var(--blue); font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+
+/* Footer */
+footer {
+    border-top: 1px solid var(--border);
+    padding: 28px 0;
+    background: var(--dark);
+}
+.footer-inner {
+    display: flex; align-items: center; gap: 20px;
+    max-width: 1200px; margin: 0 auto; padding: 0 40px;
+}
+.footer-logo { text-decoration: none; }
+.footer-sep {
+    width: 1px; height: 18px;
+    background: var(--border2);
+}
+.footer-copy { font-size: 12px; color: var(--text-mute); }
+.footer-links {
+    display: flex; gap: 20px; margin-left: auto;
+}
+.footer-links a {
+    font-size: 12px; color: var(--text-mute);
+    text-decoration: none; transition: color 0.15s;
+}
+.footer-links a:hover { color: var(--text); }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: var(--black); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+@media (max-width: 900px) {
+    nav { padding: 0 20px; gap: 16px; }
+    .nav-links { display: none; }
+    .nav-hamburger { display: flex; }
+    .nav-mobile-menu { display: flex; }
+    .footer-inner { padding: 0 20px; flex-wrap: wrap; gap: 12px; }
+    .footer-sep { display: none; }
+    .footer-links { margin-left: 0; }
+}
+
+
+/* ── Doc page layout ─────────────────────────────────────────────────── */
+.doc-layout {
+    display: flex;
+    min-height: calc(100vh - 64px);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px;
+    gap: 0;
+}
+
+.doc-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 64px;
+    height: calc(100vh - 64px);
+    overflow-y: auto;
+    padding: 32px 0 32px 0;
+    border-right: 1px solid var(--border);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border2) transparent;
+}
+
+.doc-sidebar::-webkit-scrollbar { width: 3px; }
+.doc-sidebar::-webkit-scrollbar-thumb { background: var(--border2); }
+
+.doc-sidebar-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    padding: 0 24px;
+    margin-bottom: 12px;
+}
+
+.doc-toc-link {
+    display: block;
+    padding: 4px 24px;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-decoration: none;
+    line-height: 1.5;
+    transition: color 0.15s;
+    border-left: 2px solid transparent;
+}
+.doc-toc-link:hover { color: var(--text); }
+.doc-toc-link.active { color: var(--blue); border-left-color: var(--blue); }
+.doc-toc-link.toc-h1 { padding-left: 24px; font-weight: 600; color: var(--text); font-size: 12px; }
+.doc-toc-link.toc-h2 { padding-left: 24px; }
+.doc-toc-link.toc-h3 { padding-left: 38px; font-size: 11px; }
+.doc-toc-link.toc-h4 { padding-left: 52px; font-size: 11px; color: var(--text-mute); }
+
+.doc-content {
+    flex: 1;
+    min-width: 0;
+    padding: 40px 0 80px 48px;
+    max-width: 860px;
+}
+
+/* ── Doc typography ──────────────────────────────────────────────────── */
+.doc-h1 {
+    font-family: var(--display);
+    font-size: clamp(26px, 4vw, 36px);
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.02em;
+    margin: 0 0 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border2);
+}
+.doc-h2 {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.02em;
+    margin: 40px 0 12px;
+    padding-top: 8px;
+}
+.doc-h3 {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.04em;
+    margin: 28px 0 8px;
+}
+.doc-h4 {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    margin: 20px 0 6px;
+    text-transform: uppercase;
+}
+.doc-h5, .doc-h6 {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    margin: 16px 0 4px;
+}
+
+.doc-p {
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--text-dim);
+    margin: 0 0 14px;
+}
+
+.doc-p code, .doc-ul code, .doc-ol code, li code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--blue);
+    background: var(--blue-soft);
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+
+.doc-ul, .doc-ol {
+    margin: 0 0 14px 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.doc-hr {
+    border: none;
+    border-top: 1px solid var(--border2);
+    margin: 32px 0;
+}
+
+.doc-blockquote {
+    border-left: 3px solid var(--blue-dim);
+    padding: 8px 16px;
+    margin: 16px 0;
+    background: var(--blue-soft);
+    color: var(--text-dim);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.doc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--mono);
+    margin: 16px 0 24px;
+}
+.doc-table th {
+    background: var(--dark);
+    color: var(--blue);
+    padding: 8px 12px;
+    text-align: left;
+    border: 1px solid var(--border2);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.doc-table td {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    vertical-align: top;
+}
+.doc-table tr:nth-child(even) td { background: var(--dark); }
+
+/* ── Code blocks ─────────────────────────────────────────────────────── */
+.doc-code-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 12px 0 20px;
+}
+.doc-code-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--dark);
+    border-bottom: 1px solid var(--border);
+}
+.code-dot { width: 9px; height: 9px; border-radius: 50%; }
+.code-dot-r { background: #3a1c1c; }
+.code-dot-y { background: #2e2a12; }
+.code-dot-g { background: #122e18; }
+.code-lang {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-mute);
+    margin-left: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.doc-pre {
+    margin: 0;
+    padding: 18px 22px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text);
+    overflow-x: auto;
+    background: transparent;
+}
+.doc-pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+/* ── Syntax highlight spans ──────────────────────────────────────────── */
+.ck-kw  { color: #00aaff; font-weight: 700; }
+.ck-ty  { color: #68c4e8; }
+.ck-str { color: #7ec68a; }
+.ck-num { color: #c0956e; }
+.ck-cmt { color: #3a4a5a; font-style: italic; }
+.ck-pp  { color: #a07bd0; }
+
+/* ── Doc index page ──────────────────────────────────────────────────── */
+.doc-index-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 32px;
+}
+.doc-index-card {
+    background: var(--dark);
+    padding: 28px 24px;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: background 0.2s;
+    position: relative;
+}
+.doc-index-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: transparent;
+    transition: background 0.25s;
+}
+.doc-index-card:hover { background: var(--panel); }
+.doc-index-card:hover::after { background: var(--blue); }
+.doc-index-card-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+}
+.doc-index-card-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.02em;
+}
+.doc-index-card-arrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    margin-top: auto;
+    padding-top: 8px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+.doc-index-card:hover .doc-index-card-arrow { opacity: 1; }
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .doc-sidebar { display: none; }
+    .doc-content { padding: 24px 0 60px; }
+    .doc-layout { padding: 0 18px; }
+}
+
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">
+    <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+      <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+      <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+      <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+    </svg>
+    <span class="nav-logo-text">IDEKA</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/docs/">Docs</a></li>
+    <li><a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a></li>
+    <li><a href="https://IDEKAspl.org/ide" target="_blank">Try Online</a></li>
+  </ul>
+  <div class="nav-spacer"></div>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-cta">GitHub</a>
+  <button class="nav-hamburger" id="nav-hamburger" aria-label="Menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-mobile-menu" id="nav-mobile-menu" aria-hidden="true">
+  <a href="/" class="nav-mobile-link">Home</a>
+  <a href="/docs/" class="nav-mobile-link">Docs</a>
+  <a href="https://discord.gg/RAHjbYuNUc" target="_blank" class="nav-mobile-link">Discord</a>
+  <a href="https://IDEKAspl.org/ide" target="_blank" class="nav-mobile-link">Try Online</a>
+  <a href="https://github.com/kvthweatt/IDEKALang" target="_blank" class="nav-mobile-link cta">GitHub &rarr;</a>
+</div>
+
+<div class="doc-layout">
+  <aside class="doc-sidebar">
+    <div class="doc-sidebar-title">On this page</div>
+    <a href="#compilersymboltable-compile-time-reflection-api" class="doc-toc-link toc-h1">`compiler.symbol_table` — Compile-Time Reflection API</a>
+<a href="#structs" class="doc-toc-link toc-h2">Structs</a>
+<a href="#access-forms" class="doc-toc-link toc-h2">Access forms</a>
+<a href="#compilersymboltable" class="doc-toc-link toc-h3">`compiler.symbol_table`</a>
+<a href="#compilersymboltablekind" class="doc-toc-link toc-h3">`compiler.symbol_table.`</a>
+<a href="#compilersymboltablelookupname" class="doc-toc-link toc-h3">`compiler.symbol_table.lookup(name)`</a>
+<a href="#compilersymboltablefuncinfoname" class="doc-toc-link toc-h3">`compiler.symbol_table.funcinfo(name)`</a>
+<a href="#snapshot-timing" class="doc-toc-link toc-h2">Snapshot timing</a>
+<a href="#examples" class="doc-toc-link toc-h2">Examples</a>
+<a href="#enumerate-all-functions" class="doc-toc-link toc-h3">Enumerate all functions</a>
+<a href="#find-all-functions-with-effect-annotations" class="doc-toc-link toc-h3">Find all functions with effect annotations</a>
+<a href="#look-up-a-specific-type" class="doc-toc-link toc-h3">Look up a specific type</a>
+<a href="#inspect-function-parameters" class="doc-toc-link toc-h3">Inspect function parameters</a>
+<a href="#qualified-name-lookup" class="doc-toc-link toc-h3">Qualified name lookup</a>
+<a href="#compilertarget-compile-time-target-information" class="doc-toc-link toc-h1">`compiler.target` — Compile-Time Target Information</a>
+<a href="#properties" class="doc-toc-link toc-h2">Properties</a>
+<a href="#platform" class="doc-toc-link toc-h3">Platform</a>
+<a href="#memory" class="doc-toc-link toc-h3">Memory</a>
+<a href="#x86x8664-instruction-sets" class="doc-toc-link toc-h3">x86/x86_64 instruction sets</a>
+<a href="#examples" class="doc-toc-link toc-h2">Examples</a>
+<a href="#basic-platform-detection" class="doc-toc-link toc-h3">Basic platform detection</a>
+<a href="#generate-target-specific-code" class="doc-toc-link toc-h3">Generate target-specific code</a>
+<a href="#cache-aligned-struct-generation" class="doc-toc-link toc-h3">Cache-aligned struct generation</a>
+<a href="#combined-with-symbol-table" class="doc-toc-link toc-h3">Combined with symbol table</a>
+  </aside>
+  <main class="doc-content">
+    <h1 id="compilersymboltable-compile-time-reflection-api" class="doc-h1"><code>compiler.symbol_table</code> — Compile-Time Reflection API</h1>
+<p class="doc-p"><code>compiler.symbol_table</code> is a compile-time intrinsic available inside <code>comptime</code> blocks. It exposes the compiler's symbol table as queryable IDEKA structs, allowing programs to inspect their own structure at compile time. All access is zero runtime cost — everything is erased before codegen.</p>
+<p class="doc-p">Requires <code>#import &lt;runtime.idk&gt;</code> (or <code>compiler.import.stdlib(&quot;runtime.idk&quot;)</code> inside comptime) to bring the struct definitions into scope.</p>
+<hr class="doc-hr">
+<h2 id="structs" class="doc-h2">Structs</h2>
+<p class="doc-p">Defined in <code>runtime.idk</code>. Must be in scope before use. Pulled in via <code>standard.idk</code>.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">struct</span> IDKC_TYPESYS
+{
+    <span class="ck-ty">byte</span>*  base_type;        <span class="ck-cmt">// &quot;int&quot;, &quot;byte&quot;, &quot;float&quot;, &quot;struct&quot;, &quot;void&quot;, etc.</span>
+    <span class="ck-ty">byte</span>*  custom_typename;  <span class="ck-cmt">// named type e.g. &quot;MyStruct&quot;, empty if primitive</span>
+    <span class="ck-ty">bool</span>   is_signed;
+    <span class="ck-ty">bool</span>   is_const;
+    <span class="ck-ty">bool</span>   is_volatile;
+    <span class="ck-ty">bool</span>   is_tied;
+    <span class="ck-ty">bool</span>   is_pointer;
+    <span class="ck-ty">int</span>    pointer_depth;
+    <span class="ck-ty">bool</span>   is_array;
+    <span class="ck-ty">int</span>    array_size;       <span class="ck-cmt">// 0 if not array or dynamic</span>
+    <span class="ck-ty">int</span>    bit_width;        <span class="ck-cmt">// 0 if not explicitly set</span>
+    <span class="ck-ty">int</span>    alignment;        <span class="ck-cmt">// 0 if not explicitly set</span>
+    <span class="ck-ty">int</span>    endianness;       <span class="ck-cmt">// 1 = big-endian, 0 = little-endian</span>
+    <span class="ck-ty">byte</span>*  storage_class;    <span class="ck-cmt">// &quot;stack&quot;, &quot;heap&quot;, &quot;global&quot;, &quot;local&quot;, &quot;register&quot;, &quot;singinit&quot;, or &quot;&quot;</span>
+    <span class="ck-ty">bool</span>   is_dict;
+    <span class="ck-ty">byte</span>*  dict_key_type;    <span class="ck-cmt">// key type as string, empty if not dict</span>
+    <span class="ck-ty">byte</span>*  dict_value_type;  <span class="ck-cmt">// value type as string, empty if not dict</span>
+};
+
+<span class="ck-kw">struct</span> IDKC_SYMENTRY
+{
+    <span class="ck-ty">byte</span>*     name;   <span class="ck-cmt">// unmangled bare name</span>
+    <span class="ck-ty">byte</span>*     kind;   <span class="ck-cmt">// &quot;function&quot;, &quot;struct&quot;, &quot;object&quot;, &quot;trait&quot;, &quot;interface&quot;,</span>
+                      <span class="ck-cmt">// &quot;namespace&quot;, &quot;variable&quot;, &quot;enum&quot;, &quot;union&quot;,</span>
+                      <span class="ck-cmt">// &quot;effect&quot;, &quot;constraint&quot;, &quot;contract&quot;</span>
+    IDKC_TYPESYS type; <span class="ck-cmt">// type info: return type for functions, declared type for variables,</span>
+                      <span class="ck-cmt">// zeroed for kinds with no single type (struct, trait, etc.)</span>
+    <span class="ck-ty">byte</span>*     ns;     <span class="ck-cmt">// fully qualified namespace path, empty if top-level</span>
+};
+
+<span class="ck-kw">struct</span> IDKC_SYMTABLE
+{
+    <span class="ck-ty">int</span>          entries;
+    IDKC_SYMENTRY* entry;
+};
+
+<span class="ck-kw">struct</span> IDKC_PARAM
+{
+    <span class="ck-ty">byte</span>*      name;
+    IDKC_TYPESYS type;
+};
+
+<span class="ck-kw">struct</span> IDKC_FUNCINFO
+{
+    <span class="ck-ty">int</span>         param_count;
+    IDKC_PARAM*  params;
+    IDKC_TYPESYS return_type;
+    <span class="ck-ty">byte</span>*       calling_conv;    <span class="ck-cmt">// &quot;fastcall&quot;, &quot;cdecl&quot;, etc. Empty = default (fastcall)</span>
+    <span class="ck-ty">bool</span>        is_variadic;
+    <span class="ck-ty">bool</span>        is_recursive;
+    <span class="ck-ty">bool</span>        is_inline;
+    <span class="ck-ty">bool</span>        no_mangle;
+    <span class="ck-ty">bool</span>        has_effect;      <span class="ck-cmt">// true if any overload has a # effect {} annotation</span>
+    <span class="ck-ty">bool</span>        has_attenuate;   <span class="ck-cmt">// true if any overload has a # attenuate {} annotation</span>
+    <span class="ck-ty">int</span>         pre_contracts;   <span class="ck-cmt">// count of pre-contracts on first overload</span>
+    <span class="ck-ty">int</span>         post_contracts;  <span class="ck-cmt">// count of post-contracts on first overload</span>
+};</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="access-forms" class="doc-h2">Access forms</h2>
+<h3 id="compilersymboltable" class="doc-h3"><code>compiler.symbol_table</code></h3>
+<p class="doc-p">Returns an <code>IDKC_SYMTABLE</code> containing all entries in the symbol table at the point the <code>comptime</code> block executes.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>IDKC_SYMTABLE st = compiler.symbol_table;</code></pre>
+</div>
+<h3 id="compilersymboltablekind" class="doc-h3"><code>compiler.symbol_table.&lt;kind&gt;</code></h3>
+<p class="doc-p">Returns an <code>IDKC_SYMTABLE</code> filtered to a specific kind. Valid filters:</p>
+<table class="doc-table"><thead><tr><th>Access</th><th>Kind string in entries</th></tr></thead><tbody><tr><td><code>compiler.symbol_table.functions</code></td><td><code>&quot;function&quot;</code></td></tr><tr><td><code>compiler.symbol_table.structs</code></td><td><code>&quot;struct&quot;</code></td></tr><tr><td><code>compiler.symbol_table.objects</code></td><td><code>&quot;object&quot;</code></td></tr><tr><td><code>compiler.symbol_table.traits</code></td><td><code>&quot;trait&quot;</code></td></tr><tr><td><code>compiler.symbol_table.interfaces</code></td><td><code>&quot;interface&quot;</code></td></tr><tr><td><code>compiler.symbol_table.namespaces</code></td><td><code>&quot;namespace&quot;</code></td></tr><tr><td><code>compiler.symbol_table.variables</code></td><td><code>&quot;variable&quot;</code></td></tr><tr><td><code>compiler.symbol_table.enums</code></td><td><code>&quot;enum&quot;</code></td></tr><tr><td><code>compiler.symbol_table.unions</code></td><td><code>&quot;union&quot;</code></td></tr><tr><td><code>compiler.symbol_table.effects</code></td><td><code>&quot;effect&quot;</code></td></tr><tr><td><code>compiler.symbol_table.constraints</code></td><td><code>&quot;constraint&quot;</code></td></tr><tr><td><code>compiler.symbol_table.contracts</code></td><td><code>&quot;contract&quot;</code></td></tr></tbody></table>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>IDKC_SYMTABLE fns = compiler.symbol_table.functions;</code></pre>
+</div>
+<h3 id="compilersymboltablelookupname" class="doc-h3"><code>compiler.symbol_table.lookup(name)</code></h3>
+<p class="doc-p">Returns the first <code>IDKC_SYMENTRY</code> matching the given name. Accepts a bare name or a fully qualified namespace path.</p>
+<p class="doc-p">Returns a zeroed <code>IDKC_SYMENTRY</code> (all fields empty strings, <code>kind == &quot;&quot;</code>) if not found.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>IDKC_SYMENTRY e = compiler.symbol_table.lookup(<span class="ck-str">&quot;Point&quot;</span>);
+IDKC_SYMENTRY e2 = compiler.symbol_table.lookup(<span class="ck-str">&quot;standard::io::console::print&quot;</span>);
+
+<span class="ck-kw">if</span> (e.kind == <span class="ck-str">&quot;&quot;</span>)
+{
+    compiler.io.console.print(<span class="ck-str">&quot;not found\n&quot;</span>);
+};</code></pre>
+</div>
+<h3 id="compilersymboltablefuncinfoname" class="doc-h3"><code>compiler.symbol_table.funcinfo(name)</code></h3>
+<p class="doc-p">Returns an <code>IDKC_FUNCINFO</code> for the named function. Accepts bare or qualified name. When a function has multiple overloads, boolean flags (<code>has_effect</code>, <code>has_attenuate</code>, <code>is_variadic</code>, etc.) are OR'd across all overloads. Parameter info comes from the first overload.</p>
+<p class="doc-p">Returns a zeroed <code>IDKC_FUNCINFO</code> (all zero/false/empty) if the name is not found or is not a function.</p>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code>IDKC_FUNCINFO fi = compiler.symbol_table.funcinfo(<span class="ck-str">&quot;f&quot;</span>);
+IDKC_FUNCINFO fi2 = compiler.symbol_table.funcinfo(e.name);</code></pre>
+</div>
+<hr class="doc-hr">
+<h2 id="snapshot-timing" class="doc-h2">Snapshot timing</h2>
+<p class="doc-p">The symbol table is snapshotted at the point the <code>comptime</code> block begins executing. It reflects the state of the program as parsed up to that point — including all <code>#import</code>ed files. Definitions that appear after the <code>comptime</code> block in source order are not visible to it.</p>
+<hr class="doc-hr">
+<h2 id="examples" class="doc-h2">Examples</h2>
+<h3 id="enumerate-all-functions" class="doc-h3">Enumerate all functions</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-pp">#import</span> &lt;standard.idk&gt;;
+
+<span class="ck-kw">using</span> standard::io::console;
+
+<span class="ck-kw">comptime</span>
+{
+    IDKC_SYMTABLE st = compiler.symbol_table.functions;
+    <span class="ck-ty">int</span> i;
+    <span class="ck-kw">while</span> (i &lt; st.entries)
+    {
+        IDKC_SYMENTRY e = st.entry[i];
+        println(f<span class="ck-str">&quot;{e.name} -&gt; {e.type.base_type}&quot;</span>);
+        i++;
+    };
+};</code></pre>
+</div>
+<h3 id="find-all-functions-with-effect-annotations" class="doc-h3">Find all functions with effect annotations</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    IDKC_SYMTABLE st = compiler.symbol_table.functions;
+    <span class="ck-ty">int</span> i;
+    <span class="ck-kw">while</span> (i &lt; st.entries)
+    {
+        IDKC_SYMENTRY e = st.entry[i];
+        IDKC_FUNCINFO fi = compiler.symbol_table.funcinfo(e.name);
+        compiler.io.console.print(f<span class="ck-str">&quot;{e.name} has effect: {fi.has_effect}\n&quot;</span>) <span class="ck-kw">if</span> (fi.has_effect);
+        i++;
+    };
+};</code></pre>
+</div>
+<h3 id="look-up-a-specific-type" class="doc-h3">Look up a specific type</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    IDKC_SYMENTRY e = compiler.symbol_table.lookup(<span class="ck-str">&quot;MyStruct&quot;</span>);
+    <span class="ck-kw">if</span> (e.kind == <span class="ck-str">&quot;struct&quot;</span>)
+    {
+        compiler.io.console.print(f<span class="ck-str">&quot;Found: {e.name} in {e.ns}\n&quot;</span>);
+    };
+};</code></pre>
+</div>
+<h3 id="inspect-function-parameters" class="doc-h3">Inspect function parameters</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    IDKC_FUNCINFO fi = compiler.symbol_table.funcinfo(<span class="ck-str">&quot;f&quot;</span>);
+    compiler.io.console.print(f<span class="ck-str">&quot;f has {fi.param_count} params\n&quot;</span>);
+    <span class="ck-ty">int</span> i;
+    <span class="ck-kw">while</span> (i &lt; fi.param_count)
+    {
+        IDKC_PARAM p = fi.params[i];
+        compiler.io.console.print(f<span class="ck-str">&quot;  {p.name} : {p.type.base_type}\n&quot;</span>);
+        i++;
+    };
+};</code></pre>
+</div>
+<h3 id="qualified-name-lookup" class="doc-h3">Qualified name lookup</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    IDKC_SYMENTRY e = compiler.symbol_table.lookup(<span class="ck-str">&quot;standard::io::console::println&quot;</span>);
+    IDKC_FUNCINFO fi = compiler.symbol_table.funcinfo(<span class="ck-str">&quot;standard::io::console::println&quot;</span>);
+    compiler.io.console.print(f<span class="ck-str">&quot;println has_effect: {fi.has_effect}\n&quot;</span>);
+};</code></pre>
+</div>
+<hr class="doc-hr">
+<h1 id="compilertarget-compile-time-target-information" class="doc-h1"><code>compiler.target</code> — Compile-Time Target Information</h1>
+<p class="doc-p"><code>compiler.target</code> exposes platform and hardware information at compile time inside <code>comptime</code> blocks. All properties are resolved when the comptime block executes. Zero runtime cost.</p>
+<hr class="doc-hr">
+<h2 id="properties" class="doc-h2">Properties</h2>
+<h3 id="platform" class="doc-h3">Platform</h3>
+<table class="doc-table"><thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>compiler.target.arch</code></td><td><code>byte*</code></td><td>CPU architecture: <code>&quot;x86_64&quot;</code>, <code>&quot;arm64&quot;</code>, <code>&quot;x86&quot;</code>, etc.</td></tr><tr><td><code>compiler.target.os</code></td><td><code>byte*</code></td><td>Operating system: <code>&quot;windows&quot;</code>, <code>&quot;linux&quot;</code>, <code>&quot;macos&quot;</code>, <code>&quot;freestanding&quot;</code></td></tr><tr><td><code>compiler.target.abi</code></td><td><code>byte*</code></td><td>ABI: <code>&quot;msvc&quot;</code>, <code>&quot;gnu&quot;</code>, <code>&quot;musl&quot;</code></td></tr><tr><td><code>compiler.target.ptr_width</code></td><td><code>int</code></td><td>Pointer width in bits: <code>64</code> or <code>32</code></td></tr><tr><td><code>compiler.target.endian</code></td><td><code>byte*</code></td><td>Byte order: <code>&quot;little&quot;</code> or <code>&quot;big&quot;</code></td></tr></tbody></table>
+<h3 id="memory" class="doc-h3">Memory</h3>
+<table class="doc-table"><thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>compiler.target.cache_line</code></td><td><code>int</code></td><td>CPU cache line size in bytes</td></tr><tr><td><code>compiler.target.page_size</code></td><td><code>int</code></td><td>Memory page size in bytes</td></tr></tbody></table>
+<h3 id="x86x8664-instruction-sets" class="doc-h3">x86/x86_64 instruction sets</h3>
+<table class="doc-table"><thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>compiler.target.has_sse</code></td><td><code>bool</code></td><td>SSE support</td></tr><tr><td><code>compiler.target.has_sse2</code></td><td><code>bool</code></td><td>SSE2 support</td></tr><tr><td><code>compiler.target.has_sse4</code></td><td><code>bool</code></td><td>SSE4.1 support</td></tr><tr><td><code>compiler.target.has_avx</code></td><td><code>bool</code></td><td>AVX support</td></tr><tr><td><code>compiler.target.has_avx2</code></td><td><code>bool</code></td><td>AVX2 support</td></tr><tr><td><code>compiler.target.has_avx512</code></td><td><code>bool</code></td><td>AVX-512 support</td></tr><tr><td><code>compiler.target.has_aes</code></td><td><code>bool</code></td><td>AES-NI support</td></tr><tr><td><code>compiler.target.has_popcnt</code></td><td><code>bool</code></td><td>POPCNT support</td></tr><tr><td><code>compiler.target.has_bmi2</code></td><td><code>bool</code></td><td>BMI2 support</td></tr></tbody></table>
+<p class="doc-p">All <code>has_*</code> flags return <code>false</code> on non-x86 targets.</p>
+<hr class="doc-hr">
+<h2 id="examples" class="doc-h2">Examples</h2>
+<h3 id="basic-platform-detection" class="doc-h3">Basic platform detection</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    compiler.io.console.print(f<span class="ck-str">&quot;arch:      {compiler.target.arch}\n&quot;</span>);
+    compiler.io.console.print(f<span class="ck-str">&quot;os:        {compiler.target.os}\n&quot;</span>);
+    compiler.io.console.print(f<span class="ck-str">&quot;ptr_width: {compiler.target.ptr_width}\n&quot;</span>);
+    compiler.io.console.print(f<span class="ck-str">&quot;endian:    {compiler.target.endian}\n&quot;</span>);
+};</code></pre>
+</div>
+<h3 id="generate-target-specific-code" class="doc-h3">Generate target-specific code</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    <span class="ck-kw">if</span> (compiler.target.has_avx2)
+    {
+        <span class="ck-kw">emitideka</span>
+        {
+            <span class="ck-kw">def</span> dot_product(<span class="ck-ty">float</span>* a, <span class="ck-ty">float</span>* b, <span class="ck-ty">int</span> n) -&gt; <span class="ck-ty">float</span>
+            {
+                <span class="ck-cmt">// AVX2 vectorized implementation</span>
+            };
+        };
+    }
+    <span class="ck-kw">else</span>
+    {
+        <span class="ck-kw">emitideka</span>
+        {
+            <span class="ck-kw">def</span> dot_product(<span class="ck-ty">float</span>* a, <span class="ck-ty">float</span>* b, <span class="ck-ty">int</span> n) -&gt; <span class="ck-ty">float</span>
+            {
+                <span class="ck-cmt">// scalar fallback</span>
+            };
+        };
+    };
+};</code></pre>
+</div>
+<h3 id="cache-aligned-struct-generation" class="doc-h3">Cache-aligned struct generation</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    <span class="ck-ty">int</span> cl = compiler.target.cache_line;
+    compiler.io.console.print(f<span class="ck-str">&quot;Generating {cl}-byte aligned structs\n&quot;</span>);
+};</code></pre>
+</div>
+<h3 id="combined-with-symbol-table" class="doc-h3">Combined with symbol table</h3>
+<div class="doc-code-wrap">
+  <div class="doc-code-bar">
+    <div class="code-dot code-dot-r"></div>
+    <div class="code-dot code-dot-y"></div>
+    <div class="code-dot code-dot-g"></div>
+    <span class="code-lang">IDEKA</span>
+  </div>
+  <pre class="doc-pre"><code><span class="ck-kw">comptime</span>
+{
+    compiler.io.console.print(f<span class="ck-str">&quot;Building for {compiler.target.arch} / {compiler.target.os}\n&quot;</span>);
+    IDKC_SYMTABLE st = compiler.symbol_table.structs;
+    compiler.io.console.print(f<span class="ck-str">&quot;{st.entries} structs defined\n&quot;</span>);
+};</code></pre>
+</div>
+  </main>
+</div>
+
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <a href="/" class="nav-logo footer-logo">
+        <svg class="nav-logo-mark" viewBox="0 0 28 28" fill="none">
+          <polygon points="14,2 26,24 2,24" fill="none" stroke="#00aaff" stroke-width="1.5"/>
+          <polygon points="14,8 21,21 7,21" fill="none" stroke="#00aaff" stroke-width="0.8" opacity="0.45"/>
+          <circle cx="14" cy="14" r="1.5" fill="#00aaff"/>
+        </svg>
+        <span class="nav-logo-text">IDEKA</span>
+      </a>
+      <div class="footer-sep"></div>
+      <span class="footer-copy">&copy; Karac Von Thweatt. All rights reserved.</span>
+      <div class="footer-links">
+        <a href="https://github.com/kvthweatt/IDEKALang" target="_blank">GitHub</a>
+        <a href="https://discord.gg/RAHjbYuNUc" target="_blank">Discord</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+
+// Active TOC link on scroll
+(function() {
+    const links = document.querySelectorAll('.doc-toc-link');
+    if (!links.length) return;
+    const headings = Array.from(document.querySelectorAll(
+        '.doc-content h1[id],h2[id],h3[id],h4[id]'
+    ));
+    function onScroll() {
+        const scrollY = window.scrollY + 90;
+        let active = null;
+        for (const h of headings) {
+            if (h.offsetTop <= scrollY) active = h.id;
+        }
+        links.forEach(l => {
+            const href = l.getAttribute('href');
+            l.classList.toggle('active', href === '#' + active);
+        });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+})();
+
+// Hamburger
+(function() {
+    const btn  = document.getElementById('nav-hamburger');
+    const menu = document.getElementById('nav-mobile-menu');
+    if (!btn || !menu) return;
+    function toggle(open) {
+        btn.classList.toggle('open', open);
+        menu.classList.toggle('open', open);
+        btn.setAttribute('aria-expanded', String(open));
+        menu.setAttribute('aria-hidden', String(!open));
+    }
+    btn.addEventListener('click', () => toggle(!btn.classList.contains('open')));
+    menu.querySelectorAll('.nav-mobile-link').forEach(l => l.addEventListener('click', () => toggle(false)));
+    document.addEventListener('click', e => {
+        if (btn.classList.contains('open') && !btn.contains(e.target) && !menu.contains(e.target))
+            toggle(false);
+    });
+})();
+
+</script>
+</body>
+</html>
