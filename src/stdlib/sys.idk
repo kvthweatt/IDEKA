@@ -130,12 +130,14 @@ extern def !!GetLogicalProcessorInformation(void*, u32*) -> bool;
                 volatile asm
                 {
                     mov x8, #56
-                    mov x0, $0
-                    mov x1, #0
+                    // openat(AT_FDCWD, path, O_RDONLY, 0)
+                    mov x0, #-100
+                    mov x1, $1
                     mov x2, #0
+                    mov x3, #0
                     svc #0
-                    mov $1, x0
-                } : "=r"(fd) : "r"(@path[0]) : "x0","x1","x2","x8","memory";
+                    mov $0, x0
+                } : "=r"(fd) : "r"(@path[0]) : "x0","x1","x2","x3","x8","memory";
 
                 switch ((i64)fd < 0)
                 {
@@ -146,11 +148,11 @@ extern def !!GetLogicalProcessorInformation(void*, u32*) -> bool;
                 volatile asm
                 {
                     mov x8, #63
-                    mov x0, $0
-                    mov x1, $1
+                    mov x0, $1
+                    mov x1, $2
                     mov x2, #15
                     svc #0
-                    mov $2, x0
+                    mov $0, x0
                 } : "=r"(bytes_read) : "r"(fd), "r"(buf_addr) : "x0","x1","x2","x8","memory";
 
                 volatile asm
@@ -163,11 +165,9 @@ extern def !!GetLogicalProcessorInformation(void*, u32*) -> bool;
                 size_val = 0ul;
                 mul      = 1ul;
                 int i;
-                byte c;
-                
                 while (i < (int)bytes_read)
                 {
-                    c = buf[i];
+                    byte c = buf[i];
                     switch (c == 'K' | c == 'k')
                     {
                         case (1) { mul = 1024ul; break; }

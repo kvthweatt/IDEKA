@@ -14714,7 +14714,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp\0");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };

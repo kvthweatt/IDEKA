@@ -2383,6 +2383,18 @@ object A64Module
                         while (j < ce2 & t[j] != '}') { this.tb.put((int)t[j]); j++; };
                         r = this.a_regidx(this.tb.mem);
                         if (r >= 0) { used = used `| ((i64)1 << (i64)r); };
+                        // a vector register v0 to v31 (or its d, q and s views) is register 32 + n
+                        if (r < 0 & (this.tb.mem[0] == 'v' | this.tb.mem[0] == 'd' | this.tb.mem[0] == 'q' | this.tb.mem[0] == 's'))
+                        {
+                            r = 0;
+                            k = 1;
+                            while (this.tb.mem[k] >= 48 & this.tb.mem[k] <= 57)
+                            {
+                                r = r * 10 + ((int)this.tb.mem[k] - 48);
+                                k++;
+                            };
+                            if (k > 1 & this.tb.mem[k] == 0 & r < 32) { used = used `| ((i64)1 << (i64)(32 + r)); };
+                        };
                     }
                     elif (t[cb] == '=')
                     {

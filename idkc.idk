@@ -756,9 +756,7 @@ module IDEKA_Compiler_Entrypoint
         w.put_str("\"\0");
         rc = system(w.mem);
         #else
-        #ifdef __ARCH_ARM64__
-        rc = system(c);
-        #else
+        #ifdef __ARCH_X86_64__
         int* rcp = @rc;
         volatile asm
         {
@@ -769,6 +767,8 @@ module IDEKA_Compiler_Entrypoint
             movq %r12, %rsp
             movl %eax, ($1)
         } : : "r"(c), "r"(rcp) : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "memory", "cc";
+        #else
+        rc = system(c);
         #endif;
         #endif;
         -> rc;
