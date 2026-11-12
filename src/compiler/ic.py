@@ -131,6 +131,18 @@ def resolve_llvm_tool(tool_name: str) -> str:
 
 
 class IDEKACompiler:
+    def _dynamic_linker(self):
+        """Program interpreter of the target: the musl loader when the system has one, else glibc's."""
+        import os
+        if self.is_arm64:
+            candidates = ["/lib/ld-musl-aarch64.so.1", "/lib/ld-linux-aarch64.so.1"]
+        else:
+            candidates = ["/lib/ld-musl-x86_64.so.1", "/lib64/ld-linux-x86-64.so.2"]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return candidates[-1]
+
     def __init__(self, /, 
                  verbosity: int = None, 
                  logger: IDEKALogger = None,
@@ -1029,7 +1041,7 @@ class IDEKACompiler:
                     "--section-start", ".rodata=0x600000",  # Read-only data address
                     "--section-start", ".data=0x700000",    # Data section address
                     "--section-start", ".bss=0x800000",     # BSS section address
-                    "-dynamic-linker", "/lib/ld-linux-aarch64.so.1" if self.is_arm64 else "/lib64/ld-linux-x86-64.so.2",
+                    "-dynamic-linker", self._dynamic_linker(),
                     "-e", "_start",                         # Entry point
                     str(obj_file),
                     # Library search paths
