@@ -167,6 +167,7 @@ struct MO
 #def M_VASTART 45;  // va_start: o0 the list pointer
 #def M_SAVEVA 46;   // saves the argument registers into the register save area tgt
 #def M_DALLOC 47;   // dynamic stack allocation: o0 the size in bytes, o1 the result
+#def M_RETADDR 57;  // o0 receives the address of the slot that holds the return address (frame pointer + 8)
 #def M_FMA 55;      // fused multiply add on scalar floats of size sz: o2 = o0 * o1 + o3 (cc 0), o0 * o1 - o3 (1), o3 - o0 * o1 (2)
 #def M_FMAP 56;     // element-wise float loop over whole vectors: rdi dst, rsi and rdx the sources, rcx the count, r8 and r9 the invariants, o0 the program, rax = elements done
 #def M_VZERO 52;    // zeroes the sz bytes at memory o0 with vector stores, uses xmm15
@@ -473,6 +474,7 @@ struct MI
             bool efr;  // the block being written runs with the frame set up
             SI* nxti;  // instruction after the one being selected in its block
             bool hasal;  // the function has stack allocations
+            bool hasra;  // the function takes the address of its return address
             bool skipn;  // the instruction after the one being selected is already done
             byte** rn;
             int sfs;  // operands of the float compare were swapped
@@ -7474,7 +7476,7 @@ struct MI
                 };
                 this.ipc = this.ipc `| m.clob;
                 tail = false;
-                if (SSA_OPT_TAILCALL == 1 & direct & !this.a_win() & stk == 0 & rfo == 0 & !this.hasal & !((XGF*)this.sf.tg).dyn & this.nxti != (SI*)0 & this.kpm == 0)
+                if (SSA_OPT_TAILCALL == 1 & direct & !this.a_win() & stk == 0 & rfo == 0 & !this.hasal & !this.hasra & !((XGF*)this.sf.tg).dyn & this.nxti != (SI*)0 & this.kpm == 0)
                 {
                     if (((XGF*)this.sf.tg).vafo == 0 & ((XGF*)this.sf.tg).vagp == 0 & ((XGF*)this.sf.tg).vafp == 0 & ((XGF*)this.sf.tg).vastk == 0)
                     {
@@ -7524,6 +7526,14 @@ struct MI
                 this.s_ifree(ploc);
                 this.s_ifree(poff);
                 this.s_ifree(st);
+                ->;
+            };
+
+            // @->: the return address sits right above the saved frame pointer, so the function keeps its frame pointer
+            s_isel_retaddr(SI* x) -> void
+            {
+                int d = this.s_def(x.res, 0);
+                this.s_mi1(M_RETADDR, 8, this.s_mo_r(d, 8));
                 ->;
             };
 
@@ -7926,6 +7936,7 @@ struct MI
                 if (o == SO_CBR) { this.s_isel_cbr(x); ->; };
                 if (o == SO_SWITCH) { this.s_isel_switch(x); ->; };
                 if (o == SO_VAARG) { this.s_isel_vaarg(x); ->; };
+                if (o == SO_RETADDR) { this.s_isel_retaddr(x); ->; };
                 if (o == SO_EXTRACT) { this.s_isel_extract(x); ->; };
                 if (o == SO_INSERT) { this.s_isel_insert(x); ->; };
                 if (o == SO_RET) { this.s_isel_ret(x); ->; };
@@ -7962,6 +7973,7 @@ struct MI
                 this.s_lazy();
                 if (SSA_OPT_LAZYMULTI == 1) { this.s_lazymulti(); };
                 this.hasal = false;
+                this.hasra = false;
                 i = 0;
                 while (i < g.nb)
                 {
@@ -7973,6 +7985,7 @@ struct MI
                         {
                             x = (SI*)gb.ib.insts.items[j];
                             if (x.op == SO_ALLOCA | x.op == SO_ALLOCAN | x.op == SO_VAARG) { this.hasal = true; };
+                            if (x.op == SO_RETADDR) { this.hasra = true; };
                             j++;
                         };
                     };
@@ -8387,6 +8400,11 @@ struct MI
                 if (op == M_CALL | op == M_DIV | op == M_JTAB | op == M_JTAB2 | op == M_VASTART)
                 {
                     if (k == 0) { -> 1; };
+                    -> 0;
+                };
+                if (op == M_RETADDR)
+                {
+                    if (k == 0) { -> 2; };
                     -> 0;
                 };
                 -> 0;
@@ -9789,6 +9807,13 @@ struct MI
                 };
                 if (op == M_VAARG) { this.e_vaarg(o, m); ->; };
                 if (op == M_VASTART) { this.e_vastart(o, m); ->; };
+                if (op == M_RETADDR)
+                {
+                    o.put_str(g"\tleaq 8(%rbp), \0");
+                    this.e_reg(o, this.s_phys(m.o0.r), 8);
+                    o.put(10);
+                    ->;
+                };
                 if (op == M_SAVEVA) { this.e_saveva(o, m); ->; };
                 if (op == M_ASM) { o.put_str(m.text); ->; };
                 if (op == M_INT3) { this.e_ln(o, g"int3\0"); ->; };
@@ -11304,7 +11329,7 @@ struct MI
                         op = m.op;
                         if (op == M_CALL & m.tgt == 77) { j++; continue; };
                         if (op == M_CALL & calls) { j++; continue; };
-                        if (op == M_CALL | op == M_DALLOC | op == M_VASTART | op == M_VAARG | op == M_SAVEVA | op == M_FREM | op == M_TEXT) { -> false; };
+                        if (op == M_CALL | op == M_DALLOC | op == M_VASTART | op == M_VAARG | op == M_SAVEVA | op == M_FREM | op == M_TEXT | op == M_RETADDR) { -> false; };
                         if (op == M_ASM) { if (!this.s_asm_nostack(m.text)) { -> false; }; };
                         j++;
                     };
@@ -11926,7 +11951,7 @@ struct MI
             // True for the instructions whose lowering touches the stack in ways this pass does not follow
             s_sw_bad(int op) -> bool
             {
-                if (op == M_DALLOC | op == M_VAARG | op == M_VASTART | op == M_SAVEVA | op == M_FREM | op == M_TEXT) { -> true; };
+                if (op == M_DALLOC | op == M_VAARG | op == M_VASTART | op == M_SAVEVA | op == M_FREM | op == M_TEXT | op == M_RETADDR) { -> true; };
                 if (op == M_JTAB | op == M_JTAB2 | op == M_SPILL | op == M_RELOAD) { -> true; };
                 if (op == M_COPY | op == M_REPMOVS | op == M_REPSTOS | op == M_MEMMOVE | op == M_BREV | op == M_STRLEN | op == M_CNTB | op == M_RUNB | op == M_FMAP | op == M_VZERO) { -> true; };
                 -> false;

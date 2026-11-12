@@ -14714,7 +14714,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp\0");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -19052,6 +19052,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             x_addrof(Node* n) -> IRValue*
             {
                 Node* e = n.a;
+                // @->: the slot that holds this function's return address
+                if (n.kind == NodeKind.RETURN_ADDRESS) { -> this.mod.retaddr_slot(g"retaddr\0"); };
                 if (e.kind == NodeKind.BIT_INDEX_ACCESS) { -> this.x_bitptr_addr(n); };
                 IRValue* v, tmp, fv;
                 LVar* lv;
@@ -23534,7 +23536,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                                                                                                                                                             case (true) { -> this.x_deref(n); }
                                                                                                                                                                                                             default
                                                                                                                                                                                                             {
-                                                                                                                                                                                                                switch (k == NodeKind.ADDRESS_OF)
+                                                                                                                                                                                                                switch (k == NodeKind.ADDRESS_OF | k == NodeKind.RETURN_ADDRESS)
                                                                                                                                                                                                                 {
                                                                                                                                                                                                                     case (true) { -> this.x_addrof(n); }
                                                                                                                                                                                                                     default

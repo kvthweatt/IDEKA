@@ -428,6 +428,15 @@
                 ->;
             };
 
+            s_r_retaddr(IRValue* r) -> void
+            {
+                SI* x = this.s_new(SO_RETADDR);
+                x.res = r;
+                x.ty = r.ty;
+                this.s_push(x);
+                ->;
+            };
+
             s_r_vaarg(IRValue* list, IRType* ty, IRValue* r) -> void
             {
                 SI* x = this.s_new(SO_VAARG);
@@ -7787,7 +7796,7 @@
                     while (j < b.insts.len)
                     {
                         x = (SI*)b.insts.items[j];
-                        if (x.op == SO_ALLOCAN | x.op == SO_VAARG) { -> false; };
+                        if (x.op == SO_ALLOCAN | x.op == SO_VAARG | x.op == SO_RETADDR) { -> false; };
                         if (x.op == SO_CALL) { if (x.a == g.self) { -> false; }; };
                         if (x.op == SO_RET | x.op == SO_RETV) { nret++; };
                         tot++;

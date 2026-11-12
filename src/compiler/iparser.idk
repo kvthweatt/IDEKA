@@ -10379,6 +10379,15 @@ namespace IDEKA
                         }
                             default
                             {
+                                switch (c == TokenType.RETURN_ADDRESS)
+                                {
+                                    case (true) {
+                                    this.advance();
+                                    n = this.mk(NodeKind.RETURN_ADDRESS, line, col);
+                                    -> n;
+                                }
+                                    default {};
+                                };
                                 switch (c == TokenType.ADDRESS_OF)
                                 {
                                     case (true) {

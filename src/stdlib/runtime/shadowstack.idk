@@ -9,9 +9,10 @@
 //   #def IDEKA_SHADOW_STACK 1;
 //   #import "standard.idk";
 //
-// When active, FRTStartup (Windows) captures the return address and a
-// canary into a separately allocated, non-executable shadow page before
-// calling main(), then validates them on return.
+// When active, a function marked with the FSS_Protect_Frame contract copies
+// its real return address, read through the @-> operator, into a separately
+// allocated shadow region. FSS_Cleanup_Frame reads the return address from the
+// stack again before the function returns and compares it with the copy.
 //
 // If tampering is detected the process is aborted immediately.
 
@@ -32,8 +33,8 @@
 struct FSSFrame
 {
     u64 canary,       // Random canary value XOR'd with the saved return address
-        saved_ra,     // Return address captured at frame entry (XOR'd with canary)
-        saved_rsp;    // Stack pointer at frame entry, for depth validation
+        saved_ra,     // Return address read from the real stack at frame entry (XOR'd with canary)
+        saved_slot;   // Address of the stack slot that held it, unique to this live frame
 };
 
 // ============================================================================
@@ -79,10 +80,10 @@ extern
 // MEM_RELEASE
 #def FSS_MEM_RELEASE    0x8000;
 
-// Number of frames the shadow page holds (one 4 KB page / 24 bytes per frame)
-#def FSS_FRAME_CAPACITY 170;
-// Size in bytes of the shadow allocation (one 4 KB page)
-#def FSS_PAGE_SIZE 4096;
+// Number of frames the shadow region holds (64 KB / 24 bytes per frame)
+#def FSS_FRAME_CAPACITY 2730;
+// Size in bytes of the shadow allocation
+#def FSS_PAGE_SIZE 65536;
 
 namespace standard
 {
@@ -145,16 +146,16 @@ namespace standard
             };
 
             // ----------------------------------------------------------------
-            // fss_push(ra, rsp) - Save a return address and stack pointer.
+            // fss_push(ra, ra_slot) - Save a return address and where it lives.
             //
-            // ra  - the return address to protect
-            // rsp - the caller's stack pointer for depth validation
+            // ra      - the return address to protect, read through @->
+            // ra_slot - the address of the stack slot holding it (@->)
             //
             // The saved_ra field is stored XOR'd with FSS_CANARY so a simple
             // linear scan of the shadow page does not reveal the raw address.
             // Returns the frame index (slot) used, or U64MAXVAL on overflow.
             // ----------------------------------------------------------------
-            def fss_push(u64 ra, u64 rsp) -> u64
+            def fss_push(u64 ra, u64 ra_slot) -> u64
             {
                 if (FSS_TOP >= FSS_CAP)
                 {
@@ -164,24 +165,24 @@ namespace standard
                 FSSFrame* frame = FSS_BASE + FSS_TOP;
                 frame.canary    = FSS_CANARY;
                 frame.saved_ra  = ra ^| FSS_CANARY;
-                frame.saved_rsp = rsp;
+                frame.saved_slot = ra_slot;
 
                 FSS_TOP = FSS_TOP + 1;
                 return FSS_TOP - 1;
             };
 
             // ----------------------------------------------------------------
-            // fss_verify(slot, ra, rsp) - Validate a previously pushed frame.
+            // fss_verify(slot, ra, ra_slot) - Validate a previously pushed frame.
             //
-            // slot - the frame index returned by fss_push()
-            // ra   - the return address currently on the real stack
-            // rsp  - the current stack pointer
+            // slot    - the frame index returned by fss_push()
+            // ra      - the return address currently in the real stack slot
+            // ra_slot - the address of that slot, read through @->
             //
             // Returns true if both the canary and return address are intact.
             // ----------------------------------------------------------------
-            def fss_verify(u64 slot, u64 ra, u64 rsp) -> bool
+            def fss_verify(u64 slot, u64 ra, u64 ra_slot) -> bool
             {
-                if (slot >= FSS_CAP)
+                if (slot >= FSS_TOP)
                 {
                     return false;
                 };
@@ -201,8 +202,8 @@ namespace standard
                     return false;
                 };
 
-                // Stack pointer must match (frame depth check)
-                if (frame.saved_rsp != rsp)
+                // The slot must be the one this frame owns
+                if (frame.saved_slot != ra_slot)
                 {
                     return false;
                 };
@@ -211,22 +212,25 @@ namespace standard
             };
 
             // ----------------------------------------------------------------
-            // fss_pop() - Pop and clear the top frame.
+            // fss_pop_to(slot) - Pop and clear every frame from the top down to
+            // and including slot.
+            //
+            // Frames above slot belong to calls that never reached their
+            // cleanup (an unwound exception, a longjmp), so they go with it.
             // ----------------------------------------------------------------
-            def fss_pop() -> void
+            def fss_pop_to(u64 slot) -> void
             {
-                if (FSS_TOP == 0)
+                FSSFrame* frame;
+                while (FSS_TOP > slot)
                 {
-                    return;
+                    FSS_TOP = FSS_TOP - 1;
+                    frame = FSS_BASE + FSS_TOP;
+
+                    // Zero out the frame so it cannot be replayed
+                    frame.canary     = 0;
+                    frame.saved_ra   = 0;
+                    frame.saved_slot = 0;
                 };
-
-                FSS_TOP = FSS_TOP - 1;
-                FSSFrame* frame = FSS_BASE + FSS_TOP;
-
-                // Zero out the frame so it cannot be replayed
-                frame.canary    = 0;
-                frame.saved_ra  = 0;
-                frame.saved_rsp = 0;
 
                 return;
             };
@@ -241,6 +245,7 @@ namespace standard
             def fss_abort() -> void
             {
                 standard::io::console::print("FATAL: shadow stack violation detected - aborting\n\0");
+                standard::io::console::flush();
                 ExitProcess((u32)1);
                 noreturn;
             };
@@ -289,14 +294,14 @@ contract FSS_Protect_Frame,
 
 contract FSS_Protect_Frame
 {
-    volatile u64 __fss_canary_local,
-                 __fss_frame_slot;
+    volatile u64 __fss_frame_slot;
     volatile bool __fss_frame_active;
     if (FSS_BASE != (FSSFrame*)NULL)
     {
-        u64 __fss_frame_canary = fss_rdtsc() ^| FSS_CANARY;
-        __fss_canary_local = __fss_frame_canary;
-        __fss_frame_slot = fss_push(__fss_frame_canary, __fss_frame_canary);
+        // @-> is the stack slot holding this function's return address
+        u64* __fss_ra_slot = @->;
+        __fss_frame_slot = fss_push(*__fss_ra_slot, (u64)__fss_ra_slot);
+        if (__fss_frame_slot == U64MAXVAL) { fss_abort(); };
         __fss_frame_active = true;
     };
 } # binding {this : FSS_Cleanup_Frame};
@@ -305,9 +310,11 @@ contract FSS_Cleanup_Frame
 {
     if (__fss_frame_active)
     {
-        if (fss_verify(__fss_frame_slot, __fss_canary_local, __fss_frame_canary))
+        // The slot is read again here, so the check never trusts a value kept in this frame
+        u64* __fss_ra_now = @->;
+        if (fss_verify(__fss_frame_slot, *__fss_ra_now, (u64)__fss_ra_now))
         {
-            fss_pop();
+            fss_pop_to(__fss_frame_slot);
         }
         else
         {
@@ -332,10 +339,10 @@ extern
 // MAP_FAILED sentinel (-1 cast to pointer)
 #def FSS_MAP_FAILED     0xFFFFFFFFFFFFFFFFu;
 
-// Number of frames the shadow page holds (one 4 KB page / 24 bytes per frame)
-#def FSS_FRAME_CAPACITY 170;
-// Size in bytes of the shadow allocation (one 4 KB page)
-#def FSS_PAGE_SIZE 4096;
+// Number of frames the shadow region holds (64 KB / 24 bytes per frame)
+#def FSS_FRAME_CAPACITY 2730;
+// Size in bytes of the shadow allocation
+#def FSS_PAGE_SIZE 65536;
 
 namespace standard
 {
@@ -452,16 +459,16 @@ namespace standard
             };
 
             // ----------------------------------------------------------------
-            // fss_push(ra, rsp) - Save a return address and stack pointer.
+            // fss_push(ra, ra_slot) - Save a return address and where it lives.
             //
-            // ra  - the return address to protect
-            // rsp - the caller's stack pointer for depth validation
+            // ra      - the return address to protect, read through @->
+            // ra_slot - the address of the stack slot holding it (@->)
             //
             // The saved_ra field is stored XOR'd with FSS_CANARY so a simple
             // linear scan of the shadow page does not reveal the raw address.
             // Returns the frame index (slot) used, or U64MAXVAL on overflow.
             // ----------------------------------------------------------------
-            def fss_push(u64 ra, u64 rsp) -> u64
+            def fss_push(u64 ra, u64 ra_slot) -> u64
             {
                 if (FSS_TOP >= FSS_CAP)
                 {
@@ -471,24 +478,24 @@ namespace standard
                 FSSFrame* frame = FSS_BASE + FSS_TOP;
                 frame.canary    = FSS_CANARY;
                 frame.saved_ra  = ra ^| FSS_CANARY;
-                frame.saved_rsp = rsp;
+                frame.saved_slot = ra_slot;
 
                 FSS_TOP = FSS_TOP + 1;
                 return FSS_TOP - 1;
             };
 
             // ----------------------------------------------------------------
-            // fss_verify(slot, ra, rsp) - Validate a previously pushed frame.
+            // fss_verify(slot, ra, ra_slot) - Validate a previously pushed frame.
             //
-            // slot - the frame index returned by fss_push()
-            // ra   - the return address currently on the real stack
-            // rsp  - the current stack pointer
+            // slot    - the frame index returned by fss_push()
+            // ra      - the return address currently in the real stack slot
+            // ra_slot - the address of that slot, read through @->
             //
             // Returns true if both the canary and return address are intact.
             // ----------------------------------------------------------------
-            def fss_verify(u64 slot, u64 ra, u64 rsp) -> bool
+            def fss_verify(u64 slot, u64 ra, u64 ra_slot) -> bool
             {
-                if (slot >= FSS_CAP)
+                if (slot >= FSS_TOP)
                 {
                     return false;
                 };
@@ -508,8 +515,8 @@ namespace standard
                     return false;
                 };
 
-                // Stack pointer must match (frame depth check)
-                if (frame.saved_rsp != rsp)
+                // The slot must be the one this frame owns
+                if (frame.saved_slot != ra_slot)
                 {
                     return false;
                 };
@@ -518,22 +525,24 @@ namespace standard
             };
 
             // ----------------------------------------------------------------
-            // fss_pop() - Pop and clear the top frame.
+            // fss_pop_to(slot) - Pop and clear every frame from the top down to
+            // and including slot.
+            //
+            // Frames above slot belong to calls that never reached their
+            // cleanup (an unwound exception, a longjmp), so they go with it.
             // ----------------------------------------------------------------
-            def fss_pop() -> void
+            def fss_pop_to(u64 slot) -> void
             {
-                if (FSS_TOP == 0)
+                while (FSS_TOP > slot)
                 {
-                    return;
+                    FSS_TOP = FSS_TOP - 1;
+                    FSSFrame* frame = FSS_BASE + FSS_TOP;
+
+                    // Zero out the frame so it cannot be replayed
+                    frame.canary     = 0;
+                    frame.saved_ra   = 0;
+                    frame.saved_slot = 0;
                 };
-
-                FSS_TOP = FSS_TOP - 1;
-                FSSFrame* frame = FSS_BASE + FSS_TOP;
-
-                // Zero out the frame so it cannot be replayed
-                frame.canary    = 0;
-                frame.saved_ra  = 0;
-                frame.saved_rsp = 0;
 
                 return;
             };
@@ -548,6 +557,7 @@ namespace standard
             def fss_abort() -> void
             {
                 standard::io::console::print("FATAL: shadow stack violation detected - aborting\n\0");
+                standard::io::console::flush();
                 abort();
                 noreturn;
             };
@@ -593,14 +603,14 @@ using standard::runtime::shadow_stack;
 
 contract FSS_Protect_Frame
 {
-    volatile u64 __fss_canary_local,
-                 __fss_frame_slot;
+    volatile u64 __fss_frame_slot;
     volatile bool __fss_frame_active;
     if (FSS_BASE != (FSSFrame*)NULL)
     {
-        u64 __fss_frame_canary = fss_rdtsc() ^| FSS_CANARY;
-        __fss_canary_local = __fss_frame_canary;
-        __fss_frame_slot = fss_push(__fss_frame_canary, __fss_frame_canary);
+        // @-> is the stack slot holding this function's return address
+        u64* __fss_ra_slot = @->;
+        __fss_frame_slot = fss_push(*__fss_ra_slot, (u64)__fss_ra_slot);
+        if (__fss_frame_slot == U64MAXVAL) { fss_abort(); };
         __fss_frame_active = true;
     };
 };
@@ -609,9 +619,11 @@ contract FSS_Cleanup_Frame
 {
     if (__fss_frame_active)
     {
-        if (fss_verify(__fss_frame_slot, __fss_canary_local, __fss_frame_canary))
+        // The slot is read again here, so the check never trusts a value kept in this frame
+        u64* __fss_ra_now = @->;
+        if (fss_verify(__fss_frame_slot, *__fss_ra_now, (u64)__fss_ra_now))
         {
-            fss_pop();
+            fss_pop_to(__fss_frame_slot);
         }
         else
         {

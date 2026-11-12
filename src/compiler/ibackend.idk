@@ -707,6 +707,17 @@ namespace IDEKA
                 -> this.ll.fcmp(pred, a, b, hint);
             };
 
+            retaddr_slot(byte* hint) -> IRValue*
+            {
+#ifndef IDEKA_NO_X64
+                if (this.kind == BK.X64) { -> this.xm.retaddr_slot(hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.retaddr_slot(hint); };
+#endif;
+                -> this.ll.retaddr_slot(hint);
+            };
+
             va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
             {
 #ifndef IDEKA_NO_X64

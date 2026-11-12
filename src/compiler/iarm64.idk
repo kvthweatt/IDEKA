@@ -2589,6 +2589,17 @@ object A64Module
                 ->;
             };
 
+            // @->: the link register is saved at [x29, #8], so the function gets a frame even when it is a leaf
+            s_isel_retaddr(SI* x) -> void
+            {
+                int d = this.s_def(x.res, 0);
+                AI* m = this.s_mi(A_ADDFO, 8);
+                ((AGF*)this.sf.tg).leaf = false;
+                m.d = d;
+                m.k = 1;
+                ->;
+            };
+
             s_isel_vaarg(SI* x) -> void
             {
                 IRType* t = x.ty;
@@ -2982,6 +2993,7 @@ object A64Module
                 if (o == SO_CBR) { this.s_isel_cbr(x); ->; };
                 if (o == SO_SWITCH) { this.s_isel_switch(x); ->; };
                 if (o == SO_VAARG) { this.s_isel_vaarg(x); ->; };
+                if (o == SO_RETADDR) { this.s_isel_retaddr(x); ->; };
                 if (o == SO_EXTRACT) { this.s_isel_extract(x); ->; };
                 if (o == SO_INSERT) { this.s_isel_insert(x); ->; };
                 if (o == SO_RET) { this.s_isel_ret(x); ->; };
@@ -4728,6 +4740,12 @@ object A64Module
                 };
                 if (op == A_ADDFO)
                 {
+                    if (m.k == 1)
+                    {
+                        // the frame record: x29 holds the saved x29, the link register follows
+                        this.e_addimm(o, this.s_phys(m.d), 29, (i64)8);
+                        -> 0;
+                    };
                     this.e_addimm(o, this.s_phys(m.d), this.e_fbase(), this.e_fooff(m) + m.imm);
                     -> 0;
                 };

@@ -1,0 +1,18 @@
+#def IDEKA_SHADOW_STACK 1;
+#import <standard.idk>;
+using standard::io::console;
+
+def test() -> void : FSS_Protect_Frame
+{
+    // @-> is the stack slot holding the return address, writing it is what a stack smash does
+    u64* ra = @->;
+    *ra = 0xDEADBEEFCAFEBABEu;
+    return;
+} : FSS_Cleanup_Frame;
+
+def main() -> int
+{
+    test();
+    println("Post-test message.");
+    return 0;
+};

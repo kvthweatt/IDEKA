@@ -226,6 +226,7 @@ namespace IDEKA
             POINTER_DEREF,    // PointerDeref: a = pointer
             BIT_POINTER_DEREF,    // `*p: a = bit pointer
             ADDRESS_OF,    // AddressOf: a = expression
+            RETURN_ADDRESS,    // @->: the address of the slot holding the function's return address, no operands
             STRINGIFY,    // Stringify: text = name, text2 = member
             CODIFY,    // Codify: a = operand
             ALIGN_OF,    // AlignOf: ts = target type, or a = target expression
@@ -715,6 +716,7 @@ namespace IDEKA
                 case (NodeKind.POINTER_DEREF) { return g"POINTER_DEREF\0"; }
                 case (NodeKind.BIT_POINTER_DEREF) { return g"BIT_POINTER_DEREF\0"; }
                 case (NodeKind.ADDRESS_OF) { return g"ADDRESS_OF\0"; }
+                case (NodeKind.RETURN_ADDRESS) { return g"RETURN_ADDRESS\0"; }
                 case (NodeKind.STRINGIFY) { return g"STRINGIFY\0"; }
                 case (NodeKind.CODIFY) { return g"CODIFY\0"; }
                 case (NodeKind.ALIGN_OF) { return g"ALIGN_OF\0"; }

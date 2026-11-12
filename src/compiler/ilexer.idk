@@ -214,6 +214,7 @@ namespace IDEKA
             NO_MANGLE,
             FUNCTION_POINTER,
             ADDRESS_CAST,
+            RETURN_ADDRESS,
             STRINGIFY,
             CODIFY,
             BITSLICE,
@@ -1242,6 +1243,7 @@ namespace IDEKA
                 case (TokenType.NO_MANGLE) { -> g"NO_MANGLE\0"; }
                 case (TokenType.FUNCTION_POINTER) { -> g"FUNCTION_POINTER\0"; }
                 case (TokenType.ADDRESS_CAST) { -> g"ADDRESS_CAST\0"; }
+                case (TokenType.RETURN_ADDRESS) { -> g"RETURN_ADDRESS\0"; }
                 case (TokenType.STRINGIFY) { -> g"STRINGIFY\0"; }
                 case (TokenType.CODIFY) { -> g"CODIFY\0"; }
                 case (TokenType.BITSLICE) { -> g"BITSLICE\0"; }
@@ -2875,7 +2877,7 @@ namespace IDEKA
                                                                                                 {
                                                                                                     switch (this.match(g"@", 1))
                                                                                                     {
-                                                                                                        case (true) { *ttype = TokenType.ADDRESS_OF; -> 1; }
+                                                                                                        case (true) { switch (this.match(g"@->", 3)) { case (true) { *ttype = TokenType.RETURN_ADDRESS; -> 3; } default {}; }; *ttype = TokenType.ADDRESS_OF; -> 1; }
                                                                                                         default
                                                                                                         {
                                                                                                             switch (this.match(g"=", 1))

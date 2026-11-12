@@ -912,6 +912,15 @@
                 -> r;
             };
 
+            // @->: the slot holding the return address, i64*
+            retaddr_slot(byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(this.t_ptr(this.t_int(64)));
+                if (!dead) { this.s_r_retaddr(r); };
+                -> r;
+            };
+
             va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
             {
                 bool dead = this.s_dead();

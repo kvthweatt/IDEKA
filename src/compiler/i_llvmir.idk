@@ -1059,6 +1059,21 @@ namespace IDEKA
                 };
             };
 
+            // @->: the slot holding the return address, i64*. LLVM spells it as an intrinsic, only this text backend does
+            retaddr_slot(byte* hint) -> IRValue*
+            {
+                IRType* i8p = this.t_ptr(this.t_int(8));
+                IRFunc* f = this.find_function(g"llvm.addressofreturnaddress.p0i8\0");
+                IRValue* r;
+                switch (f == (IRFunc*)0)
+                {
+                    case (true) { f = this.add_function(this.t_func(i8p, (IRType**)0, 0, false), g"llvm.addressofreturnaddress.p0i8\0"); }
+                    default {};
+                };
+                r = this.call(f.self, (IRValue**)0, 0, g"retaddr_raw\0");
+                -> this.cast(g"bitcast\0", r, this.t_ptr(this.t_int(64)), hint);
+            };
+
             call(IRValue* callee, IRValue** args, int n, byte* hint) -> IRValue* -> this.call_ex(callee, args, n, hint, (byte*)0, false);
 
             phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
