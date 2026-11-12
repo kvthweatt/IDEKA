@@ -118,6 +118,8 @@ namespace IDEKA
             int sleft;
             byte* ap;           // SSA backend: free space left in the newest block of sarr
             int aleft;
+            int ipst, ipm;      // SSA backend: call graph visit state, registers the function clobbers
+            bool ipok;          // SSA backend: ipm is known
         };
 
         struct IRGlobal

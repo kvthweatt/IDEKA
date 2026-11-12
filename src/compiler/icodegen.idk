@@ -6224,7 +6224,8 @@ namespace IDEKA
                             case (true) { -> true; }
                             default
                             {
-                                -> lt.kind == LK.ARRAY & lt.elem.kind == LK.INT & lt.elem.width == 8;
+                                // A scalar i8 target matches no branch of initialize_local_string: nothing is stored
+                                -> (lt.kind == LK.ARRAY & lt.elem.kind == LK.INT & lt.elem.width == 8) | (lt.kind == LK.INT & lt.width == 8);
                             };
                         };
                     };
@@ -6238,6 +6239,7 @@ namespace IDEKA
                 int len = this.q_len;
                 int i;
                 IRValue* sa, sp, ep;
+                switch (lt.kind == LK.INT) { case (true) { ->; } default {}; };
                 switch (this.is_i8_ptr(lt))
                 {
                     case (true) {
@@ -8947,16 +8949,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 switch (txt == (byte*)0) { case (true) { txt = g"\0"; } default {}; };
                                 tl = 0;
                                 switch (p != (Node*)0) { case (true) { tl = this.fs_len(p); } default {}; };
-                                sp = this.fstr_lit(txt, tl);
+                                // the text is constant: its bytes go straight into the destination, no stack copy of it first
                                 j = 0;
                                 while (j < tl)
                                 {
                                     this.mod.ia[0] = this.ci32(j);
-                                    val = this.mod.gep(sp, this.mod.ia, 1, false, (byte*)0);
-                                    val = this.mod.load(val, (byte*)0);
-                                    this.mod.ia[0] = this.ci32(j);
                                     r = this.mod.gep(dest, this.mod.ia, 1, false, (byte*)0);
-                                    this.mod.store(val, r);
+                                    this.mod.store(this.mod.c_int(this.t_i8, (i64)((int)txt[j])), r);
                                     j++;
                                 };
                                 this.mod.store(this.mod.binop(g"add\0", pos, this.ci32(tl), (byte*)0), pos_ptr);
@@ -10843,25 +10842,33 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 }
                                     default {};
                                 };
-                                switch (value_expr.kind == NodeKind.ARRAY_LITERAL & lv.ptr.ty.elem.kind == LK.PTR)
+                                switch (value_expr.kind == NodeKind.ARRAY_LITERAL & lv.ptr.ty.elem.kind == LK.PTR & val.ty.kind == LK.PTR)
                                 {
                                     case (true) {
-                                    this.unsup(target, g"array literal to pointer assign\0");
-                                    -> (IRValue*)0;
-                                }
+                                        // The literal's data is copied through the pointer, the pointer is not rebound
+                                        switch (val.ty.elem.kind == LK.ARRAY)
+                                        {
+                                            case (true) {
+                                                IRValue* dest = this.mod.load(lv.ptr, g"ptr_dest\0");
+                                                i64 eb = (i64)8;
+                                                switch (val.ty.elem.elem.kind == LK.INT) { case (true) { eb = (i64)(val.ty.elem.elem.width / 8); } default {}; };
+                                                this.emit_memcpy_bytes(dest, val, (i64)val.ty.elem.count * eb);
+                                                -> dest;
+                                            }
+                                            default {};
+                                        };
+                                    }
+                                    default {};
+                                };
+                                v = this.maybe_swap(val, lv.ptr);
+                                v = this.convert_assign(v, lv.ptr.ty.elem);
+                                switch (this.bad)
+                                {
+                                    case (true) { -> (IRValue*)0; }
                                     default
                                     {
-                                        v = this.maybe_swap(val, lv.ptr);
-                                        v = this.convert_assign(v, lv.ptr.ty.elem);
-                                        switch (this.bad)
-                                        {
-                                            case (true) { -> (IRValue*)0; }
-                                            default
-                                            {
-                                                this.mod.store(v, lv.ptr);
-                                                -> v;
-                                            };
-                                        };
+                                        this.mod.store(v, lv.ptr);
+                                        -> v;
                                     };
                                 };
                             };
@@ -13950,6 +13957,16 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // An identifier naming a local pointer variable (an array literal decays into it)
+            ptr_target(Node* t) -> bool
+            {
+                LVar* lv;
+                switch (t.kind != NodeKind.IDENTIFIER) { case (true) { -> false; } default {}; };
+                lv = this.find_var(t.text);
+                switch (lv == (LVar*)0) { case (true) { -> false; } default {}; };
+                -> lv.ptr.ty.kind == LK.PTR & lv.ptr.ty.elem.kind == LK.PTR;
+            };
+
             x_assign(Node* n) -> IRValue*
             {
                 Node* t = n.a;
@@ -13982,7 +13999,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 }
                     default
                     {
-                        switch (n.b.kind == NodeKind.STRUCT_LITERAL | (n.b.kind == NodeKind.ARRAY_LITERAL & tk != NodeKind.MEMBER_ACCESS))
+                        switch (n.b.kind == NodeKind.STRUCT_LITERAL | (n.b.kind == NodeKind.ARRAY_LITERAL & tk != NodeKind.MEMBER_ACCESS & !this.ptr_target(t)))
                         {
                             case (true) {
                             this.unsup(n, g"literal assignment\0");
@@ -14697,7 +14714,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -19952,6 +19969,113 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             };
 
             // visit_AlignOf on a type target, in bytes
+            // visit_macroCall for a self-referential macro: the call is run by the comptime VM
+            // (the macro is compiled there) and its scalar result becomes a constant
+            x_macrocall(Node* n) -> IRValue*
+            {
+                Node* blk = node_new(NodeKind.COMPTIME_BLOCK, n.line, n.col);
+                Node* d = node_new(NodeKind.VARIABLE_DECLARATION, n.line, n.col);
+                TypeSpec* at = typespec_new();
+                byte* nm;
+                FvmCap* cap;
+                PtrVec* out = pv_new();
+                int r;
+                this.sc.clear();
+                this.sc.put_str(f"macres{this.ct_runs}\0");
+                nm = this.mod.own(this.sc.mem);
+                at.base_type = DataType.SINT;
+                at.storage_class = StorageClass.AUTO;
+                this.keep((void*)at);
+                d.text = nm;
+                d.ts = at;
+                d.a = n;
+                node_push(blk, 0, d);
+                r = this.ct_run(blk, out);
+                pv_free(out);
+                switch (r != 0) { case (true) { this.bad = true; -> (IRValue*)0; } default {}; };
+                cap = (FvmCap*)nm_get(this.ct_pidx, nm);
+                switch (cap == (FvmCap*)0)
+                {
+                    case (true) {
+                        this.unsup(n, g"macro call produced no value\0");
+                        -> (IRValue*)0;
+                    }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_FLOAT)
+                {
+                    case (true) { -> this.mod.c_fp(this.t_float, idkvm_bits_dbl(cap.d)); }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_DOUBLE)
+                {
+                    case (true) { -> this.mod.c_fp(this.t_double, idkvm_bits_dbl(cap.d)); }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_INT | cap.tag == IDKVM_T_UINT)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i32, cap.d); }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_LONG | cap.tag == IDKVM_T_ULONG)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i64, cap.d); }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_BYTE | cap.tag == IDKVM_T_CHAR)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i8, cap.d); }
+                    default {};
+                };
+                switch (cap.tag == IDKVM_T_BOOL)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i1, cap.d); }
+                    default {};
+                };
+                this.unsup(n, g"macro call result type\0");
+                -> (IRValue*)0;
+            };
+
+            // visit_EndianOf: the endianness of a type or of the type of a variable, an i32 constant
+            x_endianof(Node* n) -> IRValue*
+            {
+                LVar* lv;
+                IRValue* v;
+                switch (n.ts != (TypeSpec*)0)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i32, (i64)this.endian_of(n.ts)); }
+                    default {};
+                };
+                switch (n.a == (Node*)0)
+                {
+                    case (true) {
+                        this.unsup(n, g"endianof without a target\0");
+                        -> (IRValue*)0;
+                    }
+                    default {};
+                };
+                switch (n.a.kind == NodeKind.IDENTIFIER)
+                {
+                    case (true) {
+                        lv = this.find_var(n.a.text);
+                        switch (lv != (LVar*)0 & lv.ts != (TypeSpec*)0)
+                        {
+                            case (true) { -> this.mod.c_int(this.t_i32, (i64)this.endian_of(lv.ts)); }
+                            default {};
+                        };
+                    }
+                    default {};
+                };
+                v = this.visit(n.a);
+                switch (this.bad) { case (true) { -> (IRValue*)0; } default {}; };
+                switch (v != (IRValue*)0 & v.spec != (TypeSpec*)0)
+                {
+                    case (true) { -> this.mod.c_int(this.t_i32, (i64)this.endian_of(v.spec)); }
+                    default {};
+                };
+                -> this.mod.c_int(this.t_i32, (i64)0);
+            };
+
             x_alignof(Node* n) -> IRValue*
             {
                 TypeSpec* ts = n.ts;
@@ -22334,6 +22458,183 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 -> al;
             };
 
+            // arr[a..b] read as a value: a new array of the elements from a to b inclusive, in the order of the range
+            // (a larger than b reverses). The bounds are compile time constants because they set the size of the result.
+            x_index_range(Node* n) -> IRValue*
+            {
+                IRValue* arr;
+                IRValue* sv;
+                IRValue* ev;
+                IRValue* res;
+                IRValue* kp;
+                IRValue* kv;
+                IRValue* sp;
+                IRValue* dp;
+                IRValue* si;
+                IRValue* cmp;
+                IRType* et;
+                IRType* at;
+                IRBlock* cb;
+                IRBlock* bb;
+                IRBlock* eb;
+                i64 sc;
+                i64 ec;
+                int cnt;
+                bool a2;
+                bool fwd;
+                arr = this.visit(n.a);
+                if (this.bad) { -> (IRValue*)0; };
+                if (arr == (IRValue*)0) { this.unsup(n, g"void indexed value\0"); -> (IRValue*)0; };
+                if (this.needs_ptr_load(arr)) { arr = this.mod.load(arr, g"ri_ptr\0"); };
+                if (arr.ty.kind != LK.PTR) { this.unsup(n, g"range index source\0"); -> (IRValue*)0; };
+                a2 = arr.ty.elem.kind == LK.ARRAY;
+                et = arr.ty.elem;
+                if (a2) { et = arr.ty.elem.elem; };
+                sv = this.visit(n.b.a);
+                if (this.bad) { -> (IRValue*)0; };
+                ev = this.visit(n.b.b);
+                if (this.bad) { -> (IRValue*)0; };
+                if (sv == (IRValue*)0 | ev == (IRValue*)0) { this.unsup(n, g"void range bound\0"); -> (IRValue*)0; };
+                if (!sv.is_const | !ev.is_const) { this.unsup(n, g"range index bounds must be constants\0"); -> (IRValue*)0; };
+                if (!this.parse_int_text(sv.text, @sc) | !this.parse_int_text(ev.text, @ec)) { this.unsup(n, g"range index bounds must be integers\0"); -> (IRValue*)0; };
+                fwd = ec >= sc;
+                if (fwd) { cnt = (int)(ec - sc) + 1; } else { cnt = (int)(sc - ec) + 1; };
+                at = this.mod.t_array(et, cnt);
+                res = this.mod.alloca(at, g"ri_res\0");
+                cb = this.mod.append_block(this.fn, g"ri.cond\0");
+                bb = this.mod.append_block(this.fn, g"ri.body\0");
+                eb = this.mod.append_block(this.fn, g"ri.end\0");
+                kp = this.mod.alloca(this.t_i32, g"ri.k\0");
+                this.mod.store(this.ci32(0), kp);
+                this.mod.br(cb);
+                this.mod.position(this.fn, cb);
+                kv = this.mod.load(kp, g"ri.kv\0");
+                cmp = this.mod.icmp(g"slt\0", kv, this.ci32(cnt), g"ri.cmp\0");
+                this.mod.cbr(cmp, bb, eb);
+                this.mod.position(this.fn, bb);
+                kv = this.mod.load(kp, g"ri.kb\0");
+                if (fwd) { si = this.mod.binop(g"add\0", this.ci32((int)sc), kv, g"ri.srcidx\0"); }
+                else { si = this.mod.binop(g"sub\0", this.ci32((int)sc), kv, g"ri.srcidx\0"); };
+                if (a2)
+                {
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = si;
+                    sp = this.mod.gep(arr, this.mod.ia, 2, true, g"ri.src\0");
+                }
+                else { sp = this.mod.gep_ptr(arr, si, true, g"ri.src\0"); };
+                this.mod.ia[0] = this.ci32(0);
+                this.mod.ia[1] = kv;
+                dp = this.mod.gep(res, this.mod.ia, 2, true, g"ri.dst\0");
+                this.mod.store(this.mod.load(sp, g"ri.val\0"), dp);
+                this.mod.store(this.mod.binop(g"add\0", kv, this.ci32(1), g"ri.next\0"), kp);
+                this.mod.br(cb);
+                this.mod.position(this.fn, eb);
+                -> this.mod.load(res, g"ri_arr\0");
+            };
+
+            // a[s:e]: a copy of the elements from s to e inclusive (e below s reverses), in a block of the frame followed by a
+            // zero element so a byte slice is a string. An object that has a val method (the string object) slices what val gives.
+            x_arrayslice(Node* n) -> IRValue*
+            {
+                IRValue* sv;
+                IRValue* base;
+                IRValue* bs;
+                IRValue* ev;
+                IRValue* diff;
+                IRValue* neg;
+                IRValue* step;
+                IRValue* cnt;
+                IRValue* res;
+                IRValue* kp;
+                IRValue* kv;
+                IRValue* cmp;
+                IRValue* si;
+                IRValue* sp;
+                IRValue* dp;
+                IRValue* zp;
+                IRType* et;
+                IRBlock* cb;
+                IRBlock* bb;
+                IRBlock* eb;
+                Node* src;
+                Node* mc;
+                src = n.a;
+                sv = this.visit(src);
+                if (this.bad) { -> (IRValue*)0; };
+                if (sv == (IRValue*)0) { this.unsup(n, g"void indexed value\0"); -> (IRValue*)0; };
+                if (sv.ty.kind == LK.PTR)
+                {
+                    if (sv.ty.elem.kind == LK.STRUCT | sv.ty.elem.kind == LK.ISTRUCT)
+                    {
+                        if (src.kind == NodeKind.IDENTIFIER)
+                        {
+                            mc = node_new(NodeKind.METHOD_CALL, src.line, src.col);
+                            mc.a = src;
+                            mc.text = g"val\0";
+                            mc.l0 = nv_new();
+                            sv = this.visit(mc);
+                            if (this.bad) { -> (IRValue*)0; };
+                            if (sv == (IRValue*)0) { this.unsup(n, g"slice of an object without val\0"); -> (IRValue*)0; };
+                        };
+                    };
+                };
+                if (sv.ty.kind == LK.ARRAY)
+                {
+                    base = this.mod.alloca(sv.ty, g"as_tmp\0");
+                    this.mod.store(sv, base);
+                    sv = base;
+                };
+                if (this.needs_ptr_load(sv)) { sv = this.mod.load(sv, g"as_ptr\0"); };
+                if (sv.ty.kind != LK.PTR) { this.unsup(n, g"slice source\0"); -> (IRValue*)0; };
+                if (sv.ty.elem.kind == LK.ARRAY)
+                {
+                    et = sv.ty.elem.elem;
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = this.ci32(0);
+                    base = this.mod.gep(sv, this.mod.ia, 2, true, g"as.base\0");
+                }
+                else
+                {
+                    et = sv.ty.elem;
+                    base = sv;
+                };
+                bs = this.visit(n.b);
+                if (this.bad) { -> (IRValue*)0; };
+                ev = this.visit(n.c);
+                if (this.bad) { -> (IRValue*)0; };
+                if (bs == (IRValue*)0 | ev == (IRValue*)0) { this.unsup(n, g"void slice bound\0"); -> (IRValue*)0; };
+                bs = this.idx_i32(bs);
+                ev = this.idx_i32(ev);
+                // step is 1 going up and minus 1 going down, the count is the distance plus one
+                diff = this.mod.binop(g"sub\0", ev, bs, g"as.diff\0");
+                neg = this.mod.cast(g"zext\0", this.mod.icmp(g"slt\0", ev, bs, g"as.isneg\0"), this.t_i32, g"as.negz\0");
+                step = this.mod.binop(g"sub\0", this.ci32(1), this.mod.binop(g"mul\0", neg, this.ci32(2), g"as.neg2\0"), g"as.step\0");
+                cnt = this.mod.binop(g"add\0", this.mod.binop(g"mul\0", diff, step, g"as.abs\0"), this.ci32(1), g"as.cnt\0");
+                res = this.mod.alloca_count(et, this.mod.binop(g"add\0", cnt, this.ci32(1), g"as.cnt1\0"), g"as_res\0");
+                cb = this.mod.append_block(this.fn, g"as.cond\0");
+                bb = this.mod.append_block(this.fn, g"as.body\0");
+                eb = this.mod.append_block(this.fn, g"as.end\0");
+                kp = this.mod.alloca(this.t_i32, g"as.k\0");
+                this.mod.store(this.ci32(0), kp);
+                this.mod.br(cb);
+                this.mod.position(this.fn, cb);
+                kv = this.mod.load(kp, g"as.kv\0");
+                cmp = this.mod.icmp(g"slt\0", kv, cnt, g"as.cmp\0");
+                this.mod.cbr(cmp, bb, eb);
+                this.mod.position(this.fn, bb);
+                kv = this.mod.load(kp, g"as.kb\0");
+                si = this.mod.binop(g"add\0", bs, this.mod.binop(g"mul\0", kv, step, g"as.off\0"), g"as.srcidx\0");
+                sp = this.mod.gep_ptr(base, si, true, g"as.src\0");
+                dp = this.mod.gep_ptr(res, kv, true, g"as.dst\0");
+                this.mod.store(this.mod.load(sp, g"as.val\0"), dp);
+                this.mod.store(this.mod.binop(g"add\0", kv, this.ci32(1), g"as.next\0"), kp);
+                this.mod.br(cb);
+                this.mod.position(this.fn, eb);
+                zp = this.mod.gep_ptr(res, cnt, true, g"as.zero\0");
+                this.mod.store(this.mod.c_null(et), zp);
+                -> res;
+            };
+
             // visit_ArrayAccess
             x_index(Node* n) -> IRValue*
             {
@@ -22351,10 +22652,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 switch (n.b.kind == NodeKind.RANGE_EXPRESSION)
                 {
-                    case (true) {
-                    this.unsup(n, g"range index\0");
-                    -> (IRValue*)0;
-                }
+                    case (true) { -> this.x_index_range(n); }
                     default
                     {
                         arr = this.visit(n.a);
@@ -23127,6 +23425,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             {
                                 k = n.kind;
                                 if (k == NodeKind.BIT_POINTER_DEREF) { -> this.x_bitptr_deref(n); };
+                                if (k == NodeKind.ARRAY_SLICE) { -> this.x_arrayslice(n); };
+                                if (k == NodeKind.ENDIAN_OF) { -> this.x_endianof(n); };
+                                if (k == NodeKind.MACRO_CALL & n.a == (Node*)0) { -> this.x_macrocall(n); };
                                 switch (k == NodeKind.COMPTIME_BLOCK | k == NodeKind.EMIT_IDEKA | k == NodeKind.IDEKAVM_BLOCK)
                                 {
                                     case (true) { -> this.ct_visit(n); }

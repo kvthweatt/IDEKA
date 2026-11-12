@@ -1,0 +1,85 @@
+// Float benchmark: matrix multiply, saxpy, dot product and polynomial evaluation, repeated.
+
+#import <standard.idk>;
+
+def matmul(float* c, float* a, float* b, int n) -> void
+{
+    int i, j, k;
+    float s;
+    while (i < n)
+    {
+        j = 0;
+        while (j < n)
+        {
+            s = 0.0;
+            k = 0;
+            while (k < n)
+            {
+                s = s + a[i * n + k] * b[k * n + j];
+                k++;
+            };
+            c[i * n + j] = s;
+            j++;
+        };
+        i++;
+    };
+    return;
+};
+
+def saxpy(float* y, float* x, float k, int n) -> void
+{
+    int i;
+    while (i < n)
+    {
+        y[i] = y[i] + k * x[i];
+        i++;
+    };
+    return;
+};
+
+def dotf(float* a, float* b, int n) -> float
+{
+    float s = 0.0;
+    int i = 0;
+    while (i < n)
+    {
+        s = s + a[i] * b[i];
+        i++;
+    };
+    return s;
+};
+
+def poly(double x) -> double -> ((3.0 * x + 2.0) * x - 5.0) * x + 7.0;
+
+def main() -> int
+{
+    float[16384] A, B, C;
+    float[65536] X, Y;
+    int i, r, n, iv;
+    float f;
+    double d;
+    n = 128;
+    while (i < 16384) { A[i] = (float)(i % 7); B[i] = (float)(i % 5); i++; };
+    i = 0;
+    while (i < 65536) { X[i] = (float)(i % 3); Y[i] = (float)(i % 4); i++; };
+    r = 0;
+    while (r < 20) { matmul(@C[0], @A[0], @B[0], n); r++; };
+    f = 0.0;
+    i = 0;
+    while (i < 16384) { f = f + C[i]; i++; };
+    iv = (int)f;
+    println(f"matmul {iv}");
+    r = 0;
+    while (r < 2000) { saxpy(@Y[0], @X[0], 0.0, 65536); r++; };
+    f = 0.0;
+    r = 0;
+    while (r < 2000) { f = f + dotf(@X[0], @Y[0], 65536); r++; };
+    iv = (int)f;
+    println(f"dot {iv}");
+    d = 0.0;
+    i = 0;
+    while (i < 50000000) { d = d + poly((double)(i % 10)); i++; };
+    iv = (int)d;
+    println(f"poly {iv}");
+    return 0;
+};

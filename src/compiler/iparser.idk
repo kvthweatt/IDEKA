@@ -3462,7 +3462,47 @@ namespace IDEKA
                 PtrVec* raw = pv_new();
                 PtrVec* names = pv_new();
                 PtrVec* specs = pv_new();
-                int lt = this.tp_split_deferred(n.text, raw);
+                int lt, gt, dd;
+                int tn = pp_cstrlen(n.text);
+                byte* meth = (byte*)0;
+                byte* head = n.text;
+                // "Obj<T>.method": a constructor or method call on a template object
+                lt = -1;
+                while (gt < tn & lt < 0)
+                {
+                    switch (n.text[gt] == '<') { case (true) { lt = gt; } default {}; };
+                    gt++;
+                };
+                switch (lt > 0)
+                {
+                    case (true) {
+                        gt = lt;
+                        dd = 0;
+                        while (gt < tn)
+                        {
+                            switch (n.text[gt] == '<') { case (true) { dd++; } default {}; };
+                            switch (n.text[gt] == '>') { case (true) { dd--; } default {}; };
+                            switch (dd == 0) { case (true) { break; } default {}; };
+                            gt++;
+                        };
+                        switch (gt + 1 < tn)
+                        {
+                            case (true) {
+                                switch (n.text[gt + 1] == '.')
+                                {
+                                    case (true) {
+                                        meth = n.text + gt + 1;
+                                        head = this.own_n(n.text, gt + 1);
+                                    }
+                                    default {};
+                                };
+                            }
+                            default {};
+                        };
+                    }
+                    default {};
+                };
+                lt = this.tp_split_deferred(head, raw);
                 int i;
                 bool any = false;
                 byte* base;
@@ -3483,7 +3523,35 @@ namespace IDEKA
                         };
                         i++;
                     };
-                    switch (fe != (TemplateEntry*)0 & any & fe.kind == 0)
+                    switch (fe != (TemplateEntry*)0 & any & meth != (byte*)0 & fe.kind == 2)
+                    {
+                        case (true) {
+                            i = 0;
+                            while (i < raw.len)
+                            {
+                                a = (byte*)raw.items[i];
+                                switch (nm_has(map, a))
+                                {
+                                    case (true) {
+                                        c = (TypeSpec*)nm_get(map, a);
+                                        pv_push(names, (void*)this.ts_mangle(c));
+                                        pv_push(specs, (void*)c);
+                                    }
+                                    default {
+                                        c = this.tmp_type();
+                                        c.base_type = DataType.DATA;
+                                        c.custom_typename = a;
+                                        pv_push(names, (void*)a);
+                                        pv_push(specs, (void*)c);
+                                    };
+                                };
+                                i++;
+                            };
+                            n.text = this.cat2(this.resolve_template_type(base, names, specs), meth);
+                        }
+                        default {};
+                    };
+                    switch (fe != (TemplateEntry*)0 & any & meth == (byte*)0 & fe.kind == 0)
                     {
                         case (true) {
                         i = 0;

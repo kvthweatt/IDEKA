@@ -77,7 +77,7 @@ module IDEKA_Compiler_Entrypoint
         println("  -c, --count       Show token count summary\0");
         println("  --warn-as-error   Treat all warnings as errors\0");
         println("  --asm-only        Emit only the AT&T assembly (llc -filetype=asm) instead of an object file\0");
-        println("  --backend <name>  Code generator backend: x64 (native x86_64 assembly, iasm and ilink, the default) or llvm (LLVM IR, llc and a system linker)\0");
+        println("  --backend <name>  Code generator backend: x64 (native x86_64 assembly, iasm and ilink, the default) llvm (LLVM IR, llc and a system linker) or a64 (AArch64 assembly, system as and ld)\0");
         println("  --abi <name>      x64 backend calling convention and object format: sysv (ELF) or win64 (COFF), default is the host\0");
         print();
         println("Additional:\0");
@@ -552,6 +552,20 @@ module IDEKA_Compiler_Entrypoint
         -> r;
     };
 
+    // True when the config key is set to true, yes, on or 1
+    cfg_flag(byte* key) -> bool
+    {
+        byte* v = cfg_get(key);
+        bool r = false;
+        if (v == (byte*)0) { -> false; };
+        if (bytes_eq(v, "true\0", 4) & v[4] == 0) { r = true; };
+        if (bytes_eq(v, "yes\0", 3) & v[3] == 0) { r = true; };
+        if (bytes_eq(v, "on\0", 2) & v[2] == 0) { r = true; };
+        if (v[0] == '1' & v[1] == 0) { r = true; };
+        ffree(v);
+        -> r;
+    };
+
     is_none(byte* v) -> bool
     {
         if (v == (byte*)0) { -> true; };
@@ -742,6 +756,9 @@ module IDEKA_Compiler_Entrypoint
         w.put_str("\"\0");
         rc = system(w.mem);
         #else
+        #ifdef __ARCH_ARM64__
+        rc = system(c);
+        #else
         int* rcp = @rc;
         volatile asm
         {
@@ -752,6 +769,7 @@ module IDEKA_Compiler_Entrypoint
             movq %r12, %rsp
             movl %eax, ($1)
         } : : "r"(c), "r"(rcp) : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "memory", "cc";
+        #endif;
         #endif;
         -> rc;
     };
@@ -892,6 +910,7 @@ module IDEKA_Compiler_Entrypoint
     // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
     bool ASM_ONLY;
     int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
+    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled and linked with the system as and ld
     bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
 
     // Assembles the x86_64 text the x64 backend emitted into an ELF or COFF object with iasm
@@ -1172,8 +1191,21 @@ module IDEKA_Compiler_Entrypoint
                 ffree(stem);
                 -> true;
             };
+            if (A64_BACKEND)
+            {
+                log_step("assembler\0", "Assembling with as\0");
+                cmd.clear();
+                cmd.put_str("as -o \0");
+                cmd.put_str(obj.mem);
+                cmd.put(32);
+                cmd.put_str(ll.mem);
+                if (run_cmd(cmd.mem) != 0) { ffree(stem); -> false; };
+            }
+            else
+            {
             log_step("assembler\0", "Assembling with iasm\0");
             if (!iasm_object(ir_text, len, obj.mem)) { ffree(stem); -> false; };
+            };
         };
         if (!X64_BACKEND)
         {
@@ -1394,7 +1426,18 @@ module IDEKA_Compiler_Entrypoint
         };
         };
         #else
-        if (X64_BACKEND)
+        if (A64_BACKEND)
+        {
+            cmd.put_str("ld -e _start -dynamic-linker /lib/ld-linux-aarch64.so.1 -o \0");
+            cmd.put_str(exe.mem);
+            cmd.put(32);
+            cmd.put_str(obj.mem);
+            cmd.put_str(" -L/usr/lib/aarch64-linux-gnu -L/usr/lib -L/lib/aarch64-linux-gnu -L/lib --start-group -lc --end-group 2>\0");
+            cmd.put_str(errp.mem);
+            rc = run_cmd(cmd.mem);
+            report_link(errp.mem, rc);
+        }
+        elif (X64_BACKEND)
         {
             // native linker: the objects iasm wrote become an executable with no system linker
             native_link_elf(obj.mem, exe.mem, errp.mem, @rc);
@@ -1451,6 +1494,13 @@ module IDEKA_Compiler_Entrypoint
             -> 1;
         };
 
+        // Code is made for the processor the compiler runs on. portable = true restricts it to the baseline x86-64
+        // instructions, and isa_level = 2, 3 or 4 to the x86-64-v2, v3 or v4 sets.
+        #ifndef IDEKA_NO_X64
+        if (cfg_flag("portable\0")) { x64_set_march(1); };
+        x64_set_level(cfg_int("isa_level\0", 0));
+        #endif;
+
         // the native x86-64 pipeline is the default where it exists: source -> asm -> iasm -> ilink
         #ifdef __ARCH_X86_64__
         #ifdef __LINUX__
@@ -1458,6 +1508,12 @@ module IDEKA_Compiler_Entrypoint
         #endif;
         #ifdef __WINDOWS__
         X64_BACKEND = true;
+        #endif;
+        #endif;
+        #ifdef __ARCH_ARM64__
+        #ifdef __LINUX__
+        X64_BACKEND = true;
+        A64_BACKEND = true;
         #endif;
         #endif;
         #ifdef __WINDOWS__
@@ -1477,8 +1533,19 @@ module IDEKA_Compiler_Entrypoint
             {
                 i++;
                 if (i >= argc) { println("--backend needs a name: llvm or x64\0"); usage(); -> 1; };
-                if (arg_eq(argv[i], "x64", 3)) { X64_BACKEND = true; i++; continue; };
-                if (arg_eq(argv[i], "llvm", 4)) { X64_BACKEND = false; i++; continue; };
+                if (arg_eq(argv[i], "x64", 3)) { X64_BACKEND = true; A64_BACKEND = false; i++; continue; };
+                if (arg_eq(argv[i], "llvm", 4)) { X64_BACKEND = false; A64_BACKEND = false; i++; continue; };
+                if (arg_eq(argv[i], "a64", 3))
+                {
+                    #ifdef IDEKA_NO_A64
+                    println("This compiler was built without the a64 backend\0");
+                    -> 1;
+                    #endif;
+                    X64_BACKEND = true;
+                    A64_BACKEND = true;
+                    i++;
+                    continue;
+                };
                 print("Unknown backend: \0");
                 println(argv[i]);
                 usage();
@@ -1659,6 +1726,7 @@ module IDEKA_Compiler_Entrypoint
         byte* srcdir = getenv(g"IDEKA_SRCDIR\0");
         if (srcdir != (byte*)0) { pp.set_srcdir(srcdir); };
         if (pp_mode | parse_mode) { pp.add_default_macros(); };
+        if (A64_BACKEND) { pp.set_arch_arm64(); };
 
         if (!pp.process())
         {
@@ -2020,7 +2088,12 @@ module IDEKA_Compiler_Entrypoint
                 if (X64_BACKEND) { log_step("codegen\0", "x86_64 assembly generation\0"); } else { log_step("codegen\0", "LLVM IR code generation\0"); };
                 IDKC_SYMTABLE* est = st_new();
                 defer st_free(est);
+                #ifndef IDEKA_NO_X64
                 if (X64_BACKEND) { set_target(BK.X64); set_abi(X64_ABI); };
+                #endif;
+                #ifndef IDEKA_NO_A64
+                if (A64_BACKEND) { set_target(BK.A64); };
+                #endif;
                 CodeGen cg(est);
                 defer cg.__exit();
                 cg.null_term = cfg_int("null_terminate_strings\0", 0) == 1;

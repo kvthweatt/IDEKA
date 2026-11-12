@@ -8,6 +8,18 @@
 // one call can be passed to any other. A new target adds its module, one kind in BK and one
 // forwarding line per builder method.
 //
+// One machine backend is built in: the two share the text of issa*.idk, which #import reads only once. The
+// host's own backend is the default; define IDEKA_NO_X64 or IDEKA_NO_A64 before this file to choose the other.
+#ifndef IDEKA_NO_X64
+#ifndef IDEKA_NO_A64
+#ifdef __ARCH_ARM64__
+#def IDEKA_NO_X64 1;
+#else
+#def IDEKA_NO_A64 1;
+#endif;
+#endif;
+#endif;
+
 #ifndef IDEKA_STANDARD
 #import <standard.idk>;
 #endif;
@@ -28,8 +40,16 @@
 #import "i_llvmir.idk";
 #endif;
 
+#ifndef IDEKA_NO_X64
 #ifndef IDEKA_X64
 #import "ix64.idk";
+#endif;
+#endif;
+
+#ifndef IDEKA_NO_A64
+#ifndef IDEKA_ARM64
+#import "iarm64.idk";
+#endif;
 #endif;
 
 #ifndef IDEKA_BACKEND
@@ -39,7 +59,12 @@ using IDEKA::ast;
 using IDEKA::preprocessor;
 using IDEKA::types;
 using IDEKA::ir;
+#ifndef IDEKA_NO_X64
 using IDEKA::x64;
+#endif;
+#ifndef IDEKA_NO_A64
+using IDEKA::arm64;
+#endif;
 
 namespace IDEKA
 {
@@ -48,7 +73,8 @@ namespace IDEKA
         enum BK
         {
             LLVM,
-            X64
+            X64,
+            A64
         };
 
         // Backend used by the next CodeBackend that is created
@@ -73,7 +99,12 @@ namespace IDEKA
         {
             int kind;
             IRModule* ll;
+#ifndef IDEKA_NO_X64
             X64Module* xm;
+#endif;
+#ifndef IDEKA_NO_A64
+            A64Module* am;
+#endif;
             IRValue** ia;       // small operand scratch for the code generator
             bool must_tail;     // the next call is a tail call
             PtrVec* funcs;      // IRFunc* in creation order
@@ -85,8 +116,14 @@ namespace IDEKA
                 this.kind = target_kind;
                 this.must_tail = false;
                 this.ll = (IRModule*)0;
+#ifndef IDEKA_NO_X64
                 this.xm = (X64Module*)0;
+#endif;
+#ifndef IDEKA_NO_A64
+                this.am = (A64Module*)0;
+#endif;
                 this.ia = (IRValue**)fmalloc((u64)8 * (u64)((sizeof(IRValue*) + 7) / 8));
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64)
                 {
                     // sizeof is the packed size in bits, the aligned layout can be larger
@@ -98,6 +135,18 @@ namespace IDEKA
                     this.named = this.xm.named;
                     -> this;
                 };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64)
+                {
+                    this.am = (A64Module*)fmalloc((u64)(((sizeof(A64Module) + 7) / 8) * 2));
+                    this.am.__init(name);
+                    this.funcs = this.am.funcs;
+                    this.globals = this.am.globals;
+                    this.named = this.am.named;
+                    -> this;
+                };
+#endif;
                 this.ll = (IRModule*)fmalloc((u64)((sizeof(IRModule) + 7) / 8));
                 this.ll.__init(name);
                 this.funcs = this.ll.funcs;
@@ -110,7 +159,15 @@ namespace IDEKA
 
             __exit() -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.__exit(); ffree((byte*)this.xm); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.__exit(); ffree((byte*)this.am); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.__exit(); ffree((byte*)this.am); };
+#endif;
                 if (this.kind == BK.LLVM) { this.ll.__exit(); ffree((byte*)this.ll); };
                 -> ffree((byte*)this.ia);
             };
@@ -118,7 +175,12 @@ namespace IDEKA
             // Hands the pending tail call flag to the active backend
             sync_tail() -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.must_tail = this.must_tail; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.must_tail = this.must_tail; };
+#endif;
                 if (this.kind == BK.LLVM) { this.ll.must_tail = this.must_tail; };
                 this.must_tail = false;
                 ->;
@@ -126,366 +188,656 @@ namespace IDEKA
 
             cur_block() -> IRBlock*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.cb; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.cb; };
+#endif;
                 -> this.ll.cb;
             };
 
             // Number of constructs the backend could not translate, always 0 for LLVM IR
             unsupported() -> int
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.nunsup; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.nunsup; };
+#endif;
                 -> 0;
             };
 
             // Where and why each unsupported construct was found, empty for LLVM IR
             unsupported_log() -> PtrVec*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.ulog; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.ulog; };
+#endif;
                 -> (PtrVec*)0;
             };
 
             emit(Buf* out) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.emit(out); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.emit(out); ->; };
+#endif;
                 this.ll.emit(out);
                 ->;
             };
 
             cast(byte* op, IRValue* v, IRType* to, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.cast(op, v, to, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.cast(op, v, to, hint); };
+#endif;
                 -> this.ll.cast(op, v, to, hint);
             };
 
             store(IRValue* v, IRValue* p) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.store(v, p); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.store(v, p); ->; };
+#endif;
                 this.ll.store(v, p);
                 ->;
             };
 
             load(IRValue* p, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.load(p, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.load(p, hint); };
+#endif;
                 -> this.ll.load(p, hint);
             };
 
             position(IRFunc* f, IRBlock* b) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.position(f, b); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.position(f, b); ->; };
+#endif;
                 this.ll.position(f, b);
                 ->;
             };
 
             append_block(IRFunc* f, byte* name) -> IRBlock*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.append_block(f, name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.append_block(f, name); };
+#endif;
                 -> this.ll.append_block(f, name);
             };
 
             binop(byte* op, IRValue* a, IRValue* b, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.binop(op, a, b, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.binop(op, a, b, hint); };
+#endif;
                 -> this.ll.binop(op, a, b, hint);
             };
 
             c_int(IRType* ty, i64 val) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_int(ty, val); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_int(ty, val); };
+#endif;
                 -> this.ll.c_int(ty, val);
             };
 
             gep(IRValue* p, IRValue** idx, int n, bool inbounds, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.gep(p, idx, n, inbounds, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.gep(p, idx, n, inbounds, hint); };
+#endif;
                 -> this.ll.gep(p, idx, n, inbounds, hint);
             };
 
             br(IRBlock* target) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.br(target); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.br(target); ->; };
+#endif;
                 this.ll.br(target);
                 ->;
             };
 
             own(byte* s) -> byte*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.own(s); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.own(s); };
+#endif;
                 -> this.ll.own(s);
             };
 
             alloca_here(IRType* ty, byte* name) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.alloca_here(ty, name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.alloca_here(ty, name); };
+#endif;
                 -> this.ll.alloca_here(ty, name);
             };
 
             c_null(IRType* ty) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_null(ty); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_null(ty); };
+#endif;
                 -> this.ll.c_null(ty);
             };
 
             icmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.icmp(pred, a, b, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.icmp(pred, a, b, hint); };
+#endif;
                 -> this.ll.icmp(pred, a, b, hint);
             };
 
             cbr(IRValue* c, IRBlock* t, IRBlock* f) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.cbr(c, t, f); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.cbr(c, t, f); ->; };
+#endif;
                 this.ll.cbr(c, t, f);
                 ->;
             };
 
             t_array(IRType* elem, int count) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_array(elem, count); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_array(elem, count); };
+#endif;
                 -> this.ll.t_array(elem, count);
             };
 
             find_function(byte* name) -> IRFunc*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.find_function(name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.find_function(name); };
+#endif;
                 -> this.ll.find_function(name);
             };
 
             is_terminated() -> bool
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.is_terminated(); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.is_terminated(); };
+#endif;
                 -> this.ll.is_terminated();
             };
 
             t_ptr(IRType* elem) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_ptr(elem); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_ptr(elem); };
+#endif;
                 -> this.ll.t_ptr(elem);
             };
 
             call(IRValue* callee, IRValue** args, int n, byte* hint) -> IRValue*
             {
                 this.sync_tail();
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.call(callee, args, n, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.call(callee, args, n, hint); };
+#endif;
                 -> this.ll.call(callee, args, n, hint);
             };
 
             t_func(IRType* ret, IRType** params, int n, bool vararg) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_func(ret, params, n, vararg); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_func(ret, params, n, vararg); };
+#endif;
                 -> this.ll.t_func(ret, params, n, vararg);
             };
 
             gep_ptr(IRValue* p, IRValue* i, bool inbounds, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.gep_ptr(p, i, inbounds, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.gep_ptr(p, i, inbounds, hint); };
+#endif;
                 -> this.ll.gep_ptr(p, i, inbounds, hint);
             };
 
             t_int(int width) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_int(width); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_int(width); };
+#endif;
                 -> this.ll.t_int(width);
             };
 
             find_global(byte* name) -> IRGlobal*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.find_global(name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.find_global(name); };
+#endif;
                 -> this.ll.find_global(name);
             };
 
             add_global(IRType* ty, byte* name, byte* init) -> IRGlobal*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.add_global(ty, name, init); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.add_global(ty, name, init); };
+#endif;
                 -> this.ll.add_global(ty, name, init);
             };
 
             new_value(IRType* ty, byte* text) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.new_value(ty, text); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.new_value(ty, text); };
+#endif;
                 -> this.ll.new_value(ty, text);
             };
 
             c_fp(IRType* ty, double d) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_fp(ty, d); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_fp(ty, d); };
+#endif;
                 -> this.ll.c_fp(ty, d);
             };
 
             add_function(IRType* ftype, byte* name) -> IRFunc*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.add_function(ftype, name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.add_function(ftype, name); };
+#endif;
                 -> this.ll.add_function(ftype, name);
             };
 
             alloca(IRType* ty, byte* name) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.alloca(ty, name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.alloca(ty, name); };
+#endif;
                 -> this.ll.alloca(ty, name);
             };
 
             t_struct(IRType** items, int n) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_struct(items, n); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_struct(items, n); };
+#endif;
                 -> this.ll.t_struct(items, n);
             };
 
             call_ex(IRValue* callee, IRValue** args, int n, byte* hint, byte* cconv, bool tail) -> IRValue*
             {
                 this.sync_tail();
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.call_ex(callee, args, n, hint, cconv, tail); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.call_ex(callee, args, n, hint, cconv, tail); };
+#endif;
                 -> this.ll.call_ex(callee, args, n, hint, cconv, tail);
             };
 
             ret(IRValue* v) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.ret(v); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.ret(v); ->; };
+#endif;
                 this.ll.ret(v);
                 ->;
             };
 
             phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.phi(ty, vals, blocks, n, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.phi(ty, vals, blocks, n, hint); };
+#endif;
                 -> this.ll.phi(ty, vals, blocks, n, hint);
             };
 
             ret_void() -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.ret_void(); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.ret_void(); ->; };
+#endif;
                 this.ll.ret_void();
                 ->;
             };
 
             rename_arg(IRFunc* f, int i, byte* name) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.rename_arg(f, i, name); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.rename_arg(f, i, name); ->; };
+#endif;
                 this.ll.rename_arg(f, i, name);
                 ->;
             };
 
             c_u64(IRType* ty, u64 val) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_u64(ty, val); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_u64(ty, val); };
+#endif;
                 -> this.ll.c_u64(ty, val);
             };
 
             c_bytes(IRType* ty, byte* bytes_in, int n) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_bytes(ty, bytes_in, n); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_bytes(ty, bytes_in, n); };
+#endif;
                 -> this.ll.c_bytes(ty, bytes_in, n);
             };
 
             unreachable() -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.unreachable(); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.unreachable(); ->; };
+#endif;
                 this.ll.unreachable();
                 ->;
             };
 
             t_named(byte* name) -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_named(name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_named(name); };
+#endif;
                 -> this.ll.t_named(name);
             };
 
             gep_field(IRValue* p, int i, bool inbounds, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.gep_field(p, i, inbounds, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.gep_field(p, i, inbounds, hint); };
+#endif;
                 -> this.ll.gep_field(p, i, inbounds, hint);
             };
 
             set_entry(IRBlock* b) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.set_entry(b); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.set_entry(b); ->; };
+#endif;
                 this.ll.set_entry(b);
                 ->;
             };
 
             set_body(IRType* t, IRType** items, int n) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.set_body(t, items, n); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.set_body(t, items, n); ->; };
+#endif;
                 this.ll.set_body(t, items, n);
                 ->;
             };
 
             fcmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.fcmp(pred, a, b, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.fcmp(pred, a, b, hint); };
+#endif;
                 -> this.ll.fcmp(pred, a, b, hint);
             };
 
             va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.va_arg(list, ty, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.va_arg(list, ty, hint); };
+#endif;
                 -> this.ll.va_arg(list, ty, hint);
             };
 
             switch_to(IRValue* v, IRBlock* dflt, IRValue** vals, IRBlock** blocks, int n) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.switch_to(v, dflt, vals, blocks, n); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.switch_to(v, dflt, vals, blocks, n); ->; };
+#endif;
                 this.ll.switch_to(v, dflt, vals, blocks, n);
                 ->;
             };
 
             name_arg(IRFunc* f, int i, byte* name) -> void
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { this.xm.name_arg(f, i, name); ->; };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { this.am.name_arg(f, i, name); ->; };
+#endif;
                 this.ll.name_arg(f, i, name);
                 ->;
             };
 
             c_undef(IRType* ty) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_undef(ty); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_undef(ty); };
+#endif;
                 -> this.ll.c_undef(ty);
             };
 
             type_str(IRType* t) -> byte*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.type_str(t); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.type_str(t); };
+#endif;
                 -> this.ll.type_str(t);
             };
 
             t_void() -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_void(); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_void(); };
+#endif;
                 -> this.ll.t_void();
             };
 
             t_float() -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_float(); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_float(); };
+#endif;
                 -> this.ll.t_float();
             };
 
             t_double() -> IRType*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.t_double(); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.t_double(); };
+#endif;
                 -> this.ll.t_double();
             };
 
             insertvalue(IRValue* agg, IRValue* v, int i, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.insertvalue(agg, v, i, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.insertvalue(agg, v, i, hint); };
+#endif;
                 -> this.ll.insertvalue(agg, v, i, hint);
             };
 
             extractvalue(IRValue* agg, int i, byte* hint) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.extractvalue(agg, i, hint); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.extractvalue(agg, i, hint); };
+#endif;
                 -> this.ll.extractvalue(agg, i, hint);
             };
 
             c_array(IRType* ty, IRValue** elems, int n) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.c_array(ty, elems, n); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.c_array(ty, elems, n); };
+#endif;
                 -> this.ll.c_array(ty, elems, n);
             };
 
             alloca_count(IRType* ty, IRValue* count, byte* name) -> IRValue*
             {
+#ifndef IDEKA_NO_X64
                 if (this.kind == BK.X64) { -> this.xm.alloca_count(ty, count, name); };
+#endif;
+#ifndef IDEKA_NO_A64
+                if (this.kind == BK.A64) { -> this.am.alloca_count(ty, count, name); };
+#endif;
                 -> this.ll.alloca_count(ty, count, name);
             };
 

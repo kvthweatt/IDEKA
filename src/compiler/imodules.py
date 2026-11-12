@@ -1,0 +1,544 @@
+"""
+imodules.py - module system.
+
+A module is a named group of declarations with a build block:
+
+    module Logging from "logging.idk";
+
+    module Main
+    {
+        def main() -> int { ... };
+    }
+    # build
+    {
+        #[entrypoint] = this,
+        #[requires] = {Logging},
+        #[target] = executable,
+        !+#[effect_check] = true,
+        #[override for {Logging}] = { #[borrow_check] = true },
+    };
+
+'module Name from "file";' is a top-level declaration. It builds the module Name of that file
+by that module's own rules, and makes Name visible to '#[requires]' in this file.
+
+This pass runs after parsing. It loads the files imported with 'module Name from' and
+pulls the modules the entry requires into one compilation unit, resolves each module's build settings, tags
+every function with the module that owns it, and flattens the module bodies into
+the program's statement list so the rest of the compiler sees an ordinary program.
+
+Settings (tag, default):
+    entrypoint   -  'this' marks the entry module of the target file
+    name         module name     output name (entry module)
+    target       executable      bootloader | executable | compact | library | driver
+    debug        false           Debug instead of Release output folder
+    borrow_check false           report borrow violations for this module's code
+    effect_check false           report effect violations for this module's code
+    dce          true            false keeps every declaration of the module alive
+    using        {}              namespaces made visible to the module's code
+    platform     {}              platforms the module builds for (empty = any)
+    requires     {}              modules this module uses; only these are part of its build
+    test         {}              build test tags, '#[test] = { #[subtag], ... }':
+                                   expect_build_fail  the module is expected to fail to build
+
+A module's own entries set its settings. A module sees only the modules it requires; a sibling module of the same file is not part of its build until it
+is named in '#[requires] = {M}'. '#[override for {M}] = { ... }' overrides M's settings as
+M is built into this target, and needs M in the overriding module's 'requires',
+unless M locked the tag with '!+'. The module closest to the entry wins when several override the same tag.
+The command line can only switch checks on: --borrowcheck and --effects force the
+check for every module, including modules that lock it to false.
+"""
+
+import os
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import iast
+from iast import ModuleDef, NamespaceDef, FunctionDef, ObjectDef, UsingStatement
+
+TARGETS = ('bootloader', 'executable', 'compact', 'library', 'driver')
+_BOOL_TAGS = ('borrow_check', 'effect_check', 'dce', 'debug')
+_KNOWN_TAGS = ('entrypoint', 'name', 'target', 'debug', 'borrow_check', 'effect_check',
+               'dce', 'using', 'platform', 'requires', 'test')
+# Subtags of '#[test] = { ... }'
+_TEST_TAGS = ('expect_build_fail',)
+_DEFAULTS = {'borrow_check': False, 'effect_check': False, 'dce': True, 'debug': False,
+             'target': 'executable', 'using': [], 'platform': [], 'requires': [], 'test': {}}
+
+
+class ModuleError(Exception):
+    pass
+
+
+@dataclass
+class ModuleInfo:
+    node: ModuleDef
+    file: str
+    deps: list = field(default_factory=list)       # module names this module requires
+    settings: dict = field(default_factory=dict)
+    locked: set = field(default_factory=set)
+    entry: bool = False
+
+    @property
+    def name(self):
+        return self.node.name
+
+
+@dataclass
+class ModuleUnit:
+    modules: dict                                   # name -> ModuleInfo, the modules of this build
+    order: list                                     # names, dependencies first
+    entry: str = ''
+    programs: list = field(default_factory=list)    # root modules that can be built as programs
+    warnings: list = field(default_factory=list)    # non-fatal notes for the driver to print
+    declared: dict = field(default_factory=dict)    # name -> ModuleInfo, every module seen (built or not)
+
+    def entry_settings(self):
+        return self.modules[self.entry].settings
+
+
+def _has_modules(statements):
+    return any(isinstance(s, ModuleDef) for s in statements if s is not None)
+
+
+def _resolve_path(spec, from_file):
+    """A 'from' path is relative to the file that names it, then to the working directory."""
+    p = Path(spec)
+    if p.is_absolute() and p.exists():
+        return p.resolve()
+    base = Path(from_file).resolve().parent
+    for cand in (base / p, Path.cwd() / p):
+        if cand.exists():
+            return cand.resolve()
+    raise ModuleError(f"from \"{spec}\": file not found (looked in {base} and {Path.cwd()})")
+
+
+def _tag_value(entries, tag):
+    """Last entry of the given tag, or None."""
+    found = None
+    for e in entries:
+        if e.override_for is None and e.tag == tag:
+            found = e
+    return found
+
+
+def _defines(mod, fn_name):
+    for s in mod.body:
+        fd = s if isinstance(s, FunctionDef) else getattr(s, 'function_def', None)
+        if isinstance(fd, FunctionDef) and fd.name == fn_name and not fd.is_prototype:
+            return True
+    return False
+
+
+def load(ast, root_file, parse_file, select=None, entry_fn='main'):
+    """Collect the modules of the root file and the files it imports with 'module Name from "file";'.
+
+    An import builds the named module of that file by that module's own rules. A module only
+    pulls in what it lists in '#[requires]'; the listed names are the modules declared in its
+    own file or imported by it.
+
+    parse_file(path) -> Program for another source file.
+    Returns a ModuleUnit, or None when the program declares no modules."""
+    root_mods = [s for s in ast.statements if isinstance(s, ModuleDef) and not s.import_path]
+    root_imps = [s for s in ast.statements if isinstance(s, ModuleDef) and s.import_path]
+    if not root_mods and not root_imps:
+        return None
+    root_abs = str(Path(root_file).resolve())
+    infos = {}
+    order = []
+    loading = []
+    file_modules = {root_abs: [m.name for m in root_mods]}
+    file_imports = {root_abs: root_imps}          # file -> import nodes it declares
+
+    def add(mod, file, line_map=None, src_lines=None):
+        if mod.name in infos:
+            if infos[mod.name].file != file:
+                raise ModuleError(f"module '{mod.name}' is declared in both "
+                                  f"{infos[mod.name].file} and {file}")
+            return
+        mod.source_file = file
+        mod._src_lines = src_lines
+        mod._line_map = line_map            # merged line -> (file, local line) of the parse that made it
+        infos[mod.name] = ModuleInfo(mod, file)
+
+    def load_import(imp, from_file):
+        """Parse the imported file once, register all its modules, return the named module."""
+        path = str(_resolve_path(imp.import_path, from_file))
+        if path not in file_modules:
+            prog = parse_file(path)
+            lmap = getattr(prog, '_line_map', None)
+            slines = getattr(prog, '_source_lines', None)
+            mods = [s for s in prog.statements if isinstance(s, ModuleDef) and not s.import_path]
+            imps = [s for s in prog.statements if isinstance(s, ModuleDef) and s.import_path]
+            if not mods:
+                raise ModuleError(f"module {imp.name} from \"{imp.import_path}\": the file declares no module")
+            for m in mods:
+                add(m, path, lmap, slines)
+            file_modules[path] = [m.name for m in mods]
+            file_imports[path] = imps
+            for sub in imps:
+                load_import(sub, path)
+        if imp.name not in file_modules[path]:
+            raise ModuleError(f"module {imp.name} from \"{imp.import_path}\": the file declares no module "
+                              f"named '{imp.name}'")
+        return infos[imp.name]
+
+    def lookup(name, from_file):
+        """A module visible to from_file: declared in it or imported by it."""
+        info = infos.get(name)
+        if info is None:
+            return None
+        if info.file == from_file:
+            return info
+        for imp in file_imports.get(from_file, []):
+            if imp.name == name:
+                return info
+        return None
+
+    def visit(name):
+        info = infos[name]
+        if name in loading:
+            raise ModuleError("modules depend on each other: " + " -> ".join(loading + [name]))
+        if name in order:
+            return
+        loading.append(name)
+        req = _tag_value(info.node.build, 'requires')
+        if req is not None:
+            if not isinstance(req.value, list):
+                raise ModuleError(f"module '{name}': '#[requires]' takes a list: {{A, B}}")
+            for dep in req.value:
+                if dep == name:
+                    raise ModuleError(f"module '{name}' cannot require itself")
+                if lookup(dep, info.file) is None:
+                    raise ModuleError(f"module '{name}': '#[requires]' names module '{dep}', which is not "
+                                      f"declared in this file or imported with 'module {dep} from \"file\";'")
+                if dep not in info.deps:
+                    info.deps.append(dep)
+                visit(dep)
+        loading.pop()
+        order.append(name)
+
+    root_lmap = getattr(ast, '_line_map', None)
+    for m in root_mods:
+        add(m, root_abs, root_lmap, getattr(ast, '_source_lines', None))
+    marked = [m.name for m in root_mods if (_tag_value(m.build, 'entrypoint') is not None
+                                            and _tag_value(m.build, 'entrypoint').value == 'this')]
+    programs = [m.name for m in root_mods if m.name in marked or _defines(m, entry_fn)]
+    # 'module Name from "file";' builds Name by its own rules: it is a program of this file
+    for imp in root_imps:
+        if imp.name in infos and infos[imp.name].file == root_abs:
+            raise ModuleError(f"module '{imp.name}' is both declared in and imported into {root_abs}")
+        info = load_import(imp, root_abs)
+        if info.name not in programs:
+            programs.append(info.name)
+    if not programs:
+        raise ModuleError("no module in " + os.path.basename(root_file)
+                          + " defines " + entry_fn + "() or sets '#[entrypoint] = this'")
+    if select is not None:
+        if select not in programs:
+            raise ModuleError(f"module '{select}' is not a program of this file")
+        entry = select
+    else:
+        entry = (marked or programs)[0]
+    infos[entry].entry = True
+    visit(entry)                             # only what the entry requires is built
+    return ModuleUnit({n: infos[n] for n in order}, order, entry, programs, declared=infos)
+
+
+def resolve_settings(unit, cli_borrow=False, cli_effects=False, platform=''):
+    """Fill in ModuleInfo.settings for every module of the unit."""
+    for info in unit.modules.values():
+        s = dict(_DEFAULTS)
+        s['using'] = []
+        s['platform'] = []
+        s['test'] = {}
+        s['name'] = info.name
+        for e in info.node.build:
+            if e.override_for is not None:
+                continue
+            if e.tag not in _KNOWN_TAGS:
+                raise ModuleError(f"module '{info.name}': unknown build tag '#[{e.tag}]'")
+            if e.tag == 'entrypoint':
+                continue
+            s[e.tag] = _coerce(info.name, e.tag, e.value)
+            if e.locked:
+                info.locked.add(e.tag)
+        if s['target'] not in TARGETS:
+            raise ModuleError(f"module '{info.name}': '#[target] = {s['target']}' is not one of "
+                              + ", ".join(TARGETS))
+        info.settings = s
+
+    # overrides: breadth first from the entry, so the module nearest the entry wins
+    applied = {}
+    queue = [unit.entry]
+    seen = set(queue)
+    while queue:
+        cur = queue.pop(0)
+        for e in unit.modules[cur].node.build:
+            if e.override_for is None:
+                continue
+            for target in e.override_for:
+                if target not in unit.declared:
+                    raise ModuleError(f"module '{cur}': '#[override for {{{target}}}]' names a module "
+                                      f"that is not part of this build")
+                if target not in unit.modules[cur].deps:
+                    raise ModuleError(f"module '{cur}': cannot override module '{target}' because '{cur}' "
+                                      f"does not use it. Add '#[requires] = {{{target}}}' to the build "
+                                      f"settings of '{cur}' first")
+                t = unit.modules[target]
+                for oe in e.value:
+                    if oe.tag not in _KNOWN_TAGS or oe.tag == 'entrypoint':
+                        raise ModuleError(f"module '{cur}': cannot override '#[{oe.tag}]'")
+                    if oe.tag in t.locked:
+                        unit.warnings.append(f"module '{cur}': '#[override for {{{target}}}]' sets "
+                                             f"'#[{oe.tag}]', but module '{target}' locked it with '!+'; "
+                                             f"the override is ignored")
+                        continue
+                    if (target, oe.tag) in applied:
+                        continue
+                    t.settings[oe.tag] = _coerce(target, oe.tag, oe.value)
+                    applied[(target, oe.tag)] = cur
+        for d in unit.modules[cur].deps:
+            if d not in seen:
+                seen.add(d)
+                queue.append(d)
+
+    # A sibling module is part of this build through the functions the entry uses: its checks
+    # run on the live functions it contributes (see _run_borrow_check), and on nothing else.
+
+    for info in unit.modules.values():
+        if cli_borrow:
+            info.settings['borrow_check'] = True
+        if cli_effects:
+            info.settings['effect_check'] = True
+        plats = [p.lower() for p in info.settings['platform']]
+        if plats and platform and platform.lower() not in plats:
+            raise ModuleError(f"module '{info.name}' builds for {{{', '.join(info.settings['platform'])}}} "
+                              f"but this build targets {platform}")
+
+
+_BOOL_TEST_TAGS = ('expect_build_fail',)
+
+
+def _coerce_flag(mod, tag, value):
+    if isinstance(value, str) and value in ('true', 'false'):
+        return value == 'true'
+    if not isinstance(value, bool):
+        raise ModuleError(f"module '{mod}': '#[test]' subtag '#[{tag}]' takes true or false")
+    return value
+
+
+def _coerce(mod, tag, value):
+    if tag in _BOOL_TAGS:
+        if isinstance(value, str) and value in ('true', 'false'):
+            return value == 'true'
+        if not isinstance(value, bool):
+            raise ModuleError(f"module '{mod}': '#[{tag}]' takes true or false")
+        return value
+    if tag == 'test':
+        if not isinstance(value, list) or any(not isinstance(v, iast.BuildEntry) for v in value):
+            raise ModuleError(f"module '{mod}': '#[test]' takes a block: = {{ #[subtag] }}")
+        out = {}
+        for v in value:
+            if v.tag not in _TEST_TAGS:
+                raise ModuleError(f"module '{mod}': unknown test tag '#[{v.tag}]' in '#[test]' "
+                                  f"(known: {', '.join(_TEST_TAGS)})")
+            if v.tag in _BOOL_TEST_TAGS:
+                out[v.tag] = _coerce_flag(mod, v.tag, v.value)
+        return out
+    if tag in ('using', 'platform', 'requires'):
+        if not isinstance(value, list):
+            raise ModuleError(f"module '{mod}': '#[{tag}]' takes a list: {{A, B}}")
+        return list(value)
+    if isinstance(value, (list, bool)):
+        raise ModuleError(f"module '{mod}': '#[{tag}]' takes a single name")
+    return str(value)
+
+
+def _tag_functions(stmts, module, out):
+    """Mark every function (including namespace functions and object methods) with its module."""
+    for s in stmts:
+        if s is None:
+            continue
+        fd = getattr(s, 'function_def', None) if not isinstance(s, FunctionDef) else s
+        if isinstance(fd, FunctionDef):
+            fd._module = module
+            out.append(fd)
+        elif isinstance(s, NamespaceDef):
+            _tag_functions(s.functions, module, out)
+            _tag_functions(s.nested_namespaces, module, out)
+            for o in s.objects:
+                _tag_functions(getattr(o, 'methods', []) or [], module, out)
+        elif isinstance(s, ObjectDef):
+            _tag_functions(s.methods or [], module, out)
+        elif hasattr(s, 'namespace_def'):
+            _tag_functions([s.namespace_def], module, out)
+        elif hasattr(s, 'object_def'):
+            _tag_functions([s.object_def], module, out)
+
+
+def _origin(mod, stmt):
+    """(file, line, column) in the source a statement was written at, or None when unknown.
+    Two modules that textually import the same library each hold a copy of it; the copies
+    share their origin."""
+    lm = getattr(mod, '_line_map', None)
+    ln = getattr(stmt, 'source_line', 0)
+    if not lm or not (1 <= ln <= len(lm)) or not lm[ln - 1][0]:
+        return None
+    return (str(lm[ln - 1][0]), lm[ln - 1][1], getattr(stmt, 'source_col', 0),
+            type(stmt).__name__, getattr(stmt, 'name', None))
+
+
+def _relocate(nodes, offset):
+    """Shift the source line of every node under *nodes* by *offset*, so that all modules of the
+    flattened program share one combined line map."""
+    base = UsingStatement.__module__
+    seen = set()
+    stack = list(nodes)
+    while stack:
+        x = stack.pop()
+        if isinstance(x, (list, tuple)):
+            stack.extend(x)
+            continue
+        if isinstance(x, dict):
+            stack.extend(x.values())
+            continue
+        if id(x) in seen or type(x).__module__ != base or not hasattr(x, '__dict__'):
+            continue
+        seen.add(id(x))
+        ln = x.__dict__.get('source_line')
+        if isinstance(ln, int) and ln > 0:
+            x.source_line = ln + offset
+        stack.extend(x.__dict__.values())
+
+
+def _top_function_names(stmts):
+    names = []
+    for s in stmts:
+        fd = s if isinstance(s, FunctionDef) else getattr(s, 'function_def', None)
+        if isinstance(fd, FunctionDef):
+            names.append(fd.name)
+    return names
+
+
+def flatten(ast, unit, entry_fn='main'):
+    """Replace the module declarations of the program by their contents, dependencies first.
+
+    Statements that are not modules (the root file's imports and globals) stay in front.
+    Each module's 'using' list becomes using statements in front of its body."""
+    rest = [s for s in ast.statements if not isinstance(s, ModuleDef)]
+    body = []
+    funcs = []
+    seen_origin = set()
+    combined_map = list(getattr(ast, '_line_map', None) or [])
+    combined_src = list(getattr(ast, '_source_lines', None) or [])
+    offsets = {}
+    if getattr(ast, '_line_map', None):
+        offsets[id(ast._line_map)] = 0
+    for name in unit.order:
+        info = unit.modules[name]
+        first = len(body)
+        for ns in info.settings['using']:
+            u = UsingStatement(ns.replace('.', '::'))
+            u.set_location(info.node.source_line, info.node.source_col)
+            body.append(u)
+        if not info.entry:                  # only the entry module contributes the program's main
+            # the definition goes; the prototypes a module declares stay (the runtime calls main)
+            def _is_main_def(s):
+                fd = s if isinstance(s, FunctionDef) else getattr(s, 'function_def', None)
+                return isinstance(fd, FunctionDef) and fd.name == entry_fn and not fd.is_prototype
+            info.node.body = [s for s in info.node.body if not _is_main_def(s)]
+        # A library imported by several modules is built once: the first copy stays
+        kept = []
+        for s in info.node.body:
+            o = _origin(info.node, s)
+            if o is not None:
+                if o in seen_origin:
+                    continue
+                seen_origin.add(o)
+            kept.append(s)
+        info.node.body = kept
+        _tag_functions(info.node.body, name, funcs)
+        body.extend(info.node.body)
+        # Statements of a module that was parsed from another file carry line numbers of that
+        # parse. Move them into the combined line map so locations resolve to the right file.
+        lm = getattr(info.node, '_line_map', None)
+        if lm:
+            if id(lm) not in offsets:
+                offsets[id(lm)] = len(combined_map)
+                combined_src.extend([''] * (len(combined_map) - len(combined_src)))
+                src = list(getattr(info.node, '_src_lines', None) or [])
+                src.extend([''] * (len(lm) - len(src)))
+                combined_map.extend(lm)
+                combined_src.extend(src[:len(lm)])
+            if offsets[id(lm)]:
+                _relocate(body[first:], offsets[id(lm)])
+    ast.statements = rest + body
+    ast._line_map = combined_map
+    ast._source_lines = combined_src
+    ast._modules = unit
+    # Functions of modules that are declared but not part of this build. A call to one of them
+    # that finds nothing is reported with the module to require (see icodegen._funcall_not_found).
+    built = {f.name for f in funcs}
+    unbuilt = {}
+    for name, info in unit.declared.items():
+        if name in unit.modules:
+            continue
+        for fn in _top_function_names(info.node.body):
+            if fn not in built:
+                unbuilt.setdefault(fn, name)
+    ast._module_unbuilt = unbuilt
+    return funcs
+
+
+def func_modules(ast):
+    """(mangled name -> module, bare name -> module) for every tagged function."""
+    full, bare = {}, {}
+
+    def walk(stmts, prefix):
+        for s in stmts:
+            if s is None:
+                continue
+            if isinstance(s, FunctionDef):
+                m = getattr(s, '_module', None)
+                if m is not None:
+                    full[f"{prefix}__{s.name}" if prefix else s.name] = m
+                    bare.setdefault(s.name, m)
+            elif isinstance(s, NamespaceDef):
+                p = f"{prefix}__{s.name}" if prefix else s.name
+                walk(s.functions, p)
+                walk(s.nested_namespaces, p)
+            elif hasattr(s, 'function_def'):
+                walk([s.function_def], prefix)
+            elif hasattr(s, 'namespace_def'):
+                walk([s.namespace_def], prefix)
+    walk(ast.statements, '')
+    return full, bare
+
+
+def dce_roots(ast, unit):
+    """Mangled names of every function of a module that sets dce = false."""
+    keep = {n for n, i in unit.modules.items() if not i.settings['dce']}
+    if not keep:
+        return ()
+    full, _ = func_modules(ast)
+    return tuple(k for k, m in full.items() if m in keep)
+
+
+def filter_violations(violations, unit, ast, tag):
+    """Keep the violations that fall in a module whose check (tag) is on. A violation
+    is attributed through its function ('func'); one with no known function is kept."""
+    on = checked(unit, tag)
+    full, bare = func_modules(ast)
+    out = []
+    for v in violations:
+        fn = getattr(v, 'func', '') or getattr(v, 'caller_name', '') or getattr(v, 'func_name', '')
+        mod = full.get(fn) or bare.get(fn.split('__')[-1] if fn else '')
+        if mod is None or mod in on:
+            out.append(v)
+    return out
+
+
+def checked(unit, tag):
+    """Names of the modules whose setting for tag is on."""
+    return {n for n, i in unit.modules.items() if i.settings[tag]}

@@ -129,8 +129,33 @@ namespace IDEKA
             int k = 1;
             int p = 0;
             int e;
+            u64 ones = (u64)0x01010101;
+            u64 nls = (u64)0x0A0A0A0A;
+            u64 hi = (u64)0x80808080;
+            u64 w, all, stop;
+            ones = (ones << (u64)32) | ones;
+            nls = (nls << (u64)32) | nls;
+            hi = (hi << (u64)32) | hi;
+            all = (u64)0 - (u64)1;
             while (k < ln & p < n)
             {
+                if (p + 8 <= n)
+                {
+                    // eight bytes at a time while none of them is a newline
+                    w = (*(u64*)(src + p)) xor nls;
+                    if ((((w - ones) & (w xor all)) & hi) == (u64)0)
+                    {
+                        p = p + 8;
+                        continue;
+                    };
+                    stop = (u64)(p + 8);
+                    while ((u64)p < stop & k < ln)
+                    {
+                        if (src[p] == 10) { k++; };
+                        p++;
+                    };
+                    continue;
+                };
                 if (src[p] == 10) { k++; };
                 p++;
             };

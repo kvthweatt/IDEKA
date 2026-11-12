@@ -1,0 +1,995 @@
+// Author: Karac V. Thweatt
+//
+// issa_module.idk - module and builder layer shared by the backends: types, constants, globals, functions, blocks and the
+// calls the front end makes, which record the instructions for the SSA code generator. Imported inside the object of a backend.
+
+            // Sets up the target independent state
+            s_mod_init(byte* name) -> void
+            {
+                this.mod_name = ts_dup(name);
+                this.triple = (byte*)0;
+                this.layout = (byte*)0;
+                this.nul = (IRType*)0;
+                this.types = pv_new();
+                this.values = pv_new();
+                this.vp = (byte*)0;
+                this.vleft = 0;
+                this.strs = pv_new();
+                this.blobs = pv_new();
+                this.named = pv_new();
+                this.globals = pv_new();
+                this.funcs = pv_new();
+                this.gnames = nm_new();
+                this.fmap = nm_new();
+                this.gmap = nm_new();
+                this.tb.__init();
+                this.cdata.__init();
+                this.nunsup = 0;
+                this.cur_item = (byte*)0;
+                this.zmax = 0;
+                this.mb.__init();
+                this.lab = 0;
+                this.ulog = pv_new();
+                this.cf = (IRFunc*)0;
+                this.cb = (IRBlock*)0;
+                this.entry_b = (IRBlock*)0;
+                this.ia = (IRValue**)fmalloc((u64)8 * (u64)((sizeof(IRValue*) + 7) / 8));
+                this.nul = this.new_type(LK.VOID);
+                this.nul.elem = this.nul;
+                this.must_tail = false;
+                this.sf = (GF*)0;
+                this.gwhy = 0;
+                this.sbp = (IRBlock**)0;
+                this.sbn = 0;
+                this.escok = false;
+                this.rgm = (int*)0;
+                this.rgk = (int*)0;
+                this.rgn = 0;
+                this.rgs = 0;
+                this.eqx = (IRValue*)0;
+                this.rs_x = (IRValue*)0;
+                this.rs_n = 0;
+                this.rs_mode = 0;
+                this.rs_p = (int*)0;
+                this.rs_c = (i64*)0;
+                this.rs_lp = 0;
+                this.rs_lc = (i64)0;
+                this.eqv = (u64)0;
+                this.ubuf = this.s_iz(64);
+                this.dbuf = this.s_iz(64);
+                this.bcap = 64;
+                this.nub = 0;
+                this.ndb = 0;
+                this.ea = (int*)0;
+                this.eb = (int*)0;
+                this.ne = 0;
+                this.ecap = 0;
+                this.adjo = (int*)0;
+                this.adj = (int*)0;
+                this.ord = (int*)0;
+                this.nord = 0;
+                this.spl = (int*)0;
+                this.nspl = 0;
+                ->;
+            };
+
+            // Releases the target independent state
+            s_mod_free() -> void
+            {
+                int i, j;
+                IRFunc* f;
+                IRBlock* bl;
+                while (i < this.types.len)
+                {
+                    ffree((byte*)this.types.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.strs.len)
+                {
+                    ffree((byte*)this.strs.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.blobs.len)
+                {
+                    ffree((byte*)this.blobs.items[i]);
+                    i++;
+                };
+                i = 0;
+                while (i < this.funcs.len)
+                {
+                    f = (IRFunc*)this.funcs.items[i];
+                    j = 0;
+                    while (j < f.blocks.len)
+                    {
+                        bl = (IRBlock*)f.blocks.items[j];
+                        pv_free(bl.lines);
+                        ffree((byte*)bl);
+                        j++;
+                    };
+                    pv_free(f.blocks);
+                    pv_free(f.attrs);
+                    nm_free(f.names);
+                    ffree((byte*)f.args);
+                    ffree((byte*)f);
+                    i++;
+                };
+                i = 0;
+                while (i < this.globals.len)
+                {
+                    ffree((byte*)this.globals.items[i]);
+                    i++;
+                };
+                pv_free(this.types);
+                pv_free(this.values);
+                pv_free(this.strs);
+                pv_free(this.blobs);
+                pv_free(this.named);
+                pv_free(this.globals);
+                pv_free(this.funcs);
+                nm_free(this.gnames);
+                nm_free(this.fmap);
+                nm_free(this.gmap);
+                ffree(this.mod_name);
+                switch (this.triple != (byte*)0)
+                {
+                    case (true) { ffree(this.triple); }
+                    default {};
+                };
+                switch (this.layout != (byte*)0)
+                {
+                    case (true) { ffree(this.layout); }
+                    default {};
+                };
+                this.cdata.__exit();
+                this.tb.__exit();
+                this.mb.__exit();
+                -> ffree((byte*)this.ia);
+            };
+
+            set_target(byte* triple, byte* layout) -> void
+            {
+                this.triple = ts_dup(triple);
+                this.layout = ts_dup(layout);
+                ->;
+            };
+
+            // Owned copy of s
+            // Records an unsupported construct: the function or global it is in, and why
+            a_note(byte* where, byte* why) -> void
+            {
+                Buf t;
+                t.__init();
+                if (where == (byte*)0) { where = g"<unnamed>\0"; };
+                t.put_str(where);
+                t.put_str(g": \0");
+                t.put_str(why);
+                t.put(0);
+                pv_push(this.ulog, (void*)this.own(t.mem));
+                t.__exit();
+                ->;
+            };
+
+            own(byte* s) -> byte*
+            {
+                byte* r = ts_dup(s);
+                pv_push(this.strs, (void*)r);
+                -> r;
+            };
+
+            alloc_items(int n) -> IRType**
+            {
+                IRType** p = (IRType**)fmalloc((u64)(n + 1) * (u64)((sizeof(IRType*) + 7) / 8));
+                pv_push(this.blobs, (void*)p);
+                -> p;
+            };
+
+            new_type(int kind) -> IRType*
+            {
+                IRType* t = (IRType*)fmalloc((u64)((sizeof(IRType) + 7) / 8));
+                t.kind = kind;
+                t.width = 0;
+                t.count = 0;
+                t.elem = this.nul;
+                t.items = (IRType**)0;
+                t.nitems = 0;
+                t.name = (byte*)0;
+                t.vararg = false;
+                t.defined = true;
+                t.lbits = 0;
+                t.loff = (int*)0;
+                pv_push(this.types, (void*)t);
+                -> t;
+            };
+
+            t_void() -> IRType* -> this.new_type(LK.VOID);
+            t_float() -> IRType* -> this.new_type(LK.FLOAT);
+            t_double() -> IRType* -> this.new_type(LK.DOUBLE);
+
+            t_int(int width) -> IRType*
+            {
+                IRType* t = this.new_type(LK.INT);
+                t.width = width;
+                -> t;
+            };
+
+            t_ptr(IRType* elem) -> IRType*
+            {
+                IRType* t = this.new_type(LK.PTR);
+                t.elem = elem;
+                -> t;
+            };
+
+            t_array(IRType* elem, int count) -> IRType*
+            {
+                IRType* t = this.new_type(LK.ARRAY);
+                t.elem = elem;
+                t.count = count;
+                -> t;
+            };
+
+            // Literal struct over the first n entries of items (copied)
+            t_struct(IRType** items, int n) -> IRType*
+            {
+                int i;
+                IRType* t = this.new_type(LK.STRUCT);
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = items[i];
+                    i++;
+                };
+                t.nitems = n;
+                -> t;
+            };
+
+            t_func(IRType* ret, IRType** params, int n, bool vararg) -> IRType*
+            {
+                int i;
+                IRType* t = this.new_type(LK.FUNC);
+                t.elem = ret;
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = params[i];
+                    i++;
+                };
+                t.nitems = n;
+                t.vararg = vararg;
+                -> t;
+            };
+
+            // Identified struct, body set later with set_body. Returns the existing one
+            // when the name is already in use.
+            t_named(byte* name) -> IRType*
+            {
+                int i;
+                IRType* t;
+                while (i < this.named.len)
+                {
+                    t = (IRType*)this.named.items[i];
+                    switch (cstr_eq(t.name, name))
+                    {
+                        case (true) { -> t; }
+                        default
+                        {
+                            i++;
+                        };
+                    };
+                };
+                t = this.new_type(LK.ISTRUCT);
+                t.name = this.own(name);
+                t.defined = false;
+                pv_push(this.named, (void*)t);
+                -> t;
+            };
+
+            set_body(IRType* t, IRType** items, int n) -> void
+            {
+                int i;
+                t.items = this.alloc_items(n);
+                while (i < n)
+                {
+                    t.items[i] = items[i];
+                    i++;
+                };
+                t.nitems = n;
+                t.defined = true;
+                ->;
+            };
+
+            type_str(IRType* t) -> byte*
+            {
+                this.tb.clear();
+                lt_text(@this.tb, t);
+                -> this.own(this.tb.mem);
+            };
+
+            // ----------------------------------------------------------
+            // Values
+            // ----------------------------------------------------------
+
+            new_value(IRType* ty, byte* text) -> IRValue*
+            {
+                int vb = ((((int)sizeof(IRValue) + 7) / 8) * 2 + 15) / 16 * 16;
+                // Values live until the module is released, so they are carved out of shared blocks
+                // kept in blobs; one allocation then serves many values
+                switch (this.vleft < vb)
+                {
+                    case (true) {
+                        this.vp = (byte*)fmalloc((u64)4096);
+                        pv_push(this.blobs, (void*)this.vp);
+                        this.vleft = 4096;
+                    }
+                    default {};
+                };
+                IRValue* v = (IRValue*)this.vp;
+                this.vp = this.vp + vb;
+                this.vleft = this.vleft - vb;
+                v.ty = ty;
+                v.text = this.own(text);
+                v.spec = (TypeSpec*)0;
+                v.espec = (TypeSpec*)0;
+                v.flags = 0;
+                v.slot = 0;
+                v.vr = 0;
+                v.fo = 0;
+                v.fwd = (IRValue*)0;
+                v.nu = 0;
+                v.di = (void*)0;
+                v.db = 0;
+                v.ui = (void*)0;
+                v.kc = false;
+                v.kv = (i64)0;
+                v.cl = (void*)0;
+                v.is_const = false;
+                -> v;
+            };
+
+            c_int(IRType* ty, i64 val) -> IRValue*
+            {
+                IRValue* v;
+                this.tb.clear();
+                switch (ty.width)
+                {
+                    case (1)
+                    {
+                        switch (val != (i64)0)
+                        {
+                            case (true) { this.tb.put_str(g"true\0"); }
+                            default { this.tb.put_str(g"false\0"); };
+                        };
+                    }
+                    default { put_i64(@this.tb, val); };
+                };
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Unsigned 64 bit constant: a Python int above INT64_MAX prints as is
+            c_u64(IRType* ty, u64 val) -> IRValue*
+            {
+                IRValue* v;
+                this.tb.clear();
+                put_u64(@this.tb, val);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            c_null(IRType* ty) -> IRValue*
+            {
+                IRValue* v;
+                switch (ty.kind)
+                {
+                    case (LK.PTR) { v = this.new_value(ty, g"null\0"); }
+                    case (LK.INT)
+                    {
+                        v = this.c_int(ty, 0);
+                        // llvmlite formats Constant(i1, 0) as 0, only a Python bool prints false
+                        switch (ty.width == 1)
+                        {
+                            case (true) { v.text = g"0\0"; }
+                            default {};
+                        };
+                        -> v;
+                    }
+                    default
+                    {
+                        switch (ty.kind == LK.FLOAT | ty.kind == LK.DOUBLE)
+                        {
+                            case (true) {
+                            v = this.c_fp(ty, 0.0);
+                            -> v;
+                        }
+                            default { v = this.new_value(ty, g"zeroinitializer\0"); };
+                        };
+                    };
+                };
+                v.is_const = true;
+                -> v;
+            };
+
+            c_undef(IRType* ty) -> IRValue*
+            {
+                IRValue* v = this.new_value(ty, g"undef\0");
+                v.is_const = true;
+                -> v;
+            };
+
+            // Floating point constant. llvmlite prints the double bit pattern for both
+            // float and double.
+            c_fp(IRType* ty, double d) -> IRValue*
+            {
+                IRValue* v;
+                float f;
+                double dd = d;
+                u64 bits;
+                u64* bp;
+                switch (ty.kind == LK.FLOAT)
+                {
+                    case (true) {
+                    f = (float)d;
+                    dd = (double)f;
+                }
+                    default {};
+                };
+                bp = (u64*)@dd;
+                bits = *bp;
+                this.tb.clear();
+                put_hex64(@this.tb, bits);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Constant array literal [ty v, ty v, ...] as llvmlite prints it
+            c_array(IRType* ty, IRValue** elems, int n) -> IRValue*
+            {
+                IRValue* v;
+                int i;
+                this.tb.clear();
+                this.tb.put(91);
+                while (i < n)
+                {
+                    switch (i > 0) { case (true) { this.tb.put_str(g", \0"); } default {}; };
+                    lt_text(@this.tb, elems[i].ty);
+                    this.tb.put(32);
+                    this.tb.put_str(elems[i].text);
+                    i++;
+                };
+                this.tb.put(93);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // c"..." constant over n bytes
+            c_bytes(IRType* ty, byte* bytes_in, int n) -> IRValue*
+            {
+                IRValue* v;
+                int i, c;
+                this.tb.clear();
+                this.tb.put_str(g"c\"\0");
+                while (i < n)
+                {
+                    c = (int)bytes_in[i];
+                    switch (c < 32 | c > 126 | c == 34 | c == 92)
+                    {
+                        case (true) {
+                        this.tb.put(92);
+                        this.tb.put(hexdig(c / 16));
+                        this.tb.put(hexdig(c % 16));
+                    }
+                        default { this.tb.put(c); };
+                    };
+                    i++;
+                };
+                this.tb.put(34);
+                v = this.new_value(ty, this.tb.mem);
+                v.is_const = true;
+                -> v;
+            };
+
+            // Operand text "type value"
+            unique_global(byte* name) -> byte*
+            {
+                int n = 1;
+                byte* cand;
+                switch (!nm_has(this.gnames, name))
+                {
+                    case (true) { -> this.own(name); }
+                    default
+                    {
+                        while (true)
+                        {
+                            this.tb.clear();
+                            this.tb.put_str(name);
+                            this.tb.put(46);
+                            this.tb.put_int(n);
+                            cand = this.tb.mem;
+                            switch (!nm_has(this.gnames, cand))
+                            {
+                                case (true) { -> this.own(cand); }
+                                default
+                                {
+                                    n++;
+                                };
+                            };
+                        };
+                        -> this.own(name);
+                    };
+                };
+            };
+
+            // Global variable of type ty. init is the initializer operand text or null.
+            add_global(IRType* ty, byte* name, byte* init) -> IRGlobal*
+            {
+                IRGlobal* g = (IRGlobal*)fmalloc((u64)((sizeof(IRGlobal) + 7) / 8));
+                g.name = this.unique_global(name);
+                nm_put(this.gnames, g.name, (void*)g);
+                nm_put(this.gmap, g.name, (void*)g);
+                g.ty = ty;
+                g.init = (byte*)0;
+                switch (init != (byte*)0)
+                {
+                    case (true) { g.init = this.own(init); }
+                    default {};
+                };
+                g.linkage = (byte*)0;
+                g.constant = false;
+                this.tb.clear();
+                this.tb.put(64);
+                put_quoted(@this.tb, g.name);
+                g.self = this.new_value(this.t_ptr(ty), this.tb.mem);
+                g.self.flags = VF_GLOBAL;
+                pv_push(this.globals, (void*)g);
+                -> g;
+            };
+
+            find_global(byte* name) -> IRGlobal* -> (IRGlobal*)nm_get(this.gmap, name);
+
+            // Function with the given type. A function becomes a declaration until a
+            // block is appended to it.
+            add_function(IRType* ftype, byte* name) -> IRFunc*
+            {
+                int i;
+                IRFunc* f = (IRFunc*)fmalloc((u64)(((sizeof(IRFunc) + 7) / 8) * 2));
+                f.name = this.unique_global(name);
+                nm_put(this.gnames, f.name, (void*)f);
+                nm_put(this.fmap, f.name, (void*)f);
+                f.ftype = ftype;
+                f.nargs = ftype.nitems;
+                f.args = (IRValue**)fmalloc((u64)(f.nargs + 1) * (u64)((sizeof(IRValue*) + 7) / 8));
+                f.blocks = pv_new();
+                f.attrs = pv_new();
+                f.names = nm_new();
+                f.counter = 0;
+                f.cconv = (byte*)0;
+                f.linkage = (byte*)0;
+                f.is_decl = true;
+                f.sall = (PtrVec*)0;
+                f.sarr = (PtrVec*)0;
+                f.sp = (byte*)0;
+                f.sleft = 0;
+                f.ap = (byte*)0;
+                f.aleft = 0;
+                f.frame = 0;
+                f.sret_slot = 0;
+                f.cs_mask = 0;
+                f.ipst = 0;
+                f.ipm = 0;
+                f.ipok = false;
+                f.cs = (int*)0;
+                while (i < f.nargs)
+                {
+                    f.counter = f.counter + 1;
+                    this.tb.clear();
+                    this.tb.put(37);
+                    this.tb.put_str(f"\".{f.counter}\0");
+                    this.tb.put(34);
+                    f.args[i] = this.new_value(ftype.items[i], this.tb.mem);
+                    i++;
+                };
+                this.tb.clear();
+                this.tb.put(64);
+                put_quoted(@this.tb, f.name);
+                f.counter = f.counter + 1;
+                f.self = this.new_value(this.t_ptr(ftype), this.tb.mem);
+                pv_push(this.funcs, (void*)f);
+                -> f;
+            };
+
+            find_function(byte* name) -> IRFunc* -> (IRFunc*)nm_get(this.fmap, name);
+
+            // Names parameter i (llvmlite Argument.name = ...)
+            name_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                this.tb.clear();
+                this.tb.put(37);
+                put_quoted(@this.tb, name);
+                f.args[i].text = this.own(this.tb.mem);
+                -> nm_put(f.names, name, (void*)f);
+            };
+
+            // Gives parameter i a new name, kept unique inside f
+            rename_arg(IRFunc* f, int i, byte* name) -> void
+            {
+                byte* nm = this.fresh_name(f, name);
+                f.args[i].text = this.result_text(nm);
+                ->;
+            };
+
+            // A name unique inside f: base when free, else base.N
+            fresh_name(IRFunc* f, byte* base) -> byte*
+            {
+                int n = 1;
+                byte* cand;
+                switch (base == (byte*)0)
+                {
+                    case (true) {
+                    f.counter = f.counter + 1;
+                    this.tb.clear();
+                    this.tb.put(46);
+                    this.tb.put_int(f.counter);
+                    -> this.own(this.tb.mem);
+                }
+                    default
+                    {
+                        switch (base[0] == 0)
+                        {
+                            case (true) {
+                            f.counter = f.counter + 1;
+                            this.tb.clear();
+                            this.tb.put(46);
+                            this.tb.put_int(f.counter);
+                            -> this.own(this.tb.mem);
+                        }
+                            default
+                            {
+                                switch (!nm_has(f.names, base))
+                                {
+                                    case (true) {
+                                    nm_put(f.names, base, (void*)f);
+                                    -> this.own(base);
+                                }
+                                    default
+                                    {
+                                        while (true)
+                                        {
+                                            this.tb.clear();
+                                            this.tb.put_str(base);
+                                            this.tb.put(46);
+                                            this.tb.put_int(n);
+                                            cand = this.tb.mem;
+                                            switch (!nm_has(f.names, cand))
+                                            {
+                                                case (true) {
+                                                nm_put(f.names, cand, (void*)f);
+                                                -> this.own(cand);
+                                            }
+                                                default
+                                                {
+                                                    n++;
+                                                };
+                                            };
+                                        };
+                                        -> this.own(base);
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+
+            append_block(IRFunc* f, byte* name) -> IRBlock*
+            {
+                IRBlock* bl = (IRBlock*)fmalloc((u64)(((sizeof(IRBlock) + 7) / 8) * 2));
+                bl.name = this.fresh_name(f, name);
+                bl.lines = pv_new();
+                bl.terminated = false;
+                bl.term_at = 0;
+                bl.id = 0;
+                bl.insts = (PtrVec*)0;
+                bl.popsi = (void*)0;
+                bl.gi = 0;
+                // the label counter holds the last number handed out, like at every other place that numbers labels
+                this.lab++;
+                bl.id = this.lab;
+                pv_push(f.blocks, (void*)bl);
+                f.is_decl = false;
+                -> bl;
+            };
+
+            // ----------------------------------------------------------
+            // Instruction builder
+            // ----------------------------------------------------------
+
+            position(IRFunc* f, IRBlock* b) -> void
+            {
+                this.cf = f;
+                this.cb = b;
+                ->;
+            };
+
+            set_entry(IRBlock* b) -> void
+            {
+                this.entry_b = b;
+                ->;
+            };
+
+            is_terminated() -> bool
+            {
+                switch (this.cb == (IRBlock*)0)
+                {
+                    case (true) { -> true; }
+                    default
+                    {
+                        -> this.cb.terminated;
+                    };
+                };
+            };
+
+            const_val(IRValue* v) -> i64
+            {
+                int i;
+                bool neg = false;
+                i64 r;
+                switch (v.text[0] == 45)
+                {
+                    case (true) { neg = true; i = 1; }
+                    default {};
+                };
+                while (v.text[i] >= 48 & v.text[i] <= 57)
+                {
+                    r = r * (i64)10 + (i64)((int)v.text[i] - 48);
+                    i++;
+                };
+                switch (neg)
+                {
+                    case (true) { -> (i64)0 - r; }
+                    default
+                    {
+                        -> r;
+                    };
+                };
+            };
+
+            // Operand text "%name" for a fresh result
+            result_text(byte* name) -> byte*
+            {
+                this.tb.clear();
+                this.tb.put(37);
+                put_quoted(@this.tb, name);
+                -> this.own(this.tb.mem);
+            };
+
+            // Ends the instruction held in ib. A typed result gets a name (hint, or the
+            // next .N); a void one still takes the next .N.
+            binop(byte* op, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(a.ty);
+                if (!dead) { this.s_r_bin(op, a, b, r); };
+                -> r;
+            };
+
+            cmp(byte* kind, byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(this.t_int(1));
+                if (!dead) { this.s_r_cmp(kind, pred, a, b, r); };
+                -> r;
+            };
+
+            icmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue* -> this.cmp(g"icmp\0", pred, a, b, hint);
+
+            fcmp(byte* pred, IRValue* a, IRValue* b, byte* hint) -> IRValue* -> this.cmp(g"fcmp\0", pred, a, b, hint);
+
+            cast(byte* op, IRValue* v, IRType* to, byte* hint) -> IRValue*
+            {
+                bool dead;
+                IRValue* r;
+                switch (lt_eq(v.ty, to))
+                {
+                    case (true) { -> v; }
+                    default
+                    {
+                        dead = this.s_dead();
+                        r = this.n_val(to);
+                        if (!dead) { this.s_r_cast(op, v, to, r); };
+                        -> r;
+                    };
+                };
+            };
+
+            alloca(IRType* ty, byte* name) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_alloca(ty);
+                if (!dead) { this.s_r_alloca(ty, r); };
+                -> r;
+            };
+
+            alloca_here(IRType* ty, byte* name) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_alloca(ty);
+                if (!dead) { this.s_r_alloca(ty, r); };
+                -> r;
+            };
+
+            alloca_count(IRType* ty, IRValue* count, byte* name) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(this.t_ptr(ty));
+                if (!dead) { this.s_r_allocan(ty, count, r); };
+                -> r;
+            };
+
+            load(IRValue* p, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(p.ty.elem);
+                if (!dead) { this.s_r_load(p, r); };
+                -> r;
+            };
+
+            store_ex(IRValue* v, IRValue* p, bool vol) -> void
+            {
+                bool dead = this.s_dead();
+                if (!dead) { this.s_r_store(v, p, vol); };
+                ->;
+            };
+
+            store(IRValue* v, IRValue* p) -> void -> this.store_ex(v, p, false);
+
+            // Type reached by indexing t with idx (struct needs a constant)
+            index_type(IRType* t, IRValue* idx) -> IRType*
+            {
+                switch (t.kind == LK.ARRAY)
+                {
+                    case (true) { -> t.elem; }
+                    default
+                    {
+                        switch (t.kind == LK.PTR)
+                        {
+                            case (true) { -> t.elem; }
+                            default
+                            {
+                                -> t.items[(int)this.const_val(idx)];
+                            };
+                        };
+                    };
+                };
+            };
+
+            struct_items(IRType* t) -> IRType** -> t.items;
+
+            gep(IRValue* p, IRValue** idx, int n, bool inbounds, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_gep(p, idx, n);
+                if (!dead) { this.s_r_gep(p, idx, n, r); };
+                -> r;
+            };
+
+            struct_body_item(IRType* t, int i) -> IRType* -> t.items[i];
+
+            // gep p, 0, i  (struct field address)
+            gep_field(IRValue* p, int i, bool inbounds, byte* hint) -> IRValue*
+            {
+                this.ia[0] = this.c_int(this.t_int(32), 0);
+                this.ia[1] = this.c_int(this.t_int(32), (i64)i);
+                -> this.gep(p, this.ia, 2, inbounds, hint);
+            };
+
+            // gep p, i  (pointer arithmetic)
+            gep_ptr(IRValue* p, IRValue* i, bool inbounds, byte* hint) -> IRValue*
+            {
+                this.ia[0] = i;
+                -> this.gep(p, this.ia, 1, inbounds, hint);
+            };
+
+            call_ex(IRValue* callee, IRValue** args, int n, byte* hint, byte* cconv, bool tail) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_call(callee);
+                if (!dead) { this.s_r_call(callee, args, n, r, tail); };
+                -> r;
+            };
+
+            call(IRValue* callee, IRValue** args, int n, byte* hint) -> IRValue* -> this.call_ex(callee, args, n, hint, (byte*)0, false);
+
+            phi(IRType* ty, IRValue** vals, IRBlock** blocks, int n, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(ty);
+                if (!dead) { this.s_r_phi(ty, vals, blocks, n, r); };
+                -> r;
+            };
+
+            va_arg(IRValue* list, IRType* ty, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(ty);
+                if (!dead) { this.s_r_vaarg(list, ty, r); };
+                -> r;
+            };
+
+            select(IRValue* c, IRValue* a, IRValue* b, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(a.ty);
+                if (!dead) { this.s_r_select(c, a, b, r); };
+                -> r;
+            };
+
+            extractvalue(IRValue* agg, int i, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_extract(agg, i);
+                if (!dead) { this.s_r_extract(agg, i, r); };
+                -> r;
+            };
+
+            insertvalue(IRValue* agg, IRValue* v, int i, byte* hint) -> IRValue*
+            {
+                bool dead = this.s_dead();
+                IRValue* r = this.n_val(agg.ty);
+                if (!dead) { this.s_r_insert(agg, v, i, r); };
+                -> r;
+            };
+
+            br(IRBlock* target) -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_br(target); };
+                ->;
+            };
+
+            cbr(IRValue* c, IRBlock* t, IRBlock* f) -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_cbr(c, t, f); };
+                ->;
+            };
+
+            ret(IRValue* v) -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_ret(v); };
+                ->;
+            };
+
+            ret_void() -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_retv(); };
+                ->;
+            };
+
+            unreachable() -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_unreach(); };
+                ->;
+            };
+
+            switch_to(IRValue* v, IRBlock* dflt, IRValue** vals, IRBlock** blocks, int n) -> void
+            {
+                bool dead = this.s_dead();
+                this.cb.terminated = true;
+                if (!dead) { this.s_r_switch(v, dflt, vals, blocks, n); };
+                ->;
+            };
+
+

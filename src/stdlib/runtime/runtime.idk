@@ -213,23 +213,43 @@ extern
 def !!exit(int code) -> void
 {
     standard::io::console::flush();
+#ifdef __ARCH_X86_64__
     volatile asm
     {
         movl $0, %edi
         movq $$231, %rax
         syscall
     } : : "r"(code) : "edi", "rax", "rcx", "r11", "memory";
+#endif;
+#ifdef __ARCH_ARM64__
+    volatile asm
+    {
+        mov w0, $0
+        mov x8, #94
+        svc #0
+    } : : "r"(code) : "x0", "x8", "memory";
+#endif;
     noreturn;
 };
 
 def !!abort() -> void
 {
+#ifdef __ARCH_X86_64__
     volatile asm
     {
         movq $$231, %rax
         movq $$134, %rdi
         syscall
     } : : : "rax", "rdi", "rcx", "r11", "memory";
+#endif;
+#ifdef __ARCH_ARM64__
+    volatile asm
+    {
+        mov x0, #134
+        mov x8, #94
+        svc #0
+    } : : : "x0", "x8", "memory";
+#endif;
     noreturn;
 };
 
@@ -327,6 +347,20 @@ def !!_start() -> void
         movl %eax, %edi
         callq exit
         ud2
+    } : : : "memory", "cc";
+#endif;
+#ifdef __ARCH_ARM64__
+    // Naked: sp is what the kernel handed us, argc is at [sp] and the argv pointers follow it.
+    volatile asm
+    {
+        mov x0, sp
+        adrp x1, FRT_ENTRY_SP
+        str x0, [x1, :lo12:FRT_ENTRY_SP]
+        and x0, x0, #-16
+        mov sp, x0
+        bl FRTStartup
+        bl exit
+        brk #1
     } : : : "memory", "cc";
 #endif;
     noreturn;

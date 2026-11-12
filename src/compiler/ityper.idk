@@ -4557,7 +4557,8 @@ namespace IDEKA
                         cnt = node_count(d, 0);
                         switch (cnt != node_count(n, 0)) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' argument count mismatch\0"); this.report(Severity.WARNING, n); ->; } default
                             {
-                                switch (this.mac_selfref(d.a, n.text) | this.mac_depth >= 64) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' is self-referential or nested too deeply\0"); this.report(Severity.WARNING, n); ->; } default
+                                switch (this.mac_selfref(d.a, n.text)) { case (true) { ->; } default {}; };
+                                switch (this.mac_depth >= 64) { case (true) { this.ck.clear_msg(); this.ck.mb.put_str(f"macro '{n.text}' is self-referential or nested too deeply\0"); this.report(Severity.WARNING, n); ->; } default
                                     {
                                         sm = nm_new();
                                         while (i < cnt)

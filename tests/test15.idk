@@ -14,7 +14,7 @@ macro clamp(v, lo, hi)
 
 macro ct_fact(n)
 {
-    n * ct_fact(n - 1) if (n > 1) else 1
+    n * ct_fact(n - 1) if (n > 1) else n
 };
 
 macro named_print(val)

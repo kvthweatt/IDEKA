@@ -702,6 +702,16 @@ namespace IDEKA
 
             inline put(int b) -> void
             {
+                int n = this.len;
+                // room for the byte and the terminator: no call
+                if (this.ok & n + 2 <= this.cap)
+                {
+                    this.mem[n] = (byte)b;
+                    n++;
+                    this.len = n;
+                    this.mem[n] = 0;
+                    ->;
+                };
                 switch (!this.reserve(1))
                 {
                     case (true) { ->; }
@@ -729,9 +739,10 @@ namespace IDEKA
                             default
                             {
                                 int i;
+                                byte* dst = this.mem + this.len;
                                 while (i < n)
                                 {
-                                    this.mem[this.len + i] = s[i];
+                                    dst[i] = s[i];
                                     i++;
                                 };
                                 this.len = this.len + n;
@@ -1580,6 +1591,9 @@ namespace IDEKA
 
         // ===== PREPROCESSOR =====
 
+        // The target is an AArch64 processor whatever the host is: every preprocessor made afterwards defines it
+        bool pp_arm64 = false;
+
         object Preprocessor
         {
             bool verbose;
@@ -1840,6 +1854,19 @@ namespace IDEKA
                 };
             };
 
+            // Makes the target an AArch64 processor, whatever the host is (cross compilation)
+            set_arch_arm64() -> void
+            {
+                pp_arm64 = true;
+                this.define(g"__ARCH_X86_64__\0", g"0\0");
+                this.define(g"__x86_64__\0", g"0\0");
+                this.define(g"__amd64__\0", g"0\0");
+                this.define(g"__ARCH_ARM64__\0", g"1\0");
+                this.define(g"__arm64__\0", g"1\0");
+                this.define(g"__aarch64__\0", g"1\0");
+                ->;
+            };
+
             // fmacros.build_compiler_macros with the host as target and the
             // IDEKA_config.cfg defaults (default_byte_width 8, debug and
             // optimization_level unset).
@@ -1907,6 +1934,7 @@ namespace IDEKA
                 this.define(g"__arm64__\0", g"1\0");
                 this.define(g"__aarch64__\0", g"1\0");
                 #endif;
+                if (pp_arm64) { this.set_arch_arm64(); };
                 ->;
             };
 

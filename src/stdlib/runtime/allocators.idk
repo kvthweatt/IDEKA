@@ -39,6 +39,7 @@ extern
 !!heap_mmap(size_t bytes) -> u64
 {
     u64 result;
+#ifdef __ARCH_X86_64__
     volatile asm
     {
         movq $$9, %rax
@@ -51,11 +52,27 @@ extern
         syscall
         movq %rax, $0
     } : "=r"(result) : "r"(bytes) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "r11", "rcx", "memory";
+#endif;
+#ifdef __ARCH_ARM64__
+    volatile asm
+    {
+        mov x8, #222
+        mov x0, #0
+        mov x1, $1
+        mov x2, #3
+        mov x3, #0x22
+        mov x4, #-1
+        mov x5, #0
+        svc #0
+        mov $0, x0
+    } : "=r"(result) : "r"(bytes) : "x0", "x1", "x2", "x3", "x4", "x5", "x8", "memory";
+#endif;
     return result;
 } # effect {*Alloc.Virtual & *Unsafe.ASM};
 
 !!heap_munmap(u64 ptr, size_t bytes) -> void
 {
+#ifdef __ARCH_X86_64__
     volatile asm
     {
         movq $$11, %rax
@@ -63,6 +80,16 @@ extern
         movq $1, %rsi
         syscall
     } : : "r"(ptr), "r"(bytes) : "rax", "rdi", "rsi", "r11", "rcx", "memory";
+#endif;
+#ifdef __ARCH_ARM64__
+    volatile asm
+    {
+        mov x8, #215
+        mov x0, $0
+        mov x1, $1
+        svc #0
+    } : : "r"(ptr), "r"(bytes) : "x0", "x1", "x8", "memory";
+#endif;
 } # effect {*Alloc.Virtual & *Unsafe.ASM};
 #endif;
 
@@ -197,10 +224,20 @@ namespace standard
                 inline def bit_scan_rev(size_t x) -> size_t
                 {
                     size_t r;
+                    #ifdef __ARCH_X86_64__
                     asm
                     {
                         bsrq $1, $0
                     } : "=r"(r) : "r"(x) : "cc";
+                    #endif;
+                    #ifdef __ARCH_ARM64__
+                    asm
+                    {
+                        clz x16, $1
+                        mov $0, #63
+                        sub $0, $0, x16
+                    } : "=r"(r) : "r"(x) : "x16";
+                    #endif;
                     return r;
                 } # effect {Pure};
 

@@ -231,7 +231,7 @@ func __macro__ct_fact
     SUB
     CALL __macro__ct_fact 1
     JMP 11
-    PUSH int:1
+    LOCAL_GET 0
     MUL
     RET
 endfunc

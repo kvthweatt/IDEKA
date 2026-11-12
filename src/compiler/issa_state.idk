@@ -1,0 +1,71 @@
+// Author: Karac V. Thweatt
+//
+// issa_state.idk - fields of the target independent part of a backend object (types, values,
+// functions, blocks and the state of the SSA code generator). Imported at the top of the object body.
+
+    byte* mod_name, triple, layout;
+    int nunsup, zmax;
+    Buf cdata; // read-only copies of aggregate constants
+    byte* cur_item; // the global whose initializer is being written
+    bool bf_ok; // the caller of a_foff handles members that are not byte addressable
+    PtrVec* types; // IRType* made here
+    PtrVec* values; // IRValue* made here
+    byte* vp; // free space left in the newest block of values
+    int vleft;
+    PtrVec* strs; // byte* made here
+    PtrVec* blobs; // raw allocations (item arrays, blocks)
+    PtrVec* named; // identified struct types in creation order
+    PtrVec* globals; // IRGlobal*
+    PtrVec* funcs; // IRFunc*
+    NameMap* gnames; // global and function names in use
+    NameMap* fmap; // function name to IRFunc*
+    NameMap* gmap; // global name to IRGlobal*
+    Buf tb; // text scratch
+    IRFunc* cf; // function being built
+    IRBlock* cb; // insertion block
+    IRBlock* entry_b; // entry block of cf
+    IRValue** ia; // small operand scratch
+    IRType* nul; // elem of types that have none, so elem.kind is always readable
+    bool must_tail; // set by the code generator before a tail call
+    int lab;
+    byte* cx_sym;
+    i64 cx_off;
+    Buf mb;
+    GF* sf; // SSA code generator state of the function being compiled
+    int gwhy;
+    byte* gwhys;
+    PtrVec* ulog; // one text per unsupported construct: where and why
+    int sck;
+    int sel_off;
+    i64 scv;
+    byte* scs;
+    IRBlock** sbp;
+    int sbn;
+    int* ubuf; // registers read by the instruction last scanned
+    int* dbuf; // registers written by the instruction last scanned
+    int nub, ndb, bcap;
+    bool escok; // stack object escape marks are current
+    int* rgm; // stamps of the blocks visited by the clobber scan
+    int* rgk; // work list of the clobber scan
+    int rgn; // capacity of rgm and rgk
+    int rgs; // current stamp
+    IRValue* eqx; // value and constant of the last compare chain test
+    IRValue* rs_x; // range set pass: the value every leaf compare tests
+    int rs_n; // leaves collected
+    int rs_mode; // 0 not known yet, 1 unsigned, 2 signed
+    int* rs_p; // predicate and constant of each leaf
+    i64* rs_c;
+    int rs_lp; // predicate and constant of the leaf last looked at
+    i64 rs_lc;
+    u64 eqv;
+    int* ea;
+    int* eb;
+    int ne, ecap;
+    int* adjo;
+    int* adj;
+    int* ord;
+    int nord;
+    int* spl;
+    int nspl;
+
+
