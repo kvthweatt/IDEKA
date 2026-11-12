@@ -19,7 +19,7 @@ module IDEKA_Linker_Entrypoint
 
     ilink_usage() -> void
     {
-        println("IDEKA linker (ELF64 and PE32+ x86-64)\0");
+        println("IDEKA linker (ELF64 x86-64 and AArch64, PE32+ x86-64)\0");
         println("Usage: ilink [-t elf|pe] [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] [-subsystem n] [-stack bytes] obj...\0");
         println("  ELF: -l libc.so.6 binds dynamically. PE: -l kernel32.lib (or a .dll) imports through the library.\0");
         ->;
@@ -44,6 +44,8 @@ module IDEKA_Linker_Entrypoint
         bool entry_set = false;
         byte* tv;
         int sv, di;
+        bool arm = false;
+        bool interp_set = false;
         while (i < argc)
         {
             if (lk_streq(argv[i], "-o\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; out = argv[i]; }
@@ -51,7 +53,7 @@ module IDEKA_Linker_Entrypoint
             else if (lk_streq(argv[i], "-t\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; if (lk_streq(argv[i], "pe\0")) { pe = 1; } else { pe = 0; }; }
             else if (lk_streq(argv[i], "-subsystem\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; subsystem = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { subsystem = subsystem * 10 + (tv[di] - 48); di++; }; }
             else if (lk_streq(argv[i], "-stack\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; stack_size = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { stack_size = stack_size * 10 + (tv[di] - 48); di++; }; }
-            else if (lk_streq(argv[i], "-I\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; interp = argv[i]; }
+            else if (lk_streq(argv[i], "-I\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; interp = argv[i]; interp_set = true; }
             else if (lk_streq(argv[i], "-l\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; libs[nlib] = argv[i]; nlib++; }
             else if (lk_streq(argv[i], "-L\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; dirs[ndir] = argv[i]; ndir++; }
             else { objs[nobj] = argv[i]; nobj++; };
@@ -70,6 +72,25 @@ module IDEKA_Linker_Entrypoint
         {
             if (!entry_set) { entry = "FRTStartup\0"; };
             err = lk_pe_link(objs, nobj, libs, nlib, dirs, ndir, entry, subsystem, stack_size, out);
+            if (err != (byte*)0)
+            {
+                print("ilink: \0");
+                println(err);
+                -> 1;
+            };
+            -> 0;
+        };
+        arm = false;
+        sv = 0;
+        tv = lk_read_file(objs[0], @sv);
+        if (tv != (byte*)0 & sv > 20 & tv[0] == 127 & lk_r16(tv, 18) == 183) { arm = true; };
+        if (arm)
+        {
+            // AArch64 Linux: pick the loader and libc of this system unless -I or -l said otherwise
+            ndir = lk_a64_dirs(dirs, ndir);
+            if (!interp_set) { interp = lk_a64_interp(); };
+            if (nlib == 0) { libs[0] = lk_a64_libname(); nlib = 1; };
+            err = lk_elf_link_arch(1, objs, nobj, libs, nlib, dirs, ndir, entry, interp, out);
             if (err != (byte*)0)
             {
                 print("ilink: \0");

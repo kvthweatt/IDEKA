@@ -124,7 +124,7 @@ def main() -> int
     print(" bytes\n\0");
 
     buf = (byte*)fmalloc((u64)file_size + 1);
-    defer ffree(@buf);
+    defer ffree(buf);
     if ((u64)buf == 0)
     {
         print("ERROR: Out of memory\n\0");

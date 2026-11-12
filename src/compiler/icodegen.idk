@@ -14714,7 +14714,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp\0");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -19085,15 +19085,6 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 };
                                 this.unsup(n, g"address of non-local\0");
                                 -> (IRValue*)0;
-                            }
-                                default {};
-                            };
-                            switch (lv.ptr.ty.kind == LK.PTR & lv.ptr.ty.elem.kind == LK.PTR)
-                            {
-                                case (true) {
-                                this.sc.clear();
-                                this.sc.put_str(f"{e.text}_ptr\0");
-                                -> this.mod.load(lv.ptr, this.sc.mem);
                             }
                                 default {};
                             };

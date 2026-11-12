@@ -513,14 +513,14 @@ namespace standard
             // GENERIC (noopstr)
             def print(noopstr s, int len) -> void
             {
-                out_write(@s, len);
+                out_write(s, len);
                 return;
             };
 
             def print(noopstr s) -> void
             {
-                int len = standard::strings::strlen(@s);
-                out_write(@s, len);
+                int len = standard::strings::strlen(s);
+                out_write(s, len);
                 return;
             };
 

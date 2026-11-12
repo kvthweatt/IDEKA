@@ -1013,7 +1013,7 @@ class IDEKACompiler:
                     "--strip-all",                      # Strip all symbols
                     "--build-id=none",                  # No build ID
                     "--no-eh-frame-hdr",                # No exception handling frame header
-                    "--no-ld-generated-unwind-info",    # No unwind info
+                    #"--no-ld-generated-unwind-info",    # No unwind info
                     "-z", "noseparate-code",            # Don't separate code segments
                     "-z", "norelro",                    # Disable RELRO (size tradeoff)
                     "-z", "now",                        # Bind now (alternative to norelro)

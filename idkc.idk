@@ -33,6 +33,7 @@ module IDEKA_Compiler_Entrypoint
     #import "src/compiler/imodules.idk";
     #import "src/compiler/iasm_elf.idk";
     #import "src/compiler/iasm_coff.idk";
+    #import "src/compiler/iasm_a64.idk";
     #import "src/compiler/ilink_elf.idk";
     #import "src/compiler/ilink_pe.idk";
 
@@ -629,7 +630,8 @@ module IDEKA_Compiler_Entrypoint
         println("Module triple: x86_64-pc-windows-msvc\0");
         #else
         println("Target platform: Linux\0");
-        println("Module triple: x86_64-pc-linux-gnu\0");
+        if (A64_BACKEND) { println("Module triple: aarch64-unknown-linux-gnu\0"); }
+        else { println("Module triple: x86_64-pc-linux-gnu\0"); };
         #endif;
         println("END DEBUG\0");
         ->;
@@ -910,7 +912,7 @@ module IDEKA_Compiler_Entrypoint
     // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
     bool ASM_ONLY;
     int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
-    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled and linked with the system as and ld
+    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled with iasm and linked with ilink
     bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
 
     // Assembles the x86_64 text the x64 backend emitted into an ELF or COFF object with iasm
@@ -937,6 +939,27 @@ module IDEKA_Compiler_Entrypoint
         if (X64_ABI == 1) { wrote = iasm_write_coff(a, dst); }
         else { wrote = iasm_write_elf(a, dst); };
         if (!wrote)
+        {
+            print("iasm: \0");
+            println(a.err);
+            -> false;
+        };
+        -> true;
+    };
+
+    // Assembles the AArch64 text the a64 backend emitted into an ELF object with iasm
+    iasm_object_a64(byte* text, int len, byte* dst) -> bool
+    {
+        A6* a = a6_new();
+        if (!a6_assemble(a, text, len))
+        {
+            print("iasm: line \0");
+            print(a.line);
+            print(": \0");
+            println(a.err);
+            -> false;
+        };
+        if (!a6_write_elf(a, dst))
         {
             print("iasm: \0");
             println(a.err);
@@ -1039,6 +1062,31 @@ module IDEKA_Compiler_Entrypoint
         dirs[3] = "/usr/lib\0";
         dirs[4] = "/lib\0";
         lkerr = lk_elf_link(objs, 1, libs, 1, dirs, 5, "_start\0", "/lib64/ld-linux-x86-64.so.2\0", exe);
+        if (lkerr == (byte*)0) { *rc = 0; }
+        else
+        {
+            *rc = 1;
+            print("ilink: \0");
+            println(lkerr);
+        };
+        ffree((byte*)objs);
+        ffree((byte*)libs);
+        ffree((byte*)dirs);
+        ->;
+    };
+
+    // Links one AArch64 ELF object into an executable with ilink. musl or glibc is chosen by what the system has installed.
+    native_link_elf_a64(byte* obj, byte* exe, byte* errpath, int* rc) -> void
+    {
+        byte** objs = (byte**)fmalloc(8 * 2);
+        byte** libs = (byte**)fmalloc(8 * 2);
+        byte** dirs = (byte**)fmalloc(8 * 8);
+        byte* lkerr;
+        int nd;
+        objs[0] = obj;
+        nd = lk_a64_dirs(dirs, 0);
+        libs[0] = lk_a64_libname();
+        lkerr = lk_elf_link_arch(1, objs, 1, libs, 1, dirs, nd, "_start\0", lk_a64_interp(), exe);
         if (lkerr == (byte*)0) { *rc = 0; }
         else
         {
@@ -1193,13 +1241,8 @@ module IDEKA_Compiler_Entrypoint
             };
             if (A64_BACKEND)
             {
-                log_step("assembler\0", "Assembling with as\0");
-                cmd.clear();
-                cmd.put_str("as -o \0");
-                cmd.put_str(obj.mem);
-                cmd.put(32);
-                cmd.put_str(ll.mem);
-                if (run_cmd(cmd.mem) != 0) { ffree(stem); -> false; };
+                log_step("assembler\0", "Assembling with iasm\0");
+                if (!iasm_object_a64(ir_text, len, obj.mem)) { ffree(stem); -> false; };
             }
             else
             {
@@ -1428,14 +1471,8 @@ module IDEKA_Compiler_Entrypoint
         #else
         if (A64_BACKEND)
         {
-            cmd.put_str("ld -e _start -dynamic-linker /lib/ld-linux-aarch64.so.1 -o \0");
-            cmd.put_str(exe.mem);
-            cmd.put(32);
-            cmd.put_str(obj.mem);
-            cmd.put_str(" -L/usr/lib/aarch64-linux-gnu -L/usr/lib -L/lib/aarch64-linux-gnu -L/lib --start-group -lc --end-group 2>\0");
-            cmd.put_str(errp.mem);
-            rc = run_cmd(cmd.mem);
-            report_link(errp.mem, rc);
+            // native linker: the object iasm wrote becomes an executable with no system linker
+            native_link_elf_a64(obj.mem, exe.mem, errp.mem, @rc);
         }
         elif (X64_BACKEND)
         {
@@ -2085,7 +2122,9 @@ module IDEKA_Compiler_Entrypoint
             };
             if (emit_mode)
             {
-                if (X64_BACKEND) { log_step("codegen\0", "x86_64 assembly generation\0"); } else { log_step("codegen\0", "LLVM IR code generation\0"); };
+                if (A64_BACKEND) { log_step("codegen\0", "AArch64 assembly generation\0"); }
+                elif (X64_BACKEND) { log_step("codegen\0", "x86_64 assembly generation\0"); }
+                else { log_step("codegen\0", "LLVM IR code generation\0"); };
                 IDKC_SYMTABLE* est = st_new();
                 defer st_free(est);
                 #ifndef IDEKA_NO_X64

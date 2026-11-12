@@ -14,6 +14,7 @@ module IDEKA_Assembler_Entrypoint
     #import <runtime/ffifio.idk>;
     #import "src/compiler/iasm_elf.idk";
     #import "src/compiler/iasm_coff.idk";
+    #import "src/compiler/iasm_a64.idk";
 
     using standard::io::console;
     using standard::io::file;
@@ -42,7 +43,7 @@ module IDEKA_Assembler_Entrypoint
     iasm_usage() -> void
     {
         println("IDEKA assembler (x86-64, AT&T syntax)\0");
-        println("Usage: iasm [-f elf|coff] <file.s> -o <out.o>\0");
+        println("Usage: iasm [-a x86_64|aarch64] [-f elf|coff] <file.s> -o <out.o>\0");
         println("       iasm --encode <file.s>\0");
         ->;
     };
@@ -117,6 +118,37 @@ module IDEKA_Assembler_Entrypoint
         -> 0;
     };
 
+    // AArch64 text to an EM_AARCH64 object
+    iasm_assemble_a64(byte* src, byte* dst) -> int
+    {
+        int len;
+        byte* text = iasm_read_file(src, @len);
+        A6* a;
+        if (text == (byte*)0)
+        {
+            println("iasm: cannot read file\0");
+            -> 1;
+        };
+        a = a6_new();
+        if (!a6_assemble(a, text, len))
+        {
+            print("iasm: \0");
+            print(src);
+            print(":\0");
+            print(a.line);
+            print(": \0");
+            println(a.err);
+            -> 1;
+        };
+        if (!a6_write_elf(a, dst))
+        {
+            print("iasm: \0");
+            println(a.err);
+            -> 1;
+        };
+        -> 0;
+    };
+
     iasm_assemble_file(byte* src, byte* dst, int fmt) -> int
     {
         int len;
@@ -162,10 +194,21 @@ module IDEKA_Assembler_Entrypoint
         byte* dst = (byte*)0;
         bool enc = false;
         int fmt = IA_FMT_ELF;
+        bool a64 = false;
         int i = 1;
         while (i < argc)
         {
             if (ia_streq(argv[i], "--encode\0")) { enc = true; }
+            else if (ia_streq(argv[i], "-a\0"))
+            {
+                i++;
+                if (i >= argc) { iasm_usage(); -> 1; };
+                if (ia_streq(argv[i], "aarch64\0") | ia_streq(argv[i], "arm64\0")) { a64 = true; }
+                else
+                {
+                    if (!ia_streq(argv[i], "x86_64\0")) { iasm_usage(); -> 1; };
+                };
+            }
             else if (ia_streq(argv[i], "-f\0"))
             {
                 i++;
@@ -191,6 +234,7 @@ module IDEKA_Assembler_Entrypoint
         if (src == (byte*)0) { iasm_usage(); -> 1; };
         if (enc) { -> iasm_encode_file(src); };
         if (dst == (byte*)0) { iasm_usage(); -> 1; };
+        if (a64) { -> iasm_assemble_a64(src, dst); };
         -> iasm_assemble_file(src, dst, fmt);
     };
 

@@ -38,6 +38,7 @@ namespace IDEKA
         struct ElfLink
         {
             byte* err;
+            int arch;
             int nobj, nsec, nsym;
             // per object
             byte** o_img;
@@ -116,6 +117,13 @@ namespace IDEKA
 
         // ===== reading the objects =====
 
+        // Relocations that name the GOT slot of their symbol: x86-64 GOTPCREL types, AArch64 GOT page and low 12 bits
+        le_isgot(ElfLink* L, int ty) -> bool
+        {
+            if (L.arch == 1) { -> ty == 311 | ty == 312; };
+            -> ty == 9 | ty == 41 | ty == 42;
+        };
+
         le_fail(ElfLink* L, byte* msg) -> bool
         {
             if (L.err == (byte*)0) { L.err = msg; };
@@ -147,7 +155,8 @@ namespace IDEKA
             if (m[0] != 127 | m[1] != 69 | m[2] != 76 | m[3] != 70) { -> le_fail(L, "input is not an ELF file\0"); };
             if (m[4] != 2 | m[5] != 1) { -> le_fail(L, "input is not a little endian ELF64 file\0"); };
             if (lk_r16(m, 16) != 1) { -> le_fail(L, "input is not a relocatable object\0"); };
-            if (lk_r16(m, 18) != 62) { -> le_fail(L, "input is not an x86-64 object\0"); };
+            if (L.arch == 0 & lk_r16(m, 18) != 62) { -> le_fail(L, "input is not an x86-64 object\0"); };
+            if (L.arch == 1 & lk_r16(m, 18) != 183) { -> le_fail(L, "input is not an AArch64 object\0"); };
             shoff = (int)lk_r64(m, 40);
             shnum = lk_r16(m, 60);
             if (shoff <= 0 | shoff + shnum * 64 > n) { -> le_fail(L, "bad section header table\0"); };
@@ -519,7 +528,7 @@ namespace IDEKA
                                 ni = L.y_imp[g];
                                 if (e < 0 & ni >= 0)
                                 {
-                                    if (ty == 9 | ty == 41 | ty == 42)
+                                    if (le_isgot(L, ty))
                                     {
                                         if (L.i_got[ni] < 0)
                                         {
@@ -554,7 +563,7 @@ namespace IDEKA
                                         };
                                     };
                                 }
-                                else if (e >= 0 & (ty == 9 | ty == 41 | ty == 42))
+                                else if (e >= 0 & le_isgot(L, ty))
                                 {
                                     if (L.y_got[e] < 0)
                                     {
@@ -604,6 +613,82 @@ namespace IDEKA
             -> L.s_addr[gs] + L.y_val[e];
         };
 
+        // Replaces the bits of mask in the instruction word at off with v (already positioned)
+        le_a64_field(byte* m, int off, i64 mask, i64 v) -> void
+        {
+            i64 w = lk_r32(m, off);
+            w = (w `& (`!mask)) `| (v `& mask);
+            lk_w32(m, off, w);
+            ->;
+        };
+
+        // Applies one AArch64 relocation. S is the symbol address (the GOT slot address for the GOT types).
+        le_a64_reloc(ElfLink* L, byte* m, int off, int ty, i64 S, i64 A, i64 P) -> bool
+        {
+            i64 val, pg;
+            if (ty == 257) { lk_w64(m, off, S + A); -> true; };
+            if (ty == 258)
+            {
+                val = S + A;
+                if (val < -2147483648 | val > 4294967295) { -> le_fail(L, "relocation out of range\0"); };
+                lk_w32(m, off, val);
+                -> true;
+            };
+            if (ty == 259) { lk_w16(m, off, S + A); -> true; };
+            if (ty == 260) { lk_w64(m, off, S + A - P); -> true; };
+            if (ty == 261)
+            {
+                val = S + A - P;
+                if (val < -2147483648 | val > 2147483647) { -> le_fail(L, "relocation out of range\0"); };
+                lk_w32(m, off, val);
+                -> true;
+            };
+            if (ty == 262) { lk_w16(m, off, S + A - P); -> true; };
+            if (ty == 275 | ty == 311)
+            {
+                pg = ((S + A) `& (`!((i64)4095))) - (P `& (`!((i64)4095)));
+                pg = pg >> 12;
+                if (pg < -1048576 | pg >= 1048576) { -> le_fail(L, "relocation out of range\0"); };
+                le_a64_field(m, off, 0x60FFFFE0, ((pg `& 3) << 29) `| (((pg >> 2) `& 0x7FFFF) << 5));
+                -> true;
+            };
+            if (ty == 274)
+            {
+                val = S + A - P;
+                if (val < -1048576 | val >= 1048576) { -> le_fail(L, "relocation out of range\0"); };
+                le_a64_field(m, off, 0x60FFFFE0, ((val `& 3) << 29) `| (((val >> 2) `& 0x7FFFF) << 5));
+                -> true;
+            };
+            if (ty == 277 | ty == 278) { le_a64_field(m, off, 0x3FFC00, ((S + A) `& 4095) << 10); -> true; };
+            if (ty == 284) { le_a64_field(m, off, 0x3FFC00, (((S + A) `& 4095) >> 1) << 10); -> true; };
+            if (ty == 285) { le_a64_field(m, off, 0x3FFC00, (((S + A) `& 4095) >> 2) << 10); -> true; };
+            if (ty == 286) { le_a64_field(m, off, 0x3FFC00, (((S + A) `& 4095) >> 3) << 10); -> true; };
+            if (ty == 299) { le_a64_field(m, off, 0x3FFC00, (((S + A) `& 4095) >> 4) << 10); -> true; };
+            if (ty == 312) { le_a64_field(m, off, 0x3FFC00, (((S + A) `& 4095) >> 3) << 10); -> true; };
+            if (ty == 282 | ty == 283)
+            {
+                val = S + A - P;
+                if (val % 4 != 0 | val < -134217728 | val >= 134217728) { -> le_fail(L, "relocation out of range\0"); };
+                le_a64_field(m, off, 0x3FFFFFF, (val >> 2) `& 0x3FFFFFF);
+                -> true;
+            };
+            if (ty == 280 | ty == 273)
+            {
+                val = S + A - P;
+                if (val % 4 != 0 | val < -1048576 | val >= 1048576) { -> le_fail(L, "relocation out of range\0"); };
+                le_a64_field(m, off, 0xFFFFE0, ((val >> 2) `& 0x7FFFF) << 5);
+                -> true;
+            };
+            if (ty == 279)
+            {
+                val = S + A - P;
+                if (val % 4 != 0 | val < -32768 | val >= 32768) { -> le_fail(L, "relocation out of range\0"); };
+                le_a64_field(m, off, 0x7FFE0, ((val >> 2) `& 0x3FFF) << 5);
+                -> true;
+            };
+            -> le_fail(L, "unsupported relocation type\0");
+        };
+
         // Size of the dynamic string table and the offsets of its names
         le_link_all(ElfLink* L, byte* entry, byte* interp, byte* out) -> bool
         {
@@ -624,6 +709,10 @@ namespace IDEKA
             byte* m;
             i64 info, S, A, P, val;
             int imp;
+            i64 pgal = 4096;
+            i64 gotty = 6;
+            i64 copyty = 5;
+            if (L.arch == 1) { pgal = 65536; gotty = 1025; copyty = 1024; };
             // ---- the sections of each group get offsets within the group
             grp = 0;
             while (grp < 4)
@@ -768,7 +857,7 @@ namespace IDEKA
             rodata_off = (int)pos;
             pos = pos + gsize[1];
             // ---- the second segment starts on a new page
-            pos = lk_align_up(pos, 4096);
+            pos = lk_align_up(pos, pgal);
             rw_off = (int)pos;
             ndyn_ent = 0;
             dyn_off = (int)pos;
@@ -884,11 +973,17 @@ namespace IDEKA
                                 else if (L.i_plt[imp] >= 0) { S = L.i_pltaddr[imp]; };
                             };
                             // the address of a GOT slot for GOT relative types
-                            if (ty == 9 | ty == 41 | ty == 42)
+                            if (le_isgot(L, ty))
                             {
                                 if (e >= 0) { S = base + got_off + 8 * L.y_got[e]; }
                                 else if (imp >= 0) { S = L.i_gotaddr[imp]; }
                                 else { S = 0; };
+                            };
+                            if (L.arch == 1)
+                            {
+                                if (!le_a64_reloc(L, o.m, off, ty, S, A, P)) { -> false; };
+                                j++;
+                                continue;
                             };
                             switch (ty)
                             {
@@ -918,11 +1013,23 @@ namespace IDEKA
             {
                 ni = L.p_imp[i];
                 off = plt_off + 16 * i;
+                if (L.arch == 1)
+                {
+                    // adrp x16, got page; ldr x17, [x16, #lo12]; br x17; nop
+                    val = ((L.i_gotaddr[ni] `& (`!((i64)4095))) - ((base + off) `& (`!((i64)4095)))) >> 12;
+                    lk_w32(o.m, off, 0x90000010 `| ((val `& 3) << 29) `| (((val >> 2) `& 0x7FFFF) << 5));
+                    lk_w32(o.m, off + 4, 0xF9400211 `| (((L.i_gotaddr[ni] `& 4095) >> 3) << 10));
+                    lk_w32(o.m, off + 8, 0xD61F0220);
+                    lk_w32(o.m, off + 12, 0xD503201F);
+                }
+                else
+                {
                 o.m[off] = 255;
                 o.m[off + 1] = 37;
                 lk_w32(o.m, off + 2, L.i_gotaddr[ni] - (base + off + 6));
                 j = 6;
                 while (j < 16) { o.m[off + j] = 204; j++; };
+                };
                 i++;
             };
             // ---- dynamic tables
@@ -1029,7 +1136,7 @@ namespace IDEKA
                     if (L.g_kind[i] == 0)
                     {
                         lk_w64(o.m, off, base + got_off + 8 * i);
-                        lk_w64(o.m, off + 8, ((i64)(L.g_ref[i] + 1) << 32) `| 6);
+                        lk_w64(o.m, off + 8, ((i64)(L.g_ref[i] + 1) << 32) `| gotty);
                         lk_w64(o.m, off + 16, 0);
                         off = off + 24;
                     };
@@ -1041,7 +1148,7 @@ namespace IDEKA
                     if (L.i_copy[i] != 0)
                     {
                         lk_w64(o.m, off, L.i_caddr[i]);
-                        lk_w64(o.m, off + 8, ((i64)(i + 1) << 32) `| 5);
+                        lk_w64(o.m, off + 8, ((i64)(i + 1) << 32) `| copyty);
                         lk_w64(o.m, off + 16, 0);
                         off = off + 24;
                     };
@@ -1081,7 +1188,7 @@ namespace IDEKA
             o.m[0] = 127; o.m[1] = 69; o.m[2] = 76; o.m[3] = 70;
             o.m[4] = 2; o.m[5] = 1; o.m[6] = 1;
             lk_w16(o.m, 16, 2);
-            lk_w16(o.m, 18, 62);
+            if (L.arch == 1) { lk_w16(o.m, 18, 183); } else { lk_w16(o.m, 18, 62); };
             lk_w32(o.m, 20, 1);
             lk_w64(o.m, 24, entryaddr);
             lk_w64(o.m, 32, 64);
@@ -1110,14 +1217,14 @@ namespace IDEKA
             // PT_LOAD read and execute
             lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 5);
             lk_w64(o.m, off + 8, 0); lk_w64(o.m, off + 16, base); lk_w64(o.m, off + 24, base);
-            lk_w64(o.m, off + 32, rodata_off + gsize[1]); lk_w64(o.m, off + 40, rodata_off + gsize[1]); lk_w64(o.m, off + 48, 4096);
+            lk_w64(o.m, off + 32, rodata_off + gsize[1]); lk_w64(o.m, off + 40, rodata_off + gsize[1]); lk_w64(o.m, off + 48, pgal);
             off = off + 56;
             // PT_LOAD read and write
             lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 6);
             lk_w64(o.m, off + 8, rw_off); lk_w64(o.m, off + 16, base + rw_off); lk_w64(o.m, off + 24, base + rw_off);
             lk_w64(o.m, off + 32, (data_off + gsize[2]) - rw_off);
             lk_w64(o.m, off + 40, ((bssaddr - base) + gsize[3]) - rw_off);
-            lk_w64(o.m, off + 48, 4096);
+            lk_w64(o.m, off + 48, pgal);
             off = off + 56;
             if (dynamic == 1)
             {
@@ -1141,12 +1248,13 @@ namespace IDEKA
         };
 
         // Links objs into an executable. Returns false with a message in *err on failure.
-        lk_elf_link(byte** objs, int nobjs, byte** libs, int nlibs, byte** dirs, int ndirs, byte* entry, byte* interp, byte* out) -> byte*
+        lk_elf_link_arch(int arch, byte** objs, int nobjs, byte** libs, int nlibs, byte** dirs, int ndirs, byte* entry, byte* interp, byte* out) -> byte*
         {
             ElfLink L;
             int k, i, sz, tot_sec, tot_sym, n;
             bool ok = true;
             L.err = (byte*)0;
+            L.arch = arch;
             L.nobj = nobjs;
             L.nimp = 0;
             L.nver = 0;
@@ -1260,6 +1368,46 @@ namespace IDEKA
             if (ok) { ok = le_scan_relocs(@L); };
             if (ok) { ok = le_link_all(@L, entry, interp, out); };
             -> L.err;
+        };
+
+        // AArch64 Linux uses musl when its loader is installed, else glibc
+        lk_a64_musl() -> bool
+        {
+            -> lk_file_exists("/lib/ld-musl-aarch64.so.1\0");
+        };
+
+        lk_a64_interp() -> byte*
+        {
+            if (lk_a64_musl()) { -> g"/lib/ld-musl-aarch64.so.1\0"; };
+            -> g"/lib/ld-linux-aarch64.so.1\0";
+        };
+
+        lk_a64_libname() -> byte*
+        {
+            if (lk_a64_musl()) { -> g"libc.musl-aarch64.so.1\0"; };
+            -> g"libc.so.6\0";
+        };
+
+        // Appends the library directories to dirs at nd and returns the new count
+        lk_a64_dirs(byte** dirs, int nd) -> int
+        {
+            if (lk_a64_musl())
+            {
+                dirs[nd] = g"/lib\0";
+                dirs[nd + 1] = g"/usr/lib\0";
+                -> nd + 2;
+            };
+            dirs[nd] = g"/lib/aarch64-linux-gnu\0";
+            dirs[nd + 1] = g"/usr/lib/aarch64-linux-gnu\0";
+            dirs[nd + 2] = g"/lib64\0";
+            dirs[nd + 3] = g"/lib\0";
+            dirs[nd + 4] = g"/usr/lib\0";
+            -> nd + 5;
+        };
+
+        lk_elf_link(byte** objs, int nobjs, byte** libs, int nlibs, byte** dirs, int ndirs, byte* entry, byte* interp, byte* out) -> byte*
+        {
+            -> lk_elf_link_arch(0, objs, nobjs, libs, nlibs, dirs, ndirs, entry, interp, out);
         };
     };
 };

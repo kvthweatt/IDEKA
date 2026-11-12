@@ -1,0 +1,2966 @@
+// Author: Karac V. Thweatt
+//
+// iasm_a64.idk - AArch64 assembler for the IDEKA toolchain (GNU syntax in, ELF64 relocatable out)
+//
+// Library, no main. Reads the text the a64 backend emits plus the inline assembly of the stdlib,
+// encodes every instruction to its fixed 32 bit word and writes an EM_AARCH64 object with RELA
+// relocations that ilink resolves.
+//
+// Usage:
+//
+//     A6* a = a6_new();
+//     if (!a6_assemble(a, text, len)) { /* a.err and a.line */ };
+//     a6_write_elf(a, "out.o");
+
+#ifndef IDEKA_IASM_BUF
+#import "src/compiler/iasm_buf.idk";
+#endif;
+
+#ifndef IDEKA_IASM_A64
+#def IDEKA_IASM_A64 1;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        // ELF relocation types, R_AARCH64_*
+        #def A6R_ABS64 257;
+        #def A6R_ABS32 258;
+        #def A6R_ABS16 259;
+        #def A6R_PREL64 260;
+        #def A6R_PREL32 261;
+        #def A6R_PREL16 262;
+        #def A6R_LD_LO19 273;
+        #def A6R_ADR_LO21 274;
+        #def A6R_ADR_PG21 275;
+        #def A6R_ADD_LO12 277;
+        #def A6R_LDST8 278;
+        #def A6R_TSTBR14 279;
+        #def A6R_CONDBR19 280;
+        #def A6R_JUMP26 282;
+        #def A6R_CALL26 283;
+        #def A6R_LDST16 284;
+        #def A6R_LDST32 285;
+        #def A6R_LDST64 286;
+        #def A6R_LDST128 299;
+        #def A6R_GOT_PG21 311;
+        #def A6R_GOT_LO12 312;
+        // pseudo kinds resolved by the assembler itself, never written out
+        #def A6X_DIFF8 1001;
+        #def A6X_DIFF16 1002;
+        #def A6X_DIFF32 1003;
+        #def A6X_DIFF64 1004;
+
+        // operand kinds
+        #def A6K_NONE 0;
+        #def A6K_REG 1;
+        #def A6K_IMM 2;
+        #def A6K_SYM 3;
+        #def A6K_MEM 4;
+        #def A6K_SHIFT 5;
+        #def A6K_LIST 6;
+        #def A6K_LO12 7;
+        #def A6K_GOT 8;
+        #def A6K_GOTLO 9;
+
+        // register classes
+        #def A6C_W 1;
+        #def A6C_X 2;
+        #def A6C_B 3;
+        #def A6C_H 4;
+        #def A6C_S 5;
+        #def A6C_D 6;
+        #def A6C_Q 7;
+        #def A6C_V 8;
+
+        struct A6Sym
+        {
+            byte* name;
+            int sec;
+            i64 val, size;
+            int bind, type, other;
+            bool isdef, used, temp, comm;
+            i64 calign;
+            int eidx;
+        };
+
+        struct A6Rel
+        {
+            i64 off;
+            int type, sym;
+            i64 add;
+        };
+
+        // A pending fixup: filled when every label is known
+        struct A6Fix
+        {
+            int sec, type, sym, sym2, line;
+            i64 off, add;
+        };
+
+        struct A6Sec
+        {
+            byte* name;
+            int stype, align;
+            i64 flags, entsize, len;
+            ElfBuf d;
+            A6Rel* rel;
+            int nrel, relcap;
+            int eidx, ridx;
+            bool nobits;
+        };
+
+        struct A6Op
+        {
+            int k, cls, num;
+            bool sp, zr;
+            i64 imm;
+            bool hasimm;
+            int sym;
+            i64 add;
+            // reg list and vector arrangement
+            int vq, vsz, cnt;
+            // shift or extend
+            int ext, amt;
+            bool hasamt;
+            // memory
+            int bnum, mk, inum, icls, iext, iamt;
+            bool bsp, pre, ihasamt;
+            int msym;
+            int mmod;
+        };
+
+        struct A6
+        {
+            A6Sec[64] secs;
+            int nsec, cur;
+            A6Sym* syms;
+            int nsyms, scap;
+            int* shash;
+            int hcap;
+            A6Fix* fx;
+            int nfx, fxcap;
+            byte* err;
+            int line;
+            byte[512] ebuf;
+            byte[512] nbuf;
+            byte[512] file;
+            int anon;
+            bool ok;
+            byte* lp;
+            int[8] ost;
+            int[8] oen;
+            int nops;
+            byte* lbuf;
+            int lcap;
+        };
+
+        a6_symsz() -> int
+        {
+            A6Sym* z = (A6Sym*)0;
+            -> (int)(u64)@z[1];
+        };
+
+        a6_fixsz() -> int
+        {
+            A6Fix* z = (A6Fix*)0;
+            -> (int)(u64)@z[1];
+        };
+
+        a6_relsz() -> int
+        {
+            A6Rel* z = (A6Rel*)0;
+            -> (int)(u64)@z[1];
+        };
+
+        // ===== small helpers =====
+
+        a6_lower(int c) -> int
+        {
+            if (c >= 65 & c <= 90) { -> c + 32; };
+            -> c;
+        };
+
+        a6_isid(int c) -> bool -> (c >= 48 & c <= 57) | (c >= 65 & c <= 90) | (c >= 97 & c <= 122) | c == 95 | c == 46 | c == 36;
+
+        a6_isspace(int c) -> bool -> c == 32 | c == 9 | c == 13;
+
+        a6_skip(byte* s, int i, int n) -> int
+        {
+            while (i < n & a6_isspace((int)s[i])) { i++; };
+            -> i;
+        };
+
+        // Does s[0..n) equal the lowercase text t
+        a6_eq(byte* s, int n, byte* t) -> bool
+        {
+            int i = 0;
+            while (i < n)
+            {
+                if (t[i] == 0) { -> false; };
+                if (a6_lower((int)s[i]) != (int)t[i]) { -> false; };
+                i++;
+            };
+            -> t[n] == 0;
+        };
+
+        a6_hashs(byte* s, int n) -> int
+        {
+            u64 h = 5381;
+            int i = 0;
+            while (i < n) { h = (h * 33 + (u64)s[i]) `& 0xFFFFFFF; i++; };
+            -> (int)h;
+        };
+
+        a6_fail(A6* a, byte* msg) -> bool
+        {
+            if (a.ok) { a.err = msg; a.ok = false; };
+            -> false;
+        };
+
+        // ===== symbols =====
+
+        a6_sym_find(A6* a, byte* name, int n) -> int
+        {
+            int h = a6_hashs(name, n) `& (a.hcap - 1);
+            int e;
+            while (a.shash[h] != 0)
+            {
+                e = a.shash[h] - 1;
+                if (ia_eqn(name, n, a.syms[e].name)) { -> e; };
+                h = (h + 1) `& (a.hcap - 1);
+            };
+            -> -1;
+        };
+
+        // Doubles the hash table and reinserts every symbol
+        a6_rehash(A6* a) -> void
+        {
+            int nc = a.hcap * 2;
+            int i = 0;
+            int h;
+            ffree((byte*)a.shash);
+            a.shash = (int*)fmalloc((u64)(4 * nc));
+            a.hcap = nc;
+            while (i < nc) { a.shash[i] = 0; i++; };
+            i = 0;
+            while (i < a.nsyms)
+            {
+                h = a6_hashs(a.syms[i].name, ia_strlen(a.syms[i].name)) `& (nc - 1);
+                while (a.shash[h] != 0) { h = (h + 1) `& (nc - 1); };
+                a.shash[h] = i + 1;
+                i++;
+            };
+            ->;
+        };
+
+        a6_sym_new(A6* a, byte* name, int n) -> int
+        {
+            int h;
+            int e;
+            A6Sym* s;
+            if ((a.nsyms + 1) * 2 > a.hcap) { a6_rehash(a); };
+            h = a6_hashs(name, n) `& (a.hcap - 1);
+            if (a.nsyms >= a.scap)
+            {
+                a.scap = a.scap * 2;
+                if (a.scap < 1024) { a.scap = 1024; };
+                a.syms = (A6Sym*)ia_grow((byte*)a.syms, a.scap * a6_symsz());
+            };
+            e = a.nsyms;
+            a.nsyms++;
+            s = @a.syms[e];
+            s.name = ia_dup(name, n);
+            s.sec = -1;
+            s.val = 0;
+            s.size = 0;
+            s.bind = 0;
+            s.type = 0;
+            s.other = 0;
+            s.isdef = false;
+            s.used = false;
+            s.comm = false;
+            s.calign = 0;
+            s.eidx = 0;
+            s.temp = n >= 2 & name[0] == '.' & name[1] == 'L';
+            while (a.shash[h] != 0) { h = (h + 1) `& (a.hcap - 1); };
+            a.shash[h] = e + 1;
+            -> e;
+        };
+
+        a6_sym_get(A6* a, byte* name, int n) -> int
+        {
+            int e;
+            // a quoted name stands for the text inside the quotes
+            if (n >= 2 & name[0] == '"' & name[n - 1] == '"') { name = @name[1]; n = n - 2; };
+            e = a6_sym_find(a, name, n);
+            if (e >= 0) { -> e; };
+            -> a6_sym_new(a, name, n);
+        };
+
+        // ===== sections =====
+
+        a6_sec_init(A6Sec* s, byte* name, int stype, i64 flags) -> void
+        {
+            s.name = ia_dup(name, ia_strlen(name));
+            s.stype = stype;
+            s.flags = flags;
+            s.entsize = 0;
+            s.len = 0;
+            s.align = 1;
+            s.rel = (A6Rel*)0;
+            s.nrel = 0;
+            s.relcap = 0;
+            s.eidx = 0;
+            s.ridx = 0;
+            s.nobits = stype == 8;
+            eb_init(@s.d);
+            ->;
+        };
+
+        a6_sec_find(A6* a, byte* name) -> int
+        {
+            int i = 0;
+            while (i < a.nsec)
+            {
+                if (ia_streq(a.secs[i].name, name)) { -> i; };
+                i++;
+            };
+            -> -1;
+        };
+
+        a6_sec_get(A6* a, byte* name, int stype, i64 flags) -> int
+        {
+            int i = a6_sec_find(a, name);
+            if (i >= 0) { -> i; };
+            if (a.nsec >= 64) { a6_fail(a, "too many sections\0"); -> 0; };
+            i = a.nsec;
+            a.nsec++;
+            a6_sec_init(@a.secs[i], name, stype, flags);
+            -> i;
+        };
+
+        // The well known section names get their default type and flags
+        a6_std_sec(A6* a, byte* name) -> int
+        {
+            if (ia_streq(name, ".text\0")) { -> a6_sec_get(a, name, 1, 6); };
+            if (ia_streq(name, ".data\0")) { -> a6_sec_get(a, name, 1, 3); };
+            if (ia_streq(name, ".bss\0")) { -> a6_sec_get(a, name, 8, 3); };
+            if (ia_streq(name, ".rodata\0")) { -> a6_sec_get(a, name, 1, 2); };
+            -> a6_sec_get(a, name, 1, 2);
+        };
+
+        a6_put_bytes(A6* a, byte* p, int n) -> void
+        {
+            A6Sec* s = @a.secs[a.cur];
+            int i = 0;
+            if (!s.nobits)
+            {
+                eb_reserve(@s.d, n);
+                while (i < n) { s.d.m[s.d.len + i] = p[i]; i++; };
+                s.d.len = s.d.len + n;
+            };
+            s.len = s.len + n;
+            ->;
+        };
+
+        a6_put_zero(A6* a, i64 n) -> void
+        {
+            A6Sec* s = @a.secs[a.cur];
+            i64 i = 0;
+            if (!s.nobits)
+            {
+                eb_reserve(@s.d, (int)n);
+                while (i < n) { s.d.m[s.d.len + (int)i] = 0; i++; };
+                s.d.len = s.d.len + (int)n;
+            };
+            s.len = s.len + n;
+            ->;
+        };
+
+        a6_put_le(A6* a, i64 v, int size) -> void
+        {
+            byte[8] t;
+            int i = 0;
+            while (i < size) { t[i] = (byte)((v >> (8 * i)) `& 255); i++; };
+            a6_put_bytes(a, (byte*)t, size);
+            ->;
+        };
+
+        a6_fix_add(A6* a, int type, int sym, int sym2, i64 add) -> void
+        {
+            A6Fix* f;
+            if (a.nfx >= a.fxcap)
+            {
+                a.fxcap = a.fxcap * 2;
+                if (a.fxcap < 4096) { a.fxcap = 4096; };
+                a.fx = (A6Fix*)ia_grow((byte*)a.fx, a.fxcap * a6_fixsz());
+            };
+            f = @a.fx[a.nfx];
+            a.nfx++;
+            f.sec = a.cur;
+            f.off = a.secs[a.cur].len;
+            f.type = type;
+            f.sym = sym;
+            f.sym2 = sym2;
+            f.add = add;
+            f.line = a.line;
+            a.syms[sym].used = true;
+            ->;
+        };
+
+        a6_rel_add(A6Sec* s, i64 off, int type, int sym, i64 add) -> void
+        {
+            A6Rel* r;
+            if (s.nrel >= s.relcap)
+            {
+                s.relcap = s.relcap * 2;
+                if (s.relcap < 64) { s.relcap = 64; };
+                s.rel = (A6Rel*)ia_grow((byte*)s.rel, s.relcap * a6_relsz());
+            };
+            r = @s.rel[s.nrel];
+            s.nrel++;
+            r.off = off;
+            r.type = type;
+            r.sym = sym;
+            r.add = add;
+            ->;
+        };
+
+        // ===== expressions and operands =====
+
+        // A local label at the current position, standing for the dot
+        a6_here_sym(A6* a) -> int
+        {
+            byte[32] nm;
+            int n = 0;
+            int v = a.anon;
+            byte[12] dg;
+            int nd = 0;
+            int e;
+            a.anon++;
+            nm[0] = '.'; nm[1] = 'L'; nm[2] = 'h'; nm[3] = 'e'; nm[4] = 'r'; nm[5] = 'e';
+            n = 6;
+            if (v == 0) { dg[0] = '0'; nd = 1; };
+            while (v > 0) { dg[nd] = (byte)(48 + v % 10); nd++; v = v / 10; };
+            while (nd > 0) { nd--; nm[n] = dg[nd]; n++; };
+            e = a6_sym_new(a, (byte*)nm, n);
+            a.syms[e].isdef = true;
+            a.syms[e].sec = a.cur;
+            a.syms[e].val = a.secs[a.cur].len;
+            -> e;
+        };
+
+        a6_num(byte* s, int i, int n, i64* v, int* ni) -> bool
+        {
+            i64 r = 0;
+            int base = 10;
+            int d;
+            int st = i;
+            if (i + 1 < n & s[i] == '0' & (s[i + 1] == 'x' | s[i + 1] == 'X')) { base = 16; i = i + 2; }
+            else if (i + 1 < n & s[i] == '0' & (s[i + 1] == 'b' | s[i + 1] == 'B')) { base = 2; i = i + 2; };
+            st = i;
+            while (i < n)
+            {
+                d = ia_hexval((int)s[i]);
+                if (d < 0 | d >= base) { break; };
+                r = r * base + d;
+                i++;
+            };
+            if (i == st) { -> false; };
+            *v = r;
+            *ni = i;
+            -> true;
+        };
+
+        // sum of terms: one positive and one negative symbol at most, plus a constant
+        a6_expr(A6* a, byte* s, int n, int* sa, int* sb, i64* add) -> bool
+        {
+            int i = a6_skip(s, 0, n);
+            int sign = 1;
+            int st, e, ni;
+            i64 v;
+            *sa = -1;
+            *sb = -1;
+            *add = 0;
+            while (i < n)
+            {
+                i = a6_skip(s, i, n);
+                if (i >= n) { break; };
+                if (s[i] == '+') { i++; continue; };
+                if (s[i] == '-') { sign = 0 - sign; i++; continue; };
+                if (s[i] >= '0' & s[i] <= '9')
+                {
+                    if (!a6_num(s, i, n, @v, @ni)) { -> false; };
+                    i = ni;
+                    if (sign < 0) { *add = *add - v; } else { *add = *add + v; };
+                    sign = 1;
+                    continue;
+                };
+                if (s[i] == 39)
+                {
+                    // character literal
+                    if (i + 2 < n) { v = (i64)s[i + 1]; i = i + 3; if (sign < 0) { *add = *add - v; } else { *add = *add + v; }; sign = 1; continue; };
+                    -> false;
+                };
+                st = i;
+                if (s[i] == '"')
+                {
+                    i++;
+                    while (i < n & s[i] != '"') { i++; };
+                    if (i >= n) { -> false; };
+                    i++;
+                }
+                else
+                {
+                    if (!a6_isid((int)s[i])) { -> false; };
+                    while (i < n & a6_isid((int)s[i])) { i++; };
+                };
+                if (i - st == 1 & s[st] == '.') { e = a6_here_sym(a); }
+                else { e = a6_sym_get(a, @s[st], i - st); };
+                if (sign > 0)
+                {
+                    if (*sa >= 0) { -> false; };
+                    *sa = e;
+                }
+                else
+                {
+                    if (*sb >= 0) { -> false; };
+                    *sb = e;
+                };
+                sign = 1;
+            };
+            -> true;
+        };
+
+        // Constant only expression
+        a6_const(A6* a, byte* s, int n, i64* out) -> bool
+        {
+            int sa, sb;
+            i64 add;
+            if (!a6_expr(a, s, n, @sa, @sb, @add)) { -> false; };
+            if (sa >= 0 | sb >= 0) { -> false; };
+            *out = add;
+            -> true;
+        };
+
+        a6_cond(byte* s, int n) -> int
+        {
+            if (a6_eq(s, n, "eq\0")) { -> 0; };
+            if (a6_eq(s, n, "ne\0")) { -> 1; };
+            if (a6_eq(s, n, "cs\0") | a6_eq(s, n, "hs\0")) { -> 2; };
+            if (a6_eq(s, n, "cc\0") | a6_eq(s, n, "lo\0")) { -> 3; };
+            if (a6_eq(s, n, "mi\0")) { -> 4; };
+            if (a6_eq(s, n, "pl\0")) { -> 5; };
+            if (a6_eq(s, n, "vs\0")) { -> 6; };
+            if (a6_eq(s, n, "vc\0")) { -> 7; };
+            if (a6_eq(s, n, "hi\0")) { -> 8; };
+            if (a6_eq(s, n, "ls\0")) { -> 9; };
+            if (a6_eq(s, n, "ge\0")) { -> 10; };
+            if (a6_eq(s, n, "lt\0")) { -> 11; };
+            if (a6_eq(s, n, "gt\0")) { -> 12; };
+            if (a6_eq(s, n, "le\0")) { -> 13; };
+            if (a6_eq(s, n, "al\0")) { -> 14; };
+            if (a6_eq(s, n, "nv\0")) { -> 15; };
+            -> -1;
+        };
+
+        // Parses a register name of exactly n characters
+        a6_reg(byte* s, int n, A6Op* o) -> bool
+        {
+            int c = a6_lower((int)s[0]);
+            int v = 0;
+            int i = 1;
+            int cls = 0;
+            if (n == 2 & a6_eq(s, n, "sp\0")) { o.cls = A6C_X; o.num = 31; o.sp = true; o.zr = false; -> true; };
+            if (n == 3 & a6_eq(s, n, "wsp\0")) { o.cls = A6C_W; o.num = 31; o.sp = true; o.zr = false; -> true; };
+            if (n == 3 & a6_eq(s, n, "xzr\0")) { o.cls = A6C_X; o.num = 31; o.sp = false; o.zr = true; -> true; };
+            if (n == 3 & a6_eq(s, n, "wzr\0")) { o.cls = A6C_W; o.num = 31; o.sp = false; o.zr = true; -> true; };
+            if (n == 2 & a6_eq(s, n, "fp\0")) { o.cls = A6C_X; o.num = 29; o.sp = false; o.zr = false; -> true; };
+            if (n == 2 & a6_eq(s, n, "lr\0")) { o.cls = A6C_X; o.num = 30; o.sp = false; o.zr = false; -> true; };
+            if (c == 'w') { cls = A6C_W; }
+            elif (c == 'x') { cls = A6C_X; }
+            elif (c == 'b') { cls = A6C_B; }
+            elif (c == 'h') { cls = A6C_H; }
+            elif (c == 's') { cls = A6C_S; }
+            elif (c == 'd') { cls = A6C_D; }
+            elif (c == 'q') { cls = A6C_Q; }
+            elif (c == 'v') { cls = A6C_V; }
+            else { -> false; };
+            if (n < 2 | s[1] < '0' | s[1] > '9') { -> false; };
+            while (i < n & s[i] >= '0' & s[i] <= '9') { v = v * 10 + (int)s[i] - 48; i++; };
+            if (v > 31) { -> false; };
+            if (i != n)
+            {
+                if (cls != A6C_V | s[i] != '.') { -> false; };
+                // arrangement: 8b 16b 4h 8h 2s 4s 1d 2d
+                if (!a6_eq(@s[i + 1], n - i - 1, "8b\0") & !a6_eq(@s[i + 1], n - i - 1, "16b\0") & !a6_eq(@s[i + 1], n - i - 1, "4h\0") & !a6_eq(@s[i + 1], n - i - 1, "8h\0") & !a6_eq(@s[i + 1], n - i - 1, "2s\0") & !a6_eq(@s[i + 1], n - i - 1, "4s\0") & !a6_eq(@s[i + 1], n - i - 1, "1d\0") & !a6_eq(@s[i + 1], n - i - 1, "2d\0")) { -> false; };
+                o.vq = 0;
+                if (a6_eq(@s[i + 1], n - i - 1, "16b\0") | a6_eq(@s[i + 1], n - i - 1, "8h\0") | a6_eq(@s[i + 1], n - i - 1, "4s\0") | a6_eq(@s[i + 1], n - i - 1, "2d\0")) { o.vq = 1; };
+                o.vsz = 0;
+                if (a6_eq(@s[i + 1], n - i - 1, "4h\0") | a6_eq(@s[i + 1], n - i - 1, "8h\0")) { o.vsz = 1; };
+                if (a6_eq(@s[i + 1], n - i - 1, "2s\0") | a6_eq(@s[i + 1], n - i - 1, "4s\0")) { o.vsz = 2; };
+                if (a6_eq(@s[i + 1], n - i - 1, "1d\0") | a6_eq(@s[i + 1], n - i - 1, "2d\0")) { o.vsz = 3; };
+            };
+            o.cls = cls;
+            o.num = v;
+            o.sp = false;
+            o.zr = false;
+            -> true;
+        };
+
+        // Shift and extend keywords: 0 lsl 1 lsr 2 asr 3 ror 4..7 uxtb uxth uxtw uxtx 8..11 sxtb sxth sxtw sxtx
+        a6_extkw(byte* s, int n) -> int
+        {
+            if (a6_eq(s, n, "lsl\0")) { -> 0; };
+            if (a6_eq(s, n, "lsr\0")) { -> 1; };
+            if (a6_eq(s, n, "asr\0")) { -> 2; };
+            if (a6_eq(s, n, "ror\0")) { -> 3; };
+            if (a6_eq(s, n, "uxtb\0")) { -> 4; };
+            if (a6_eq(s, n, "uxth\0")) { -> 5; };
+            if (a6_eq(s, n, "uxtw\0")) { -> 6; };
+            if (a6_eq(s, n, "uxtx\0")) { -> 7; };
+            if (a6_eq(s, n, "sxtb\0")) { -> 8; };
+            if (a6_eq(s, n, "sxth\0")) { -> 9; };
+            if (a6_eq(s, n, "sxtw\0")) { -> 10; };
+            if (a6_eq(s, n, "sxtx\0")) { -> 11; };
+            -> -1;
+        };
+
+        // Parses "lsl #3", "sxtw", "uxtw #2" into o as a SHIFT operand
+        a6_shift_op(A6* a, byte* s, int n, A6Op* o) -> bool
+        {
+            int i = 0;
+            int k;
+            i64 v;
+            while (i < n & a6_isid((int)s[i])) { i++; };
+            k = a6_extkw(s, i);
+            if (k < 0) { -> false; };
+            i = a6_skip(s, i, n);
+            o.k = A6K_SHIFT;
+            o.ext = k;
+            o.hasamt = false;
+            o.amt = 0;
+            if (i < n)
+            {
+                if (s[i] == '#') { i++; };
+                if (!a6_const(a, @s[i], n - i, @v)) { -> false; };
+                o.amt = (int)v;
+                o.hasamt = true;
+            };
+            -> true;
+        };
+
+        // A modifier like :lo12:sym+8 in s starting after the first colon; sets mod, sym and add
+        a6_modifier(A6* a, byte* s, int n, A6Op* o) -> bool
+        {
+            int i = 1;
+            int st = 1;
+            int sa, sb;
+            i64 ad;
+            while (i < n & s[i] != ':') { i++; };
+            if (i >= n) { -> false; };
+            if (a6_eq(@s[st], i - st, "lo12\0")) { o.k = A6K_LO12; }
+            elif (a6_eq(@s[st], i - st, "got\0")) { o.k = A6K_GOT; }
+            elif (a6_eq(@s[st], i - st, "got_lo12\0")) { o.k = A6K_GOTLO; }
+            else { -> false; };
+            i++;
+            if (!a6_expr(a, @s[i], n - i, @sa, @sb, @ad)) { -> false; };
+            if (sa < 0 | sb >= 0) { -> false; };
+            o.sym = sa;
+            o.add = ad;
+            -> true;
+        };
+
+        a6_op_clear(A6Op* o) -> void
+        {
+            o.k = A6K_NONE;
+            o.cls = 0; o.num = 0; o.sp = false; o.zr = false;
+            o.imm = 0; o.hasimm = false; o.sym = -1; o.add = 0;
+            o.vq = 0; o.vsz = 0; o.cnt = 0;
+            o.ext = 0; o.amt = 0; o.hasamt = false;
+            o.bnum = 0; o.mk = 0; o.inum = 0; o.icls = 0; o.iext = 0; o.iamt = 0;
+            o.bsp = false; o.pre = false; o.ihasamt = false;
+            o.msym = -1; o.mmod = 0;
+            ->;
+        };
+
+        // Splits s[0..n) at top level commas into up to max pieces: st[i], en[i] (trimmed)
+        a6_split(byte* s, int n, int* st, int* en, int max) -> int
+        {
+            int cnt = 0;
+            int i = 0;
+            int d = 0;
+            int b = 0;
+            int e;
+            if (a6_skip(s, 0, n) >= n) { -> 0; };
+            while (i <= n)
+            {
+                if (i == n | (s[i] == ',' & d == 0))
+                {
+                    if (cnt >= max) { -> -1; };
+                    e = i;
+                    while (b < e & a6_isspace((int)s[b])) { b++; };
+                    while (e > b & a6_isspace((int)s[e - 1])) { e--; };
+                    st[cnt] = b;
+                    en[cnt] = e;
+                    cnt++;
+                    b = i + 1;
+                }
+                else
+                {
+                    if (s[i] == '[' | s[i] == '{') { d++; };
+                    if (s[i] == ']' | s[i] == '}') { d--; };
+                };
+                i++;
+            };
+            -> cnt;
+        };
+
+        // [base{, offset}]{!} where offset is #imm, :lo12:sym or Xm{, ext #amt}
+        a6_mem(A6* a, byte* s, int n, A6Op* o) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt, i, e;
+            A6Op t;
+            int sa, sb;
+            i64 ad;
+            i = 1;
+            e = n;
+            if (s[e - 1] == '!') { o.pre = true; e--; };
+            while (e > i & a6_isspace((int)s[e - 1])) { e--; };
+            if (s[e - 1] != ']') { -> false; };
+            e--;
+            cnt = a6_split(@s[i], e - i, (int*)st, (int*)en, 4);
+            if (cnt < 1) { -> false; };
+            a6_op_clear(@t);
+            if (!a6_reg(@s[i + st[0]], en[0] - st[0], @t)) { -> false; };
+            if (t.cls != A6C_X) { -> false; };
+            o.k = A6K_MEM;
+            o.bnum = t.num;
+            o.bsp = t.sp;
+            o.mk = 0;
+            if (cnt == 1) { -> true; };
+            // offset
+            if (s[i + st[1]] == '#')
+            {
+                if (!a6_expr(a, @s[i + st[1] + 1], en[1] - st[1] - 1, @sa, @sb, @ad)) { -> false; };
+                if (sa >= 0 | sb >= 0) { -> false; };
+                o.mk = 1;
+                o.imm = ad;
+                if (cnt > 2) { -> false; };
+                -> true;
+            };
+            if (s[i + st[1]] == ':')
+            {
+                a6_op_clear(@t);
+                if (!a6_modifier(a, @s[i + st[1]], en[1] - st[1], @t)) { -> false; };
+                if (t.k != A6K_LO12 & t.k != A6K_GOTLO) { -> false; };
+                o.mk = 2;
+                o.msym = t.sym;
+                o.add = t.add;
+                o.mmod = t.k;
+                -> true;
+            };
+            a6_op_clear(@t);
+            if (!a6_reg(@s[i + st[1]], en[1] - st[1], @t)) { -> false; };
+            o.mk = 3;
+            o.inum = t.num;
+            o.icls = t.cls;
+            o.iext = -1;
+            o.iamt = 0;
+            o.ihasamt = false;
+            if (cnt > 2)
+            {
+                a6_op_clear(@t);
+                if (!a6_shift_op(a, @s[i + st[2]], en[2] - st[2], @t)) { -> false; };
+                o.iext = t.ext;
+                o.iamt = t.amt;
+                o.ihasamt = t.hasamt;
+            };
+            -> true;
+        };
+
+        // {v0.16b, v1.16b} or {v0.16b-v3.16b}
+        a6_list(A6* a, byte* s, int n, A6Op* o) -> bool
+        {
+            int[8] st;
+            int[8] en;
+            int cnt, k, dash;
+            A6Op t, u;
+            if (s[n - 1] != '}') { -> false; };
+            cnt = a6_split(@s[1], n - 2, (int*)st, (int*)en, 8);
+            if (cnt < 1) { -> false; };
+            a6_op_clear(@t);
+            a6_op_clear(@u);
+            dash = -1;
+            k = st[0];
+            while (k < en[0]) { if (s[1 + k] == '-') { dash = k; }; k++; };
+            if (dash >= 0)
+            {
+                if (!a6_reg(@s[1 + st[0]], dash - st[0], @t)) { -> false; };
+                if (!a6_reg(@s[1 + dash + 1], en[0] - dash - 1, @u)) { -> false; };
+                o.cnt = u.num - t.num + 1;
+                if (o.cnt <= 0) { o.cnt = o.cnt + 32; };
+            }
+            else
+            {
+                if (!a6_reg(@s[1 + st[0]], en[0] - st[0], @t)) { -> false; };
+                o.cnt = cnt;
+            };
+            if (t.cls != A6C_V) { -> false; };
+            o.k = A6K_LIST;
+            o.cls = A6C_V;
+            o.num = t.num;
+            o.vq = t.vq;
+            o.vsz = t.vsz;
+            -> true;
+        };
+
+        a6_operand(A6* a, byte* s, int n, A6Op* o) -> bool
+        {
+            int sa, sb;
+            i64 ad;
+            a6_op_clear(o);
+            if (n == 0) { -> false; };
+            if (s[0] == '[') { -> a6_mem(a, s, n, o); };
+            if (s[0] == '{') { -> a6_list(a, s, n, o); };
+            if (s[0] == ':') { -> a6_modifier(a, s, n, o); };
+            if (s[0] == '#')
+            {
+                if (!a6_expr(a, @s[1], n - 1, @sa, @sb, @ad)) { -> false; };
+                if (sb >= 0) { -> false; };
+                o.hasimm = true;
+                o.imm = ad;
+                if (sa >= 0) { o.k = A6K_SYM; o.sym = sa; o.add = ad; }
+                else { o.k = A6K_IMM; };
+                -> true;
+            };
+            if (a6_reg(s, n, o)) { o.k = A6K_REG; -> true; };
+            if (a6_shift_op(a, s, n, o)) { -> true; };
+            if (!a6_expr(a, s, n, @sa, @sb, @ad)) { -> false; };
+            if (sb >= 0) { -> false; };
+            if (sa >= 0) { o.k = A6K_SYM; o.sym = sa; o.add = ad; -> true; };
+            o.k = A6K_IMM;
+            o.hasimm = true;
+            o.imm = ad;
+            -> true;
+        };
+
+        // ===== instruction encoding =====
+
+        a6_ins(A6* a, i64 w, int rtype, int sym, i64 add) -> bool
+        {
+            if (a.cur < 0) { -> a6_fail(a, "instruction outside a section\0"); };
+            if (rtype != 0) { a6_fix_add(a, rtype, sym, -1, add); };
+            a6_put_le(a, w `& 0xFFFFFFFF, 4);
+            -> true;
+        };
+
+        a6_sfof(A6Op* o) -> i64
+        {
+            if (o.cls == A6C_X) { -> 1; };
+            -> 0;
+        };
+
+        a6_isgp(A6Op* o) -> bool -> o.k == A6K_REG & (o.cls == A6C_W | o.cls == A6C_X);
+
+        // Number of bits set
+        a6_popc(u64 v) -> int
+        {
+            int c = 0;
+            while (v != 0) { c = c + (int)(v `& 1); v = v >> 1; };
+            -> c;
+        };
+
+        // Logical immediate encoding N:immr:imms, or -1 when the value is not a bitmask
+        a6_bitmask(u64 imm, int sf) -> i64
+        {
+            u64 all = `!((u64)0);
+            u64 v = imm;
+            u64 mask, elem, run, half_mask;
+            int e = 64;
+            int half, r, ones;
+            i64 nbit = 0;
+            i64 imms;
+            if (sf == 0)
+            {
+                v = imm `& 0xFFFFFFFF;
+                v = v `| (v << 32);
+            };
+            if (v == 0 | v == all) { -> -1; };
+            while (e > 2)
+            {
+                half = e / 2;
+                half_mask = (((u64)1) << half) - 1;
+                if ((v `& half_mask) != ((v >> half) `& half_mask)) { break; };
+                e = half;
+            };
+            if (e == 64) { mask = all; nbit = 1; }
+            else { mask = (((u64)1) << e) - 1; };
+            elem = v `& mask;
+            r = 0;
+            while (r < e)
+            {
+                if (r == 0) { run = elem; }
+                else { run = ((elem << r) `| (elem >> (e - r))) `& mask; };
+                if (run != 0 & run != mask & ((run + 1) `& run) == 0) { break; };
+                r++;
+            };
+            if (r >= e) { -> -1; };
+            ones = a6_popc(run);
+            imms = ((((i64)0 - (i64)e) << 1) `| (i64)(ones - 1)) `& 63;
+            -> (nbit << 12) `| ((i64)r << 6) `| imms;
+        };
+
+        // mov / movz / movn / movk
+        a6_movwide(A6* a, int opc, A6Op* rd, A6Op* im, A6Op* sh) -> bool
+        {
+            i64 sf = a6_sfof(rd);
+            i64 v = im.imm;
+            int hw = 0;
+            if (sh != (A6Op*)0)
+            {
+                if (sh.ext != 0) { -> a6_fail(a, "bad shift\0"); };
+                if (sh.amt % 16 != 0 | sh.amt < 0 | sh.amt > 48) { -> a6_fail(a, "bad shift amount\0"); };
+                hw = sh.amt / 16;
+            };
+            if (im.k != A6K_IMM | v < 0 | v > 65535) { -> a6_fail(a, "immediate out of range\0"); };
+            if (sf == 0 & hw > 1) { -> a6_fail(a, "bad shift amount\0"); };
+            -> a6_ins(a, 0x12800000 `| ((i64)opc << 29) `| (sf << 31) `| ((i64)hw << 21) `| (v << 5) `| (i64)rd.num, 0, -1, 0);
+        };
+
+        a6_mov_imm(A6* a, A6Op* rd, i64 imm) -> bool
+        {
+            i64 sf = a6_sfof(rd);
+            u64 v = (u64)imm;
+            u64 nv;
+            int cnt = 0;
+            int pos = 0;
+            int k = 0;
+            i64 bm;
+            if (sf == 0) { v = v `& 0xFFFFFFFF; };
+            nv = `!v;
+            if (sf == 0) { nv = nv `& 0xFFFFFFFF; };
+            // movz when at most one 16 bit chunk is non zero
+            k = 0;
+            cnt = 0;
+            while (k < 4)
+            {
+                if (((v >> (16 * k)) `& 0xFFFF) != 0) { cnt++; pos = k; };
+                k++;
+            };
+            if (cnt <= 1)
+            {
+                -> a6_ins(a, 0x52800000 `| (sf << 31) `| ((i64)pos << 21) `| ((i64)((v >> (16 * pos)) `& 0xFFFF) << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            k = 0;
+            cnt = 0;
+            pos = 0;
+            while (k < 4)
+            {
+                if (((nv >> (16 * k)) `& 0xFFFF) != 0) { cnt++; pos = k; };
+                k++;
+            };
+            if (cnt <= 1)
+            {
+                -> a6_ins(a, 0x12800000 `| (sf << 31) `| ((i64)pos << 21) `| ((i64)((nv >> (16 * pos)) `& 0xFFFF) << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            bm = a6_bitmask(v, (int)sf);
+            if (bm >= 0)
+            {
+                -> a6_ins(a, 0x32000000 `| (sf << 31) `| (bm << 10) `| (31 << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            -> a6_fail(a, "immediate cannot be moved\0");
+        };
+
+        // add, adds, sub, subs. op 0 add 1 sub, S sets flags.
+        a6_addsub(A6* a, int op, int S, A6Op* rd, A6Op* rn, A6Op* m, A6Op* sh) -> bool
+        {
+            i64 sf = a6_sfof(rn);
+            i64 base;
+            i64 v;
+            int opt, amt, shk;
+            bool useext = false;
+            if (!a6_isgp(rd) | !a6_isgp(rn)) { -> a6_fail(a, "bad operands\0"); };
+            base = 0x0B000000 `| ((i64)op << 30) `| ((i64)S << 29) `| (sf << 31);
+            if (m.k == A6K_IMM)
+            {
+                v = m.imm;
+                if (v < 0)
+                {
+                    v = 0 - v;
+                    base = base `^| 0x40000000;
+                };
+                if (v > 4095) { -> a6_fail(a, "immediate out of range\0"); };
+                shk = 0;
+                if (sh != (A6Op*)0)
+                {
+                    if (sh.ext != 0 | (sh.amt != 0 & sh.amt != 12)) { -> a6_fail(a, "bad shift\0"); };
+                    if (sh.amt == 12) { shk = 1; };
+                };
+                -> a6_ins(a, (base `^| 0x1A000000) `| ((i64)shk << 22) `| (v << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            if (m.k == A6K_LO12 | m.k == A6K_GOTLO)
+            {
+                -> a6_ins(a, (base `^| 0x1A000000) `| ((i64)rn.num << 5) `| (i64)rd.num, A6R_ADD_LO12, m.sym, m.add);
+            };
+            if (m.k != A6K_REG) { -> a6_fail(a, "bad operands\0"); };
+            if (rd.sp | rn.sp) { useext = true; };
+            opt = 0;
+            amt = 0;
+            if (sh != (A6Op*)0)
+            {
+                if (sh.ext >= 4) { useext = true; };
+                if (sh.hasamt) { amt = sh.amt; };
+            };
+            if (useext)
+            {
+                // extended register form, lsl on the full width register means uxtx or uxtw
+                if (sh == (A6Op*)0 | sh.ext == 0)
+                {
+                    if (rd.cls == A6C_X) { opt = 3; } else { opt = 2; };
+                }
+                else { opt = sh.ext - 4; };
+                if (amt > 4) { -> a6_fail(a, "bad extend amount\0"); };
+                -> a6_ins(a, base `| 0x00200000 `| ((i64)m.num << 16) `| ((i64)opt << 13) `| ((i64)amt << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            shk = 0;
+            if (sh != (A6Op*)0)
+            {
+                if (sh.ext > 2) { -> a6_fail(a, "bad shift\0"); };
+                shk = sh.ext;
+            };
+            if (amt < 0 | amt > 63) { -> a6_fail(a, "bad shift amount\0"); };
+            -> a6_ins(a, base `| ((i64)shk << 22) `| ((i64)m.num << 16) `| ((i64)amt << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+        };
+
+        // and, orr, eor, ands and their inverted forms. opc 0 and 1 orr 2 eor 3 ands. inv selects the N bit.
+        a6_logic(A6* a, int opc, int inv, A6Op* rd, A6Op* rn, A6Op* m, A6Op* sh) -> bool
+        {
+            i64 sf = a6_sfof(rn);
+            i64 bm;
+            int shk = 0;
+            int amt = 0;
+            if (!a6_isgp(rd) | !a6_isgp(rn)) { -> a6_fail(a, "bad operands\0"); };
+            if (m.k == A6K_IMM)
+            {
+                u64 v = (u64)m.imm;
+                if (inv != 0) { v = `!v; };
+                bm = a6_bitmask(v, (int)sf);
+                if (bm < 0) { -> a6_fail(a, "immediate is not a bitmask\0"); };
+                -> a6_ins(a, 0x12000000 `| ((i64)opc << 29) `| (sf << 31) `| (bm << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+            };
+            if (m.k != A6K_REG) { -> a6_fail(a, "bad operands\0"); };
+            if (sh != (A6Op*)0)
+            {
+                if (sh.ext > 3) { -> a6_fail(a, "bad shift\0"); };
+                shk = sh.ext;
+                if (sh.hasamt) { amt = sh.amt; };
+            };
+            -> a6_ins(a, 0x0A000000 `| ((i64)opc << 29) `| (sf << 31) `| ((i64)shk << 22) `| ((i64)inv << 21) `| ((i64)m.num << 16) `| ((i64)amt << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+        };
+
+        // sbfm 0 bfm 1 ubfm 2
+        a6_bfm(A6* a, int opc, A6Op* rd, A6Op* rn, i64 immr, i64 imms) -> bool
+        {
+            i64 sf = a6_sfof(rd);
+            i64 lim = 31;
+            if (sf == 1) { lim = 63; };
+            if (immr < 0 | immr > lim | imms < 0 | imms > lim) { -> a6_fail(a, "bitfield out of range\0"); };
+            -> a6_ins(a, 0x13000000 `| ((i64)opc << 29) `| (sf << 31) `| (sf << 22) `| (immr << 16) `| (imms << 10) `| ((i64)rn.num << 5) `| (i64)rd.num, 0, -1, 0);
+        };
+
+        a6_cc(A6* a, int i) -> int
+        {
+            -> a6_cond(@a.lp[a.ost[i]], a.oen[i] - a.ost[i]);
+        };
+
+        // Branch to a label: b 0 bl 1
+        a6_br_imm(A6* a, int link, A6Op* t) -> bool
+        {
+            if (t.k != A6K_SYM) { -> a6_fail(a, "bad branch target\0"); };
+            if (link != 0) { -> a6_ins(a, 0x94000000, A6R_CALL26, t.sym, t.add); };
+            -> a6_ins(a, 0x14000000, A6R_JUMP26, t.sym, t.add);
+        };
+
+        a6_mem_scale(A6Op* rt) -> int
+        {
+            if (rt.cls == A6C_W | rt.cls == A6C_S) { -> 2; };
+            if (rt.cls == A6C_X | rt.cls == A6C_D) { -> 3; };
+            if (rt.cls == A6C_Q) { -> 4; };
+            if (rt.cls == A6C_H) { -> 1; };
+            -> 0;
+        };
+
+        // Single register loads and stores. size is the 2 bit size field, v the SIMD flag, opc the
+        // opcode field, lg the log2 of the access size.
+        a6_ldst(A6* a, int size, int v, int opc, int lg, bool unscaled, A6Op* rt, A6Op* m, A6Op* post) -> bool
+        {
+            i64 base = ((i64)size << 30) `| ((i64)v << 26) `| ((i64)opc << 22) `| ((i64)rt.num);
+            i64 imm, sc;
+            int rtype;
+            int opt, s;
+            if (m.k != A6K_MEM) { -> a6_fail(a, "bad memory operand\0"); };
+            if (post != (A6Op*)0)
+            {
+                if (post.k != A6K_IMM | post.imm < 0 - 256 | post.imm > 255) { -> a6_fail(a, "bad post index\0"); };
+                -> a6_ins(a, base `| 0x38000400 `| ((post.imm `& 0x1FF) << 12) `| ((i64)m.bnum << 5), 0, -1, 0);
+            };
+            if (m.mk == 3)
+            {
+                // register offset
+                opt = 3;
+                if (m.icls == A6C_W) { opt = 2; };
+                if (m.iext >= 0)
+                {
+                    if (m.iext == 0) { opt = 3; }
+                    elif (m.iext >= 4) { opt = m.iext - 4; }
+                    else { -> a6_fail(a, "bad extend\0"); };
+                };
+                if (m.icls == A6C_W & opt != 2 & opt != 6) { -> a6_fail(a, "bad extend\0"); };
+                s = 0;
+                if (m.ihasamt)
+                {
+                    if (m.iamt != 0 & m.iamt != lg) { -> a6_fail(a, "bad index shift\0"); };
+                    if (m.iamt != 0 | lg == 0) { s = 1; };
+                    if (m.iamt == 0 & lg != 0) { s = 0; };
+                };
+                -> a6_ins(a, base `| 0x38200800 `| ((i64)m.inum << 16) `| ((i64)opt << 13) `| ((i64)s << 12) `| ((i64)m.bnum << 5), 0, -1, 0);
+            };
+            if (m.mk == 2)
+            {
+                rtype = A6R_LDST8;
+                if (lg == 1) { rtype = A6R_LDST16; };
+                if (lg == 2) { rtype = A6R_LDST32; };
+                if (lg == 3) { rtype = A6R_LDST64; };
+                if (lg == 4) { rtype = A6R_LDST128; };
+                if (m.mmod == A6K_GOTLO)
+                {
+                    if (lg != 3) { -> a6_fail(a, "bad got access\0"); };
+                    rtype = A6R_GOT_LO12;
+                };
+                -> a6_ins(a, base `| 0x39000000 `| ((i64)m.bnum << 5), rtype, m.msym, m.add);
+            };
+            imm = 0;
+            if (m.mk == 1) { imm = m.imm; };
+            if (m.pre)
+            {
+                if (imm < 0 - 256 | imm > 255) { -> a6_fail(a, "bad pre index\0"); };
+                -> a6_ins(a, base `| 0x38000C00 `| ((imm `& 0x1FF) << 12) `| ((i64)m.bnum << 5), 0, -1, 0);
+            };
+            sc = (i64)1 << lg;
+            if (!unscaled & imm >= 0 & imm % sc == 0 & imm / sc < 4096)
+            {
+                -> a6_ins(a, base `| 0x39000000 `| ((imm / sc) << 10) `| ((i64)m.bnum << 5), 0, -1, 0);
+            };
+            if (imm >= 0 - 256 & imm <= 255)
+            {
+                -> a6_ins(a, base `| 0x38000000 `| ((imm `& 0x1FF) << 12) `| ((i64)m.bnum << 5), 0, -1, 0);
+            };
+            -> a6_fail(a, "offset out of range\0");
+        };
+
+        // ldp, stp, ldnp, stnp. mode 1 post 2 offset 3 pre 0 non temporal
+        a6_pair(A6* a, int load, int nt, A6Op* r1, A6Op* r2, A6Op* m, A6Op* post) -> bool
+        {
+            int lg = a6_mem_scale(r1);
+            int opc, v, mode;
+            i64 imm = 0;
+            i64 sc;
+            if (m.k != A6K_MEM | (m.mk != 0 & m.mk != 1)) { -> a6_fail(a, "bad memory operand\0"); };
+            v = 0;
+            if (r1.cls == A6C_S | r1.cls == A6C_D | r1.cls == A6C_Q) { v = 1; };
+            if (r1.cls == A6C_W | r1.cls == A6C_S) { opc = 0; }
+            elif (r1.cls == A6C_X | r1.cls == A6C_D) { opc = 1; }
+            elif (r1.cls == A6C_Q) { opc = 2; }
+            else { -> a6_fail(a, "bad register\0"); };
+            if (r1.cls == A6C_X) { opc = 2; };
+            if (r1.cls == A6C_D) { opc = 1; };
+            if (m.mk == 1) { imm = m.imm; };
+            mode = 2;
+            if (m.pre) { mode = 3; };
+            if (post != (A6Op*)0)
+            {
+                if (post.k != A6K_IMM) { -> a6_fail(a, "bad post index\0"); };
+                mode = 1;
+                imm = post.imm;
+            };
+            if (nt != 0) { mode = 0; };
+            sc = (i64)1 << lg;
+            if (imm % sc != 0 | imm / sc < 0 - 64 | imm / sc > 63) { -> a6_fail(a, "offset out of range\0"); };
+            -> a6_ins(a, 0x28000000 `| ((i64)opc << 30) `| ((i64)v << 26) `| ((i64)mode << 23) `| ((i64)load << 22) `| (((imm / sc) `& 0x7F) << 15) `| ((i64)r2.num << 10) `| ((i64)m.bnum << 5) `| (i64)r1.num, 0, -1, 0);
+        };
+
+        // Exclusive and acquire release accesses. kind: 0 stxr 1 stlxr 2 ldxr 3 ldaxr 4 stlr 5 ldar
+        a6_excl(A6* a, int kind, int sz, A6Op* rs, A6Op* rt, A6Op* m) -> bool
+        {
+            i64 w = ((i64)sz << 30) `| 0x08000000 `| ((i64)rt.num) `| ((i64)m.bnum << 5);
+            if (m.k != A6K_MEM | (m.mk != 0 & !(m.mk == 1 & m.imm == 0))) { -> a6_fail(a, "bad memory operand\0"); };
+            if (kind == 0) { w = w `| (31 << 10) `| ((i64)rs.num << 16); };
+            if (kind == 1) { w = w `| (1 << 15) `| (31 << 10) `| ((i64)rs.num << 16); };
+            if (kind == 2) { w = w `| (1 << 22) `| (31 << 10) `| (31 << 16); };
+            if (kind == 3) { w = w `| (1 << 22) `| (1 << 15) `| (31 << 10) `| (31 << 16); };
+            if (kind == 4) { w = w `| (1 << 23) `| (1 << 15) `| (31 << 10) `| (31 << 16); };
+            if (kind == 5) { w = w `| (1 << 23) `| (1 << 22) `| (1 << 15) `| (31 << 10) `| (31 << 16); };
+            -> a6_ins(a, w, 0, -1, 0);
+        };
+
+        a6_prfop(byte* s, int n) -> int
+        {
+            int t, l, p;
+            if (n < 8) { -> -1; };
+            if (a6_eq(s, 3, "pld\0")) { t = 0; }
+            elif (a6_eq(s, 3, "pli\0")) { t = 1; }
+            elif (a6_eq(s, 3, "pst\0")) { t = 2; }
+            else { -> -1; };
+            if (s[3] != 'l' & s[3] != 'L') { -> -1; };
+            if (s[4] < '1' | s[4] > '3') { -> -1; };
+            l = (int)s[4] - 49;
+            if (a6_eq(@s[5], n - 5, "keep\0")) { p = 0; }
+            elif (a6_eq(@s[5], n - 5, "strm\0")) { p = 1; }
+            else { -> -1; };
+            -> (t << 3) `| (l << 1) `| p;
+        };
+
+        // ld1 and st1 with a register list. load is 1 for ld1
+        a6_ld1(A6* a, int load, A6Op* l, A6Op* m, A6Op* post) -> bool
+        {
+            i64 opcode;
+            i64 w;
+            if (l.k != A6K_LIST | m.k != A6K_MEM | m.mk != 0) { -> a6_fail(a, "bad operands\0"); };
+            if (l.cnt == 1) { opcode = 7; }
+            elif (l.cnt == 2) { opcode = 10; }
+            elif (l.cnt == 3) { opcode = 6; }
+            elif (l.cnt == 4) { opcode = 2; }
+            else { -> a6_fail(a, "bad register count\0"); };
+            w = ((i64)l.vq << 30) `| ((i64)opcode << 12) `| ((i64)l.vsz << 10) `| ((i64)m.bnum << 5) `| (i64)l.num;
+            if (load != 0) { w = w `| 0x0C400000; } else { w = w `| 0x0C000000; };
+            if (post != (A6Op*)0)
+            {
+                w = w `| 0x00800000;
+                if (post.k == A6K_IMM)
+                {
+                    if (post.imm != (i64)l.cnt * (i64)(8 + 8 * l.vq)) { -> a6_fail(a, "bad post index\0"); };
+                    w = w `| (31 << 16);
+                }
+                elif (post.k == A6K_REG) { w = w `| ((i64)post.num << 16); }
+                else { -> a6_fail(a, "bad post index\0"); };
+            };
+            -> a6_ins(a, w, 0, -1, 0);
+        };
+
+        a6_sysenc(int op0, int op1, int crn, int crm, int op2) -> i64
+        {
+            -> ((i64)(op0 - 2) << 14) `| ((i64)op1 << 11) `| ((i64)crn << 7) `| ((i64)crm << 3) `| (i64)op2;
+        };
+
+        a6_sysreg(byte* s, int n, i64* out) -> bool
+        {
+            if (a6_eq(s, n, "cntvct_el0\0")) { *out = a6_sysenc(3, 3, 14, 0, 2); -> true; };
+            if (a6_eq(s, n, "cntfrq_el0\0")) { *out = a6_sysenc(3, 3, 14, 0, 0); -> true; };
+            if (a6_eq(s, n, "cntpct_el0\0")) { *out = a6_sysenc(3, 3, 14, 0, 1); -> true; };
+            if (a6_eq(s, n, "tpidr_el0\0")) { *out = a6_sysenc(3, 3, 13, 0, 2); -> true; };
+            if (a6_eq(s, n, "nzcv\0")) { *out = a6_sysenc(3, 3, 4, 2, 0); -> true; };
+            if (a6_eq(s, n, "fpcr\0")) { *out = a6_sysenc(3, 3, 4, 4, 0); -> true; };
+            if (a6_eq(s, n, "fpsr\0")) { *out = a6_sysenc(3, 3, 4, 4, 1); -> true; };
+            if (a6_eq(s, n, "midr_el1\0")) { *out = a6_sysenc(3, 0, 0, 0, 0); -> true; };
+            if (a6_eq(s, n, "ctr_el0\0")) { *out = a6_sysenc(3, 3, 0, 0, 1); -> true; };
+            if (a6_eq(s, n, "dczid_el0\0")) { *out = a6_sysenc(3, 3, 0, 0, 7); -> true; };
+            -> false;
+        };
+
+        a6_zr(A6Op* z, int cls) -> void
+        {
+            a6_op_clear(z);
+            z.k = A6K_REG;
+            z.cls = cls;
+            z.num = 31;
+            z.zr = true;
+            ->;
+        };
+
+        // Group results: 1 encoded, 0 error set, -1 not a mnemonic of the group
+
+        a6_g_mem(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            int load = 0;
+            int size, v, opc, lg;
+            bool uns = false;
+            A6Op* rt = @o[0];
+            A6Op* post = (A6Op*)0;
+            A6Op* r2;
+            int k = 0;
+            int sz;
+            // plain loads and stores
+            if (a6_eq(m, ml, "ldr\0") | a6_eq(m, ml, "str\0") | a6_eq(m, ml, "ldur\0") | a6_eq(m, ml, "stur\0"))
+            {
+                if (n < 2 | rt.k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (m[0] == 'l') { load = 1; };
+                if (ml == 4) { uns = true; };
+                if (o[1].k == A6K_SYM)
+                {
+                    if (load == 0) { a6_fail(a, "bad operands\0"); -> 0; };
+                    if (rt.cls == A6C_W) { k = 0x18000000; }
+                    elif (rt.cls == A6C_X) { k = 0x58000000; }
+                    elif (rt.cls == A6C_S) { k = 0x1C000000; }
+                    elif (rt.cls == A6C_D) { k = 0x5C000000; }
+                    elif (rt.cls == A6C_Q) { k = 0x9C000000; }
+                    else { a6_fail(a, "bad register\0"); -> 0; };
+                    if (a6_ins(a, (i64)k `| (i64)rt.num, A6R_LD_LO19, o[1].sym, o[1].add)) { -> 1; };
+                    -> 0;
+                };
+                if (n == 3) { post = @o[2]; };
+                lg = a6_mem_scale(rt);
+                v = 1;
+                if (rt.cls == A6C_W) { size = 2; v = 0; opc = load; }
+                elif (rt.cls == A6C_X) { size = 3; v = 0; opc = load; }
+                elif (rt.cls == A6C_B) { size = 0; opc = load; }
+                elif (rt.cls == A6C_H) { size = 1; opc = load; }
+                elif (rt.cls == A6C_S) { size = 2; opc = load; }
+                elif (rt.cls == A6C_D) { size = 3; opc = load; }
+                elif (rt.cls == A6C_Q) { size = 0; opc = 2 + load; }
+                else { a6_fail(a, "bad register\0"); -> 0; };
+                if (a6_ldst(a, size, v, opc, lg, uns, rt, @o[1], post)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ldrb\0") | a6_eq(m, ml, "strb\0") | a6_eq(m, ml, "ldrh\0") | a6_eq(m, ml, "strh\0") | a6_eq(m, ml, "ldurb\0") | a6_eq(m, ml, "sturb\0") | a6_eq(m, ml, "ldurh\0") | a6_eq(m, ml, "sturh\0"))
+            {
+                if (n < 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (m[0] == 'l') { load = 1; };
+                if (ml == 5) { uns = true; };
+                sz = 0;
+                if (m[ml - 1] == 'h') { sz = 1; };
+                if (n == 3) { post = @o[2]; };
+                if (a6_ldst(a, sz, 0, load, sz, uns, rt, @o[1], post)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ldrsb\0") | a6_eq(m, ml, "ldrsh\0") | a6_eq(m, ml, "ldrsw\0") | a6_eq(m, ml, "ldursw\0"))
+            {
+                if (n < 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (n == 3) { post = @o[2]; };
+                sz = 0;
+                if (m[4] == 'h') { sz = 1; };
+                if (m[4] == 'w') { sz = 2; };
+                if (ml == 6) { sz = 2; };
+                opc = 3;
+                if (rt.cls == A6C_X) { opc = 2; };
+                if (sz == 2) { opc = 2; };
+                if (a6_ldst(a, sz, 0, opc, sz, ml == 6, rt, @o[1], post)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ldp\0") | a6_eq(m, ml, "stp\0") | a6_eq(m, ml, "ldnp\0") | a6_eq(m, ml, "stnp\0"))
+            {
+                if (n < 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (m[0] == 'l') { load = 1; };
+                r2 = @o[1];
+                if (n == 4) { post = @o[3]; };
+                k = 0;
+                if (ml == 4) { k = 1; };
+                if (a6_pair(a, load, k, rt, r2, @o[2], post)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_g_sync(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            int kind = -1;
+            int sz = 0;
+            A6Op* rs = (A6Op*)0;
+            A6Op* rt;
+            A6Op* mm;
+            int base = ml;
+            if (m[ml - 1] == 'b' & ml > 4) { sz = 0; base = ml - 1; }
+            elif (m[ml - 1] == 'h' & ml > 4) { sz = 1; base = ml - 1; };
+            if (a6_eq(m, base, "stxr\0")) { kind = 0; }
+            elif (a6_eq(m, base, "stlxr\0")) { kind = 1; }
+            elif (a6_eq(m, base, "ldxr\0")) { kind = 2; }
+            elif (a6_eq(m, base, "ldaxr\0")) { kind = 3; }
+            elif (a6_eq(m, base, "stlr\0")) { kind = 4; }
+            elif (a6_eq(m, base, "ldar\0")) { kind = 5; }
+            else { -> -1; };
+            if (base == ml)
+            {
+                sz = 2;
+                if (n >= 2 & o[n - 2].k == A6K_REG & o[n - 2].cls == A6C_X) { sz = 3; };
+            };
+            if (kind <= 1) { if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; }; rs = @o[0]; rt = @o[1]; mm = @o[2]; }
+            else { if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; }; rt = @o[0]; mm = @o[1]; };
+            if (a6_excl(a, kind, sz, rs, rt, mm)) { -> 1; };
+            -> 0;
+        };
+
+        a6_g_arith(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            A6Op z;
+            A6Op* sh = (A6Op*)0;
+            int op = 0;
+            int S = 0;
+            int cmpf = 0;
+            bool ok;
+            if (a6_eq(m, ml, "add\0")) { op = 0; S = 0; }
+            elif (a6_eq(m, ml, "sub\0")) { op = 1; S = 0; }
+            elif (a6_eq(m, ml, "adds\0")) { op = 0; S = 1; }
+            elif (a6_eq(m, ml, "subs\0")) { op = 1; S = 1; }
+            elif (a6_eq(m, ml, "cmp\0")) { op = 1; S = 1; cmpf = 1; }
+            elif (a6_eq(m, ml, "cmn\0")) { op = 0; S = 1; cmpf = 1; }
+            elif (a6_eq(m, ml, "neg\0")) { op = 1; S = 0; cmpf = 2; }
+            elif (a6_eq(m, ml, "negs\0")) { op = 1; S = 1; cmpf = 2; }
+            else { -> -1; };
+            if (cmpf == 1)
+            {
+                if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                a6_zr(@z, o[0].cls);
+                if (n == 3) { sh = @o[2]; };
+                ok = a6_addsub(a, op, S, @z, @o[0], @o[1], sh);
+            }
+            elif (cmpf == 2)
+            {
+                if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                a6_zr(@z, o[0].cls);
+                if (n == 3) { sh = @o[2]; };
+                ok = a6_addsub(a, op, S, @o[0], @z, @o[1], sh);
+            }
+            else
+            {
+                if (n < 3 | n > 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (n == 4) { sh = @o[3]; };
+                ok = a6_addsub(a, op, S, @o[0], @o[1], @o[2], sh);
+            };
+            if (ok) { -> 1; };
+            -> 0;
+        };
+
+        a6_g_logic(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            A6Op z;
+            A6Op* sh = (A6Op*)0;
+            int opc = -1;
+            int inv = 0;
+            bool ok;
+            if (a6_eq(m, ml, "and\0")) { opc = 0; }
+            elif (a6_eq(m, ml, "orr\0")) { opc = 1; }
+            elif (a6_eq(m, ml, "eor\0")) { opc = 2; }
+            elif (a6_eq(m, ml, "ands\0")) { opc = 3; }
+            elif (a6_eq(m, ml, "bic\0")) { opc = 0; inv = 1; }
+            elif (a6_eq(m, ml, "orn\0")) { opc = 1; inv = 1; }
+            elif (a6_eq(m, ml, "eon\0")) { opc = 2; inv = 1; }
+            elif (a6_eq(m, ml, "bics\0")) { opc = 3; inv = 1; }
+            elif (a6_eq(m, ml, "tst\0"))
+            {
+                if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                a6_zr(@z, o[0].cls);
+                if (n == 3) { sh = @o[2]; };
+                if (a6_logic(a, 3, 0, @z, @o[0], @o[1], sh)) { -> 1; };
+                -> 0;
+            }
+            elif (a6_eq(m, ml, "mvn\0"))
+            {
+                if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                a6_zr(@z, o[0].cls);
+                if (n == 3) { sh = @o[2]; };
+                if (a6_logic(a, 1, 1, @o[0], @z, @o[1], sh)) { -> 1; };
+                -> 0;
+            }
+            else { -> -1; };
+            if (n < 3 | n > 4) { a6_fail(a, "bad operands\0"); -> 0; };
+            if (n == 4) { sh = @o[3]; };
+            if (a6_logic(a, opc, inv, @o[0], @o[1], @o[2], sh)) { -> 1; };
+            -> 0;
+        };
+
+        a6_g_mov(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            A6Op z;
+            A6Op* sh = (A6Op*)0;
+            int opc;
+            if (a6_eq(m, ml, "mov\0"))
+            {
+                if (n != 2 | o[0].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (o[1].k == A6K_IMM) { if (a6_mov_imm(a, @o[0], o[1].imm)) { -> 1; }; -> 0; };
+                if (o[1].k == A6K_REG)
+                {
+                    if (o[0].sp | o[1].sp)
+                    {
+                        a6_op_clear(@z);
+                        z.k = A6K_IMM;
+                        z.hasimm = true;
+                        z.imm = 0;
+                        if (a6_addsub(a, 0, 0, @o[0], @o[1], @z, (A6Op*)0)) { -> 1; };
+                        -> 0;
+                    };
+                    a6_zr(@z, o[0].cls);
+                    if (a6_logic(a, 1, 0, @o[0], @z, @o[1], (A6Op*)0)) { -> 1; };
+                    -> 0;
+                };
+                a6_fail(a, "bad operands\0");
+                -> 0;
+            };
+            opc = -1;
+            if (a6_eq(m, ml, "movz\0")) { opc = 2; }
+            elif (a6_eq(m, ml, "movn\0")) { opc = 0; }
+            elif (a6_eq(m, ml, "movk\0")) { opc = 3; }
+            else { -> -1; };
+            if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+            if (n == 3) { sh = @o[2]; };
+            if (a6_movwide(a, opc, @o[0], @o[1], sh)) { -> 1; };
+            -> 0;
+        };
+
+        a6_g_bits(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            i64 sf = a6_sfof(@o[0]);
+            i64 lim = 31;
+            i64 s, lsb, w;
+            i64 opc = -1;
+            bool ok;
+            if (sf == 1) { lim = 63; };
+            if (a6_eq(m, ml, "lsl\0") | a6_eq(m, ml, "lsr\0") | a6_eq(m, ml, "asr\0") | a6_eq(m, ml, "ror\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (o[2].k == A6K_REG)
+                {
+                    opc = 0x1AC02000;
+                    if (m[1] == 's' & m[2] == 'r') { opc = 0x1AC02400; };
+                    if (m[1] == 's' & m[2] == 'l') { opc = 0x1AC02000; };
+                    if (m[0] == 'a') { opc = 0x1AC02800; };
+                    if (m[0] == 'r') { opc = 0x1AC02C00; };
+                    if (a6_ins(a, opc `| (sf << 31) `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                    -> 0;
+                };
+                if (o[2].k != A6K_IMM | o[2].imm < 0 | o[2].imm > lim) { a6_fail(a, "shift out of range\0"); -> 0; };
+                s = o[2].imm;
+                if (m[0] == 'l' & m[1] == 's' & m[2] == 'l') { ok = a6_bfm(a, 2, @o[0], @o[1], (lim + 1 - s) `& lim, lim - s); }
+                elif (m[0] == 'l') { ok = a6_bfm(a, 2, @o[0], @o[1], s, lim); }
+                elif (m[0] == 'a') { ok = a6_bfm(a, 0, @o[0], @o[1], s, lim); }
+                else { ok = a6_ins(a, 0x13800000 `| (sf << 31) `| (sf << 22) `| ((i64)o[1].num << 16) `| (s << 10) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0); };
+                if (ok) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ubfx\0") | a6_eq(m, ml, "sbfx\0") | a6_eq(m, ml, "bfxil\0"))
+            {
+                if (n != 4 | o[2].k != A6K_IMM | o[3].k != A6K_IMM) { a6_fail(a, "bad operands\0"); -> 0; };
+                lsb = o[2].imm;
+                w = o[3].imm;
+                if (w < 1 | lsb < 0 | lsb + w - 1 > lim) { a6_fail(a, "bitfield out of range\0"); -> 0; };
+                opc = 2;
+                if (m[0] == 's') { opc = 0; };
+                if (m[0] == 'b') { opc = 1; };
+                if (a6_bfm(a, (int)opc, @o[0], @o[1], lsb, lsb + w - 1)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ubfiz\0") | a6_eq(m, ml, "sbfiz\0") | a6_eq(m, ml, "bfi\0"))
+            {
+                if (n != 4 | o[2].k != A6K_IMM | o[3].k != A6K_IMM) { a6_fail(a, "bad operands\0"); -> 0; };
+                lsb = o[2].imm;
+                w = o[3].imm;
+                if (w < 1 | lsb < 0 | lsb + w - 1 > lim) { a6_fail(a, "bitfield out of range\0"); -> 0; };
+                opc = 2;
+                if (m[0] == 's') { opc = 0; };
+                if (m[0] == 'b') { opc = 1; };
+                if (a6_bfm(a, (int)opc, @o[0], @o[1], (lim + 1 - lsb) `& lim, w - 1)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ubfm\0") | a6_eq(m, ml, "sbfm\0") | a6_eq(m, ml, "bfm\0"))
+            {
+                if (n != 4 | o[2].k != A6K_IMM | o[3].k != A6K_IMM) { a6_fail(a, "bad operands\0"); -> 0; };
+                opc = 2;
+                if (m[0] == 's') { opc = 0; };
+                if (m[0] == 'b') { opc = 1; };
+                if (a6_bfm(a, (int)opc, @o[0], @o[1], o[2].imm, o[3].imm)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "sxtb\0") | a6_eq(m, ml, "sxth\0") | a6_eq(m, ml, "sxtw\0") | a6_eq(m, ml, "uxtb\0") | a6_eq(m, ml, "uxth\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                s = 7;
+                if (m[3] == 'h') { s = 15; };
+                if (m[3] == 'w') { s = 31; };
+                opc = 2;
+                if (m[0] == 's') { opc = 0; };
+                if (a6_bfm(a, (int)opc, @o[0], @o[1], 0, s)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_g_arith2(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            i64 sf = a6_sfof(@o[0]);
+            i64 base = -1;
+            i64 w;
+            A6Op z;
+            if (a6_eq(m, ml, "mul\0") | a6_eq(m, ml, "mneg\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1B007C00;
+                if (m[1] == 'n') { w = 0x1B00FC00; };
+                if (a6_ins(a, w `| (sf << 31) `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "madd\0") | a6_eq(m, ml, "msub\0"))
+            {
+                if (n != 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1B000000;
+                if (m[1] == 's') { w = 0x1B008000; };
+                if (a6_ins(a, w `| (sf << 31) `| ((i64)o[2].num << 16) `| ((i64)o[3].num << 10) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "sdiv\0") | a6_eq(m, ml, "udiv\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1AC00800;
+                if (m[0] == 's') { w = 0x1AC00C00; };
+                if (a6_ins(a, w `| (sf << 31) `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "smull\0") | a6_eq(m, ml, "umull\0") | a6_eq(m, ml, "smnegl\0") | a6_eq(m, ml, "umnegl\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x9B207C00;
+                if (m[0] == 'u') { w = 0x9BA07C00; };
+                if (ml == 6) { w = w `| 0x8000; };
+                if (a6_ins(a, w `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "smaddl\0") | a6_eq(m, ml, "umaddl\0") | a6_eq(m, ml, "smsubl\0") | a6_eq(m, ml, "umsubl\0"))
+            {
+                if (n != 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x9B200000;
+                if (m[0] == 'u') { w = 0x9BA00000; };
+                if (m[2] == 's') { w = w `| 0x8000; };
+                if (a6_ins(a, w `| ((i64)o[2].num << 16) `| ((i64)o[3].num << 10) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "smulh\0") | a6_eq(m, ml, "umulh\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x9B407C00;
+                if (m[0] == 'u') { w = 0x9BC07C00; };
+                if (a6_ins(a, w `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "clz\0") | a6_eq(m, ml, "cls\0") | a6_eq(m, ml, "rbit\0") | a6_eq(m, ml, "rev\0") | a6_eq(m, ml, "rev16\0") | a6_eq(m, ml, "rev32\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (m[0] == 'c' & m[2] == 'z') { w = 0x5AC01000; }
+                elif (m[0] == 'c') { w = 0x5AC01400; }
+                elif (m[0] == 'r' & m[1] == 'b') { w = 0x5AC00000; }
+                elif (ml == 5 & m[3] == '1') { w = 0x5AC00400; }
+                elif (ml == 5) { w = 0x5AC00800; sf = 1; }
+                else { w = 0x5AC00800; if (sf == 1) { w = 0x5AC00C00; }; };
+                if (a6_ins(a, w `| (sf << 31) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_g_cond(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            i64 sf = a6_sfof(@o[0]);
+            i64 base = -1;
+            int c;
+            A6Op z;
+            if (a6_eq(m, ml, "csel\0") | a6_eq(m, ml, "csinc\0") | a6_eq(m, ml, "csinv\0") | a6_eq(m, ml, "csneg\0"))
+            {
+                if (n != 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                c = a6_cc(a, 3);
+                if (c < 0) { a6_fail(a, "bad condition\0"); -> 0; };
+                base = 0x1A800000;
+                if (ml == 5 & m[2] == 'i' & m[3] == 'n' & m[4] == 'c') { base = 0x1A800400; };
+                if (ml == 5 & m[3] == 'n' & m[4] == 'v') { base = 0x5A800000; };
+                if (ml == 5 & m[3] == 'e') { base = 0x5A800400; };
+                if (a6_ins(a, base `| (sf << 31) `| ((i64)o[2].num << 16) `| ((i64)c << 12) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "cset\0") | a6_eq(m, ml, "csetm\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                c = a6_cc(a, 1);
+                if (c < 0) { a6_fail(a, "bad condition\0"); -> 0; };
+                c = c `^| 1;
+                base = 0x1A9F07E0;
+                if (ml == 5) { base = 0x5A9F03E0; };
+                if (a6_ins(a, base `| (sf << 31) `| ((i64)c << 12) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "cinc\0") | a6_eq(m, ml, "cinv\0") | a6_eq(m, ml, "cneg\0"))
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                c = a6_cc(a, 2);
+                if (c < 0) { a6_fail(a, "bad condition\0"); -> 0; };
+                c = c `^| 1;
+                base = 0x1A800400;
+                if (m[1] == 'i' & m[2] == 'n' & m[3] == 'v') { base = 0x5A800000; };
+                if (m[1] == 'n') { base = 0x5A800400; };
+                if (a6_ins(a, base `| (sf << 31) `| ((i64)o[1].num << 16) `| ((i64)c << 12) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ccmp\0") | a6_eq(m, ml, "ccmn\0"))
+            {
+                if (n != 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                c = a6_cc(a, 3);
+                if (c < 0 | o[2].k != A6K_IMM) { a6_fail(a, "bad operands\0"); -> 0; };
+                base = 0x7A400000;
+                if (m[2] == 'm' & m[3] == 'n') { base = 0x3A400000; };
+                sf = a6_sfof(@o[0]);
+                if (o[1].k == A6K_IMM) { base = base `| 0x800 `| ((o[1].imm `& 31) << 16); }
+                else { base = base `| ((i64)o[1].num << 16); };
+                if (a6_ins(a, base `| (sf << 31) `| ((i64)c << 12) `| ((i64)o[0].num << 5) `| (o[2].imm `& 15), 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_g_branch(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            int c;
+            i64 w;
+            i64 bit;
+            if (a6_eq(m, ml, "b\0") | a6_eq(m, ml, "bl\0"))
+            {
+                if (n != 1) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_br_imm(a, ml - 1, @o[0])) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "br\0") | a6_eq(m, ml, "blr\0") | a6_eq(m, ml, "ret\0"))
+            {
+                w = 0xD61F0000;
+                if (m[1] == 'l') { w = 0xD63F0000; };
+                if (m[0] == 'r') { w = 0xD65F0000; };
+                if (n == 0)
+                {
+                    if (m[0] != 'r') { a6_fail(a, "bad operands\0"); -> 0; };
+                    w = w `| (30 << 5);
+                }
+                else
+                {
+                    if (o[0].k != A6K_REG | o[0].cls != A6C_X) { a6_fail(a, "bad operands\0"); -> 0; };
+                    w = w `| ((i64)o[0].num << 5);
+                };
+                if (a6_ins(a, w, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "cbz\0") | a6_eq(m, ml, "cbnz\0"))
+            {
+                if (n != 2 | o[1].k != A6K_SYM) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x34000000 `| (a6_sfof(@o[0]) << 31) `| (i64)o[0].num;
+                if (ml == 4) { w = w `| 0x01000000; };
+                if (a6_ins(a, w, A6R_CONDBR19, o[1].sym, o[1].add)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "tbz\0") | a6_eq(m, ml, "tbnz\0"))
+            {
+                if (n != 3 | o[1].k != A6K_IMM | o[2].k != A6K_SYM) { a6_fail(a, "bad operands\0"); -> 0; };
+                bit = o[1].imm;
+                if (bit < 0 | bit > 63) { a6_fail(a, "bit out of range\0"); -> 0; };
+                w = 0x36000000 `| ((bit >> 5) << 31) `| ((bit `& 31) << 19) `| (i64)o[0].num;
+                if (ml == 4) { w = w `| 0x01000000; };
+                if (a6_ins(a, w, A6R_TSTBR14, o[2].sym, o[2].add)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "adr\0") | a6_eq(m, ml, "adrp\0"))
+            {
+                if (n != 2 | o[0].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (ml == 4)
+                {
+                    if (o[1].k == A6K_GOT) { if (a6_ins(a, 0x90000000 `| (i64)o[0].num, A6R_GOT_PG21, o[1].sym, o[1].add)) { -> 1; }; -> 0; };
+                    if (o[1].k != A6K_SYM) { a6_fail(a, "bad operands\0"); -> 0; };
+                    if (a6_ins(a, 0x90000000 `| (i64)o[0].num, A6R_ADR_PG21, o[1].sym, o[1].add)) { -> 1; };
+                    -> 0;
+                };
+                if (o[1].k != A6K_SYM) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_ins(a, 0x10000000 `| (i64)o[0].num, A6R_ADR_LO21, o[1].sym, o[1].add)) { -> 1; };
+                -> 0;
+            };
+            // conditional branches: b.eq and beq
+            c = -1;
+            if (ml >= 4 & m[0] == 'b' & m[1] == '.') { c = a6_cond(@m[2], ml - 2); }
+            elif (ml == 3 & m[0] == 'b') { c = a6_cond(@m[1], 2); };
+            if (c >= 0)
+            {
+                if (n != 1 | o[0].k != A6K_SYM) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_ins(a, 0x54000000 `| (i64)c, A6R_CONDBR19, o[0].sym, o[0].add)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_fptype(A6Op* o) -> i64
+        {
+            if (o.cls == A6C_D) { -> 1; };
+            if (o.cls == A6C_H) { -> 3; };
+            -> 0;
+        };
+
+        a6_g_fp(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            i64 w, ty, sf;
+            bool fp0, fp1;
+            if (n < 1 | o[0].k != A6K_REG) { -> -1; };
+            if (a6_eq(m, ml, "fmov\0"))
+            {
+                if (n != 2 | o[1].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                fp0 = o[0].cls == A6C_S | o[0].cls == A6C_D;
+                fp1 = o[1].cls == A6C_S | o[1].cls == A6C_D;
+                if (fp0 & fp1)
+                {
+                    if (a6_ins(a, 0x1E204000 `| (a6_fptype(@o[0]) << 22) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                    -> 0;
+                };
+                if (fp1 & !fp0)
+                {
+                    w = 0x1E260000;
+                    if (o[0].cls == A6C_X) { w = 0x9E660000; };
+                    if (a6_ins(a, w `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                    -> 0;
+                };
+                if (fp0 & !fp1)
+                {
+                    w = 0x1E270000;
+                    if (o[1].cls == A6C_X) { w = 0x9E670000; };
+                    if (a6_ins(a, w `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                    -> 0;
+                };
+                a6_fail(a, "bad operands\0");
+                -> 0;
+            };
+            w = -1;
+            if (a6_eq(m, ml, "fadd\0")) { w = 0x1E202800; }
+            elif (a6_eq(m, ml, "fsub\0")) { w = 0x1E203800; }
+            elif (a6_eq(m, ml, "fmul\0")) { w = 0x1E200800; }
+            elif (a6_eq(m, ml, "fdiv\0")) { w = 0x1E201800; }
+            elif (a6_eq(m, ml, "fmax\0")) { w = 0x1E204800; }
+            elif (a6_eq(m, ml, "fmin\0")) { w = 0x1E205800; }
+            elif (a6_eq(m, ml, "fnmul\0")) { w = 0x1E208800; };
+            if (w >= 0)
+            {
+                if (n != 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_ins(a, w `| (a6_fptype(@o[0]) << 22) `| ((i64)o[2].num << 16) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "fabs\0")) { w = 0x1E20C000; }
+            elif (a6_eq(m, ml, "fneg\0")) { w = 0x1E214000; }
+            elif (a6_eq(m, ml, "fsqrt\0")) { w = 0x1E21C000; }
+            elif (a6_eq(m, ml, "frintz\0")) { w = 0x1E25C000; }
+            elif (a6_eq(m, ml, "frintm\0")) { w = 0x1E254000; }
+            elif (a6_eq(m, ml, "frintp\0")) { w = 0x1E24C000; }
+            elif (a6_eq(m, ml, "frintn\0")) { w = 0x1E244000; }
+            elif (a6_eq(m, ml, "frinta\0")) { w = 0x1E264000; }
+            elif (a6_eq(m, ml, "frinti\0")) { w = 0x1E27C000; };
+            if (w >= 0)
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_ins(a, w `| (a6_fptype(@o[0]) << 22) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "fcvt\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (a6_ins(a, 0x1E224000 `| (a6_fptype(@o[1]) << 22) `| (a6_fptype(@o[0]) << 15) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "fcvtzs\0") | a6_eq(m, ml, "fcvtzu\0") | a6_eq(m, ml, "fcvtms\0") | a6_eq(m, ml, "fcvtps\0") | a6_eq(m, ml, "fcvtns\0") | a6_eq(m, ml, "fcvtas\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1E380000;
+                if (m[4] == 'z' & m[5] == 'u') { w = 0x1E390000; };
+                if (m[4] == 'm') { w = 0x1E300000; };
+                if (m[4] == 'p') { w = 0x1E280000; };
+                if (m[4] == 'n') { w = 0x1E200000; };
+                if (m[4] == 'a') { w = 0x1E240000; };
+                if (a6_ins(a, w `| (a6_sfof(@o[0]) << 31) `| (a6_fptype(@o[1]) << 22) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "scvtf\0") | a6_eq(m, ml, "ucvtf\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1E220000;
+                if (m[0] == 'u') { w = 0x1E230000; };
+                if (a6_ins(a, w `| (a6_sfof(@o[1]) << 31) `| (a6_fptype(@o[0]) << 22) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "fcmp\0") | a6_eq(m, ml, "fcmpe\0"))
+            {
+                if (n != 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1E202000;
+                if (ml == 5) { w = w `| 0x10; };
+                if (o[1].k == A6K_REG) { w = w `| ((i64)o[1].num << 16); }
+                else { w = w `| 8; };
+                if (a6_ins(a, w `| (a6_fptype(@o[0]) << 22) `| ((i64)o[0].num << 5), 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "fmadd\0") | a6_eq(m, ml, "fmsub\0"))
+            {
+                if (n != 4) { a6_fail(a, "bad operands\0"); -> 0; };
+                w = 0x1F000000;
+                if (m[2] == 's') { w = 0x1F008000; };
+                if (a6_ins(a, w `| (a6_fptype(@o[0]) << 22) `| ((i64)o[2].num << 16) `| ((i64)o[3].num << 10) `| ((i64)o[1].num << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        a6_barrier(byte* s, int n) -> int
+        {
+            if (a6_eq(s, n, "sy\0")) { -> 15; };
+            if (a6_eq(s, n, "st\0")) { -> 14; };
+            if (a6_eq(s, n, "ld\0")) { -> 13; };
+            if (a6_eq(s, n, "ish\0")) { -> 11; };
+            if (a6_eq(s, n, "ishst\0")) { -> 10; };
+            if (a6_eq(s, n, "ishld\0")) { -> 9; };
+            if (a6_eq(s, n, "nsh\0")) { -> 7; };
+            if (a6_eq(s, n, "nshst\0")) { -> 6; };
+            if (a6_eq(s, n, "nshld\0")) { -> 5; };
+            if (a6_eq(s, n, "osh\0")) { -> 3; };
+            if (a6_eq(s, n, "oshst\0")) { -> 2; };
+            if (a6_eq(s, n, "oshld\0")) { -> 1; };
+            -> -1;
+        };
+
+        a6_g_sys(A6* a, byte* m, int ml, A6Op* o, int n) -> int
+        {
+            i64 w = -1;
+            i64 sr;
+            int b;
+            if (a6_eq(m, ml, "nop\0")) { w = 0xD503201F; }
+            elif (a6_eq(m, ml, "yield\0")) { w = 0xD503203F; }
+            elif (a6_eq(m, ml, "wfe\0")) { w = 0xD503205F; }
+            elif (a6_eq(m, ml, "wfi\0")) { w = 0xD503207F; }
+            elif (a6_eq(m, ml, "sev\0")) { w = 0xD503209F; }
+            elif (a6_eq(m, ml, "sevl\0")) { w = 0xD50320BF; };
+            if (w >= 0)
+            {
+                if (a6_ins(a, w, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "svc\0") | a6_eq(m, ml, "brk\0") | a6_eq(m, ml, "hlt\0") | a6_eq(m, ml, "udf\0"))
+            {
+                if (n != 1 | o[0].k != A6K_IMM | o[0].imm < 0 | o[0].imm > 65535) { a6_fail(a, "bad immediate\0"); -> 0; };
+                w = 0xD4000001;
+                if (m[0] == 'b') { w = 0xD4200000; };
+                if (m[0] == 'h') { w = 0xD4400000; };
+                if (m[0] == 'u') { w = 0; };
+                if (a6_ins(a, w `| (o[0].imm << 5), 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "dmb\0") | a6_eq(m, ml, "dsb\0") | a6_eq(m, ml, "isb\0"))
+            {
+                b = 15;
+                if (n == 1)
+                {
+                    if (o[0].k == A6K_IMM) { b = (int)o[0].imm; }
+                    else { b = a6_barrier(@a.lp[a.ost[0]], a.oen[0] - a.ost[0]); };
+                    if (b < 0 | b > 15) { a6_fail(a, "bad barrier option\0"); -> 0; };
+                };
+                w = 0xD50330BF;
+                if (m[0] == 'd' & m[1] == 's') { w = 0xD503309F; };
+                if (m[0] == 'i') { w = 0xD50330DF; };
+                if (a6_ins(a, w `| ((i64)b << 8), 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "clrex\0"))
+            {
+                b = 15;
+                if (n == 1 & o[0].k == A6K_IMM) { b = (int)o[0].imm; };
+                if (a6_ins(a, 0xD503305F `| ((i64)b << 8), 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "mrs\0"))
+            {
+                if (n != 2 | o[0].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (!a6_sysreg(@a.lp[a.ost[1]], a.oen[1] - a.ost[1], @sr)) { a6_fail(a, "unknown system register\0"); -> 0; };
+                if (a6_ins(a, 0xD5300000 `| (sr << 5) `| (i64)o[0].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "msr\0"))
+            {
+                if (n != 2 | o[1].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (!a6_sysreg(@a.lp[a.ost[0]], a.oen[0] - a.ost[0], @sr)) { a6_fail(a, "unknown system register\0"); -> 0; };
+                if (a6_ins(a, 0xD5100000 `| (sr << 5) `| (i64)o[1].num, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "prfm\0"))
+            {
+                if (n != 2 | o[1].k != A6K_MEM) { a6_fail(a, "bad operands\0"); -> 0; };
+                b = a6_prfop(@a.lp[a.ost[0]], a.oen[0] - a.ost[0]);
+                if (b < 0) { a6_fail(a, "bad prefetch operation\0"); -> 0; };
+                if (o[1].mk == 3 | o[1].mk == 2) { a6_fail(a, "unsupported prefetch address\0"); -> 0; };
+                sr = 0;
+                if (o[1].mk == 1) { sr = o[1].imm; };
+                if (sr < 0 | sr % 8 != 0 | sr / 8 > 4095) { a6_fail(a, "offset out of range\0"); -> 0; };
+                if (a6_ins(a, 0xF9800000 `| ((sr / 8) << 10) `| ((i64)o[1].bnum << 5) `| (i64)b, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
+            if (a6_eq(m, ml, "ld1\0") | a6_eq(m, ml, "st1\0"))
+            {
+                A6Op* post = (A6Op*)0;
+                if (n < 2 | n > 3) { a6_fail(a, "bad operands\0"); -> 0; };
+                if (n == 3) { post = @o[2]; };
+                b = 0;
+                if (m[0] == 'l') { b = 1; };
+                if (a6_ld1(a, b, @o[0], @o[1], post)) { -> 1; };
+                -> 0;
+            };
+            -> -1;
+        };
+
+        // Encodes one instruction. m is the lowercase mnemonic of ml characters.
+        a6_encode(A6* a, byte* m, int ml, A6Op* o, int n) -> bool
+        {
+            int r;
+            r = a6_g_mem(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_mov(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_arith(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_branch(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_logic(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_bits(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_cond(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_arith2(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_fp(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_sync(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            r = a6_g_sys(a, m, ml, o, n);
+            if (r >= 0) { -> r == 1; };
+            -> a6_fail(a, "unknown instruction\0");
+        };
+
+        // ===== directives and lines =====
+
+        a6_sym_pos(A6* a, int si) -> i64 -> a.syms[si].val;
+
+        a6_define(A6* a, byte* name, int n) -> bool
+        {
+            int e = a6_sym_get(a, name, n);
+            A6Sym* s = @a.syms[e];
+            if (s.isdef) { -> a6_fail(a, "symbol is already defined\0"); };
+            if (s.comm) { -> a6_fail(a, "symbol is already defined\0"); };
+            s.isdef = true;
+            s.sec = a.cur;
+            s.val = a.secs[a.cur].len;
+            -> true;
+        };
+
+        // Parses the next string literal starting at s[i] == '"'. Appends the bytes to the section.
+        a6_string(A6* a, byte* s, int i, int n, bool zero) -> int
+        {
+            byte[1] one;
+            int c, v, k;
+            i++;
+            while (i < n & s[i] != '"')
+            {
+                c = (int)s[i];
+                if (c == 92 & i + 1 < n)
+                {
+                    i++;
+                    c = (int)s[i];
+                    if (c == 'n') { c = 10; }
+                    elif (c == 't') { c = 9; }
+                    elif (c == 'r') { c = 13; }
+                    elif (c == 'b') { c = 8; }
+                    elif (c == 'f') { c = 12; }
+                    elif (c == 'x')
+                    {
+                        v = 0;
+                        k = 0;
+                        while (k < 2 & i + 1 < n & ia_hexval((int)s[i + 1]) >= 0) { v = v * 16 + ia_hexval((int)s[i + 1]); i++; k++; };
+                        c = v;
+                    }
+                    elif (c >= '0' & c <= '7')
+                    {
+                        v = c - 48;
+                        k = 0;
+                        while (k < 2 & i + 1 < n & s[i + 1] >= '0' & s[i + 1] <= '7') { v = v * 8 + (int)s[i + 1] - 48; i++; k++; };
+                        c = v;
+                    };
+                };
+                one[0] = (byte)c;
+                a6_put_bytes(a, (byte*)one, 1);
+                i++;
+            };
+            if (i >= n) { a6_fail(a, "unterminated string\0"); -> n; };
+            if (zero) { one[0] = 0; a6_put_bytes(a, (byte*)one, 1); };
+            -> i + 1;
+        };
+
+        a6_syms_touch(A6* a, int si) -> void
+        {
+            a.syms[si].used = true;
+            ->;
+        };
+
+        a6_dir_data(A6* a, byte* s, int n, int size) -> bool
+        {
+            int[64] st;
+            int[64] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 64);
+            int i = 0;
+            int sa, sb, t;
+            i64 ad;
+            if (cnt < 0) { -> a6_fail(a, "too many values\0"); };
+            while (i < cnt)
+            {
+                if (!a6_expr(a, @s[st[i]], en[i] - st[i], @sa, @sb, @ad)) { -> a6_fail(a, "bad expression\0"); };
+                if (sa < 0 & sb < 0) { a6_put_le(a, ad, size); }
+                elif (sb < 0)
+                {
+                    if (size == 8) { t = A6R_ABS64; }
+                    elif (size == 4) { t = A6R_ABS32; }
+                    elif (size == 2) { t = A6R_ABS16; }
+                    else { -> a6_fail(a, "relocation does not fit\0"); };
+                    a6_fix_add(a, t, sa, -1, ad);
+                    a6_put_le(a, 0, size);
+                }
+                elif (sa >= 0)
+                {
+                    if (size == 8) { t = A6X_DIFF64; }
+                    elif (size == 4) { t = A6X_DIFF32; }
+                    elif (size == 2) { t = A6X_DIFF16; }
+                    else { t = A6X_DIFF8; };
+                    a6_fix_add(a, t, sa, sb, ad);
+                    a6_syms_touch(a, sb);
+                    a6_put_le(a, 0, size);
+                }
+                else { -> a6_fail(a, "bad expression\0"); };
+                i++;
+            };
+            -> true;
+        };
+
+        a6_dir_align(A6* a, byte* s, int n, int log2) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 4);
+            i64 al = 0;
+            i64 fill = -1;
+            i64 al2;
+            A6Sec* sec = @a.secs[a.cur];
+            i64 pad;
+            byte[1] one;
+            if (cnt < 1) { -> a6_fail(a, "bad alignment\0"); };
+            if (!a6_const(a, @s[st[0]], en[0] - st[0], @al)) { -> a6_fail(a, "bad alignment\0"); };
+            if (cnt >= 2 & en[1] > st[1])
+            {
+                if (!a6_const(a, @s[st[1]], en[1] - st[1], @fill)) { -> a6_fail(a, "bad fill\0"); };
+            };
+            if (log2 != 0)
+            {
+                if (al < 0 | al > 20) { -> a6_fail(a, "bad alignment\0"); };
+                al2 = (i64)1 << al;
+            }
+            else { al2 = al; };
+            if (al2 < 1) { -> a6_fail(a, "bad alignment\0"); };
+            if (al2 > (i64)sec.align) { sec.align = (int)al2; };
+            pad = (al2 - (sec.len % al2)) % al2;
+            if (pad == 0) { -> true; };
+            if (fill < 0 & (sec.flags `& 4) != 0)
+            {
+                while (pad >= 4 & sec.len % 4 == 0)
+                {
+                    a6_put_le(a, 0xD503201F, 4);
+                    pad = pad - 4;
+                };
+                fill = 0;
+            };
+            if (fill < 0) { fill = 0; };
+            one[0] = (byte)fill;
+            while (pad > 0) { a6_put_bytes(a, (byte*)one, 1); pad--; };
+            -> true;
+        };
+
+        a6_dir_section(A6* a, byte* s, int n) -> bool
+        {
+            int[8] st;
+            int[8] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 8);
+            byte[256] nm;
+            int ln, i, ty;
+            i64 fl = 0;
+            bool isdef = false;
+            int si;
+            if (cnt < 1) { -> a6_fail(a, "section name expected\0"); };
+            ln = en[0] - st[0];
+            if (ln > 250) { -> a6_fail(a, "section name too long\0"); };
+            i = 0;
+            while (i < ln) { nm[i] = s[st[0] + i]; i++; };
+            nm[ln] = 0;
+            si = a6_sec_find(a, (byte*)nm);
+            if (si >= 0) { a.cur = si; -> true; };
+            ty = 1;
+            // defaults by name
+            if (a6_eq((byte*)nm, 5, ".text\0") | (ln > 5 & nm[0] == '.' & nm[1] == 't' & nm[2] == 'e' & nm[3] == 'x' & nm[4] == 't' & nm[5] == '.')) { fl = 6; isdef = true; }
+            elif (a6_eq((byte*)nm, 5, ".data\0") | (ln > 5 & nm[0] == '.' & nm[1] == 'd' & nm[2] == 'a' & nm[3] == 't' & nm[4] == 'a' & nm[5] == '.')) { fl = 3; isdef = true; }
+            elif (a6_eq((byte*)nm, 4, ".bss\0") | (ln > 4 & nm[0] == '.' & nm[1] == 'b' & nm[2] == 's' & nm[3] == 's' & nm[4] == '.')) { fl = 3; ty = 8; isdef = true; }
+            elif (ln >= 7 & nm[0] == '.' & nm[1] == 'r' & nm[2] == 'o' & nm[3] == 'd' & nm[4] == 'a' & nm[5] == 't' & nm[6] == 'a') { fl = 2; isdef = true; };
+            if (cnt >= 2 & s[st[1]] == '"')
+            {
+                fl = 0;
+                i = st[1] + 1;
+                while (i < en[1] & s[i] != '"')
+                {
+                    if (s[i] == 'a') { fl = fl `| 2; }
+                    elif (s[i] == 'w') { fl = fl `| 1; }
+                    elif (s[i] == 'x') { fl = fl `| 4; }
+                    elif (s[i] == 'M') { fl = fl `| 16; }
+                    elif (s[i] == 'S') { fl = fl `| 32; }
+                    elif (s[i] == 'T') { fl = fl `| 1024; };
+                    i++;
+                };
+            };
+            if (cnt >= 3)
+            {
+                if (a6_eq(@s[st[2]], en[2] - st[2], "@nobits\0") | a6_eq(@s[st[2]], en[2] - st[2], "%nobits\0")) { ty = 8; }
+                elif (a6_eq(@s[st[2]], en[2] - st[2], "@note\0") | a6_eq(@s[st[2]], en[2] - st[2], "%note\0")) { ty = 7; }
+                elif (a6_eq(@s[st[2]], en[2] - st[2], "@init_array\0")) { ty = 14; }
+                elif (a6_eq(@s[st[2]], en[2] - st[2], "@fini_array\0")) { ty = 15; };
+            };
+            si = a6_sec_get(a, (byte*)nm, ty, fl);
+            if (cnt >= 4 & (fl `& 16) != 0)
+            {
+                i64 es;
+                if (a6_const(a, @s[st[3]], en[3] - st[3], @es)) { a.secs[si].entsize = es; };
+            };
+            a.cur = si;
+            -> a.ok;
+        };
+
+        a6_dir_type(A6* a, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 4);
+            int e, b;
+            int ln;
+            if (cnt != 2) { -> a6_fail(a, "bad .type\0"); };
+            e = a6_sym_get(a, @s[st[0]], en[0] - st[0]);
+            b = st[1];
+            if (s[b] == '@' | s[b] == '%') { b++; };
+            ln = en[1] - b;
+            if (a6_eq(@s[b], ln, "function\0")) { a.syms[e].type = 2; }
+            elif (a6_eq(@s[b], ln, "object\0")) { a.syms[e].type = 1; }
+            elif (a6_eq(@s[b], ln, "tls_object\0")) { a.syms[e].type = 6; }
+            elif (a6_eq(@s[b], ln, "notype\0")) { a.syms[e].type = 0; }
+            else { -> a6_fail(a, "unknown symbol type\0"); };
+            -> true;
+        };
+
+        a6_dir_size(A6* a, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 4);
+            int e, sa, sb;
+            i64 ad, v;
+            if (cnt != 2) { -> a6_fail(a, "bad .size\0"); };
+            e = a6_sym_get(a, @s[st[0]], en[0] - st[0]);
+            if (!a6_expr(a, @s[st[1]], en[1] - st[1], @sa, @sb, @ad)) { -> a6_fail(a, "bad expression\0"); };
+            v = ad;
+            if (sa >= 0)
+            {
+                if (!a.syms[sa].isdef) { -> a6_fail(a, "size expression is not constant\0"); };
+                v = v + a6_sym_pos(a, sa);
+            };
+            if (sb >= 0)
+            {
+                if (!a.syms[sb].isdef) { -> a6_fail(a, "size expression is not constant\0"); };
+                v = v - a6_sym_pos(a, sb);
+            };
+            a.syms[e].size = v;
+            -> true;
+        };
+
+        a6_dir_zero(A6* a, byte* s, int n) -> bool
+        {
+            int[2] st;
+            int[2] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 2);
+            i64 v, f;
+            byte[1] one;
+            i64 i = 0;
+            f = 0;
+            if (cnt < 1) { -> a6_fail(a, "bad size\0"); };
+            if (!a6_const(a, @s[st[0]], en[0] - st[0], @v)) { -> a6_fail(a, "bad size\0"); };
+            if (cnt == 2) { if (!a6_const(a, @s[st[1]], en[1] - st[1], @f)) { -> a6_fail(a, "bad fill\0"); }; };
+            if (f == 0) { a6_put_zero(a, v); -> true; };
+            one[0] = (byte)f;
+            while (i < v) { a6_put_bytes(a, (byte*)one, 1); i++; };
+            -> true;
+        };
+
+        a6_dir_comm(A6* a, byte* s, int n) -> bool
+        {
+            int[4] st;
+            int[4] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 4);
+            int e;
+            i64 sz, al;
+            if (cnt < 2) { -> a6_fail(a, "bad .comm\0"); };
+            e = a6_sym_get(a, @s[st[0]], en[0] - st[0]);
+            if (!a6_const(a, @s[st[1]], en[1] - st[1], @sz)) { -> a6_fail(a, "bad size\0"); };
+            al = 1;
+            if (cnt >= 3) { if (!a6_const(a, @s[st[2]], en[2] - st[2], @al)) { -> a6_fail(a, "bad alignment\0"); }; };
+            a.syms[e].comm = true;
+            a.syms[e].size = sz;
+            a.syms[e].calign = al;
+            a.syms[e].bind = 1;
+            -> true;
+        };
+
+        a6_dir_sym_attr(A6* a, byte* s, int n, int what) -> bool
+        {
+            int[16] st;
+            int[16] en;
+            int cnt = a6_split(s, n, (int*)st, (int*)en, 16);
+            int i = 0;
+            int e;
+            if (cnt < 1) { -> a6_fail(a, "symbol expected\0"); };
+            while (i < cnt)
+            {
+                e = a6_sym_get(a, @s[st[i]], en[i] - st[i]);
+                if (what == 0) { a.syms[e].bind = 1; }
+                elif (what == 1) { a.syms[e].bind = 2; }
+                elif (what == 2) { a.syms[e].bind = 0; }
+                elif (what == 3) { a.syms[e].other = 2; }
+                elif (what == 4) { a.syms[e].other = 3; }
+                else { a.syms[e].other = 1; };
+                a.syms[e].used = true;
+                i++;
+            };
+            -> true;
+        };
+
+        a6_directive(A6* a, byte* s, int n) -> bool
+        {
+            int i = 0;
+            int j;
+            byte* d;
+            int dl;
+            int sz;
+            i64 w;
+            while (i < n & !a6_isspace((int)s[i])) { i++; };
+            d = s;
+            dl = i;
+            j = a6_skip(s, i, n);
+            s = @s[j];
+            n = n - j;
+            if (a6_eq(d, dl, ".text\0")) { a.cur = 0; -> true; };
+            if (a6_eq(d, dl, ".data\0")) { a.cur = 1; -> true; };
+            if (a6_eq(d, dl, ".bss\0")) { a.cur = 2; -> true; };
+            if (a6_eq(d, dl, ".section\0")) { -> a6_dir_section(a, s, n); };
+            if (a6_eq(d, dl, ".globl\0") | a6_eq(d, dl, ".global\0")) { -> a6_dir_sym_attr(a, s, n, 0); };
+            if (a6_eq(d, dl, ".weak\0")) { -> a6_dir_sym_attr(a, s, n, 1); };
+            if (a6_eq(d, dl, ".local\0")) { -> a6_dir_sym_attr(a, s, n, 2); };
+            if (a6_eq(d, dl, ".hidden\0")) { -> a6_dir_sym_attr(a, s, n, 3); };
+            if (a6_eq(d, dl, ".protected\0")) { -> a6_dir_sym_attr(a, s, n, 4); };
+            if (a6_eq(d, dl, ".internal\0")) { -> a6_dir_sym_attr(a, s, n, 5); };
+            if (a6_eq(d, dl, ".type\0")) { -> a6_dir_type(a, s, n); };
+            if (a6_eq(d, dl, ".size\0")) { -> a6_dir_size(a, s, n); };
+            if (a6_eq(d, dl, ".p2align\0") | a6_eq(d, dl, ".align\0")) { -> a6_dir_align(a, s, n, 1); };
+            if (a6_eq(d, dl, ".balign\0")) { -> a6_dir_align(a, s, n, 0); };
+            if (a6_eq(d, dl, ".byte\0")) { -> a6_dir_data(a, s, n, 1); };
+            if (a6_eq(d, dl, ".hword\0") | a6_eq(d, dl, ".short\0") | a6_eq(d, dl, ".2byte\0")) { -> a6_dir_data(a, s, n, 2); };
+            if (a6_eq(d, dl, ".word\0") | a6_eq(d, dl, ".long\0") | a6_eq(d, dl, ".int\0") | a6_eq(d, dl, ".4byte\0")) { -> a6_dir_data(a, s, n, 4); };
+            if (a6_eq(d, dl, ".quad\0") | a6_eq(d, dl, ".xword\0") | a6_eq(d, dl, ".dword\0") | a6_eq(d, dl, ".8byte\0")) { -> a6_dir_data(a, s, n, 8); };
+            if (a6_eq(d, dl, ".zero\0") | a6_eq(d, dl, ".space\0") | a6_eq(d, dl, ".skip\0")) { -> a6_dir_zero(a, s, n); };
+            if (a6_eq(d, dl, ".comm\0")) { -> a6_dir_comm(a, s, n); };
+            if (a6_eq(d, dl, ".inst\0"))
+            {
+                if (!a6_const(a, s, n, @w)) { -> a6_fail(a, "bad .inst\0"); };
+                a6_put_le(a, w, 4);
+                -> true;
+            };
+            if (a6_eq(d, dl, ".ascii\0") | a6_eq(d, dl, ".asciz\0") | a6_eq(d, dl, ".string\0"))
+            {
+                i = 0;
+                while (i < n)
+                {
+                    i = a6_skip(s, i, n);
+                    if (i >= n) { break; };
+                    if (s[i] != '"') { -> a6_fail(a, "string expected\0"); };
+                    i = a6_string(a, s, i, n, !a6_eq(d, dl, ".ascii\0"));
+                    if (!a.ok) { -> false; };
+                    i = a6_skip(s, i, n);
+                    if (i < n & s[i] == ',') { i++; };
+                };
+                -> true;
+            };
+            if (a6_eq(d, dl, ".file\0"))
+            {
+                // the file name becomes the STT_FILE symbol
+                i = a6_skip(s, 0, n);
+                if (i < n & s[i] == '"')
+                {
+                    j = 0;
+                    i++;
+                    while (i < n & s[i] != '"' & j < 500) { a.file[j] = s[i]; j++; i++; };
+                    a.file[j] = 0;
+                };
+                -> true;
+            };
+            if (a6_eq(d, dl, ".ident\0") | a6_eq(d, dl, ".loc\0") | a6_eq(d, dl, ".arch\0") | a6_eq(d, dl, ".cpu\0") | a6_eq(d, dl, ".ltorg\0") | a6_eq(d, dl, ".pool\0") | a6_eq(d, dl, ".addrsig\0") | a6_eq(d, dl, ".addrsig_sym\0") | a6_eq(d, dl, ".subsections_via_symbols\0")) { -> true; };
+            if (dl > 5 & d[0] == '.' & d[1] == 'c' & d[2] == 'f' & d[3] == 'i' & d[4] == '_') { -> true; };
+            -> a6_fail(a, "unknown directive\0");
+        };
+
+        // One source line
+        a6_line(A6* a, byte* line, int n) -> bool
+        {
+            int i = 0;
+            int j, k, c;
+            bool inq = false;
+            byte[40] mn;
+            int ml;
+            A6Op[8] ops;
+            int[8] st;
+            int[8] en;
+            int cnt;
+            int base;
+            // comments
+            while (i < n)
+            {
+                c = (int)line[i];
+                if (c == '"') { inq = !inq; };
+                if (!inq & c == '/' & i + 1 < n & line[i + 1] == '/') { n = i; break; };
+                i++;
+            };
+            while (n > 0 & a6_isspace((int)line[n - 1])) { n--; };
+            i = a6_skip(line, 0, n);
+            if (i >= n) { -> true; };
+            if (line[i] == '#') { -> true; };
+            // labels
+            while (i < n)
+            {
+                j = i;
+                if (line[j] == '"')
+                {
+                    j++;
+                    while (j < n & line[j] != '"') { j++; };
+                    if (j < n) { j++; };
+                }
+                else
+                {
+                    while (j < n & a6_isid((int)line[j])) { j++; };
+                };
+                if (j > i & j < n & line[j] == ':')
+                {
+                    if (!a6_define(a, @line[i], j - i)) { -> false; };
+                    i = a6_skip(line, j + 1, n);
+                }
+                else { break; };
+            };
+            if (i >= n) { -> true; };
+            if (line[i] == '.') { -> a6_directive(a, @line[i], n - i); };
+            // instruction
+            j = i;
+            while (j < n & !a6_isspace((int)line[j])) { j++; };
+            ml = j - i;
+            if (ml > 30) { -> a6_fail(a, "unknown instruction\0"); };
+            k = 0;
+            while (k < ml) { mn[k] = (byte)a6_lower((int)line[i + k]); k++; };
+            mn[ml] = 0;
+            base = a6_skip(line, j, n);
+            cnt = a6_split(@line[base], n - base, (int*)st, (int*)en, 8);
+            if (cnt < 0) { -> a6_fail(a, "too many operands\0"); };
+            a.lp = line;
+            k = 0;
+            while (k < 8) { a6_op_clear(@ops[k]); k++; };
+            k = 0;
+            while (k < cnt)
+            {
+                a.ost[k] = base + st[k];
+                a.oen[k] = base + en[k];
+                if (!a6_operand(a, @line[base + st[k]], en[k] - st[k], @ops[k])) { -> a6_fail(a, "bad operand\0"); };
+                k++;
+            };
+            if (!a.ok) { -> false; };
+            -> a6_encode(a, (byte*)mn, ml, (A6Op*)ops, cnt);
+        };
+
+        // ===== resolution =====
+
+        a6_get32(A6Sec* s, i64 off) -> i64
+        {
+            i64 v = 0;
+            int k = 0;
+            while (k < 4) { v = v `| ((i64)s.d.m[(int)off + k] << (8 * k)); k++; };
+            -> v;
+        };
+
+        a6_set_le(A6Sec* s, i64 off, i64 v, int size) -> void
+        {
+            int k = 0;
+            while (k < size) { s.d.m[(int)off + k] = (byte)((v >> (8 * k)) `& 255); k++; };
+            ->;
+        };
+
+        a6_pcrel(int type) -> bool
+        {
+            -> type == A6R_CALL26 | type == A6R_JUMP26 | type == A6R_CONDBR19 | type == A6R_TSTBR14 | type == A6R_LD_LO19 | type == A6R_ADR_LO21 | type == A6R_PREL32 | type == A6R_PREL64 | type == A6R_PREL16;
+        };
+
+        // Patches a PC relative field with the byte distance v
+        a6_apply(A6* a, A6Sec* s, i64 off, int type, i64 v) -> bool
+        {
+            i64 w;
+            if (type == A6R_CALL26 | type == A6R_JUMP26)
+            {
+                if (v % 4 != 0 | v < 0 - 134217728 | v >= 134217728) { -> a6_fail(a, "branch target out of range\0"); };
+                w = a6_get32(s, off) `| ((v >> 2) `& 0x3FFFFFF);
+            }
+            elif (type == A6R_CONDBR19 | type == A6R_LD_LO19)
+            {
+                if (v % 4 != 0 | v < 0 - 1048576 | v >= 1048576) { -> a6_fail(a, "branch target out of range\0"); };
+                w = a6_get32(s, off) `| (((v >> 2) `& 0x7FFFF) << 5);
+            }
+            elif (type == A6R_TSTBR14)
+            {
+                if (v % 4 != 0 | v < 0 - 32768 | v >= 32768) { -> a6_fail(a, "branch target out of range\0"); };
+                w = a6_get32(s, off) `| (((v >> 2) `& 0x3FFF) << 5);
+            }
+            elif (type == A6R_ADR_LO21)
+            {
+                if (v < 0 - 1048576 | v >= 1048576) { -> a6_fail(a, "address out of range\0"); };
+                w = a6_get32(s, off) `| ((v `& 3) << 29) `| (((v >> 2) `& 0x7FFFF) << 5);
+            }
+            else { -> a6_fail(a, "cannot resolve relocation\0"); };
+            a6_set_le(s, off, w, 4);
+            -> true;
+        };
+
+        a6_finish(A6* a) -> bool
+        {
+            int i = 0;
+            A6Fix* f;
+            A6Sec* s;
+            A6Sym* y;
+            A6Sym* y2;
+            i64 v, pb;
+            int rs;
+            i64 ra;
+            while (i < a.nfx)
+            {
+                f = @a.fx[i];
+                s = @a.secs[f.sec];
+                a.line = f.line;
+                y = @a.syms[f.sym];
+                if (f.type >= A6X_DIFF8)
+                {
+                    y2 = @a.syms[f.sym2];
+                    if (!y.isdef | !y2.isdef) { -> a6_fail(a, "difference of undefined symbols\0"); };
+                    if (y.sec == y2.sec)
+                    {
+                        v = y.val - y2.val + f.add;
+                        if (f.type == A6X_DIFF8) { a6_set_le(s, f.off, v, 1); }
+                        elif (f.type == A6X_DIFF16) { a6_set_le(s, f.off, v, 2); }
+                        elif (f.type == A6X_DIFF32) { a6_set_le(s, f.off, v, 4); }
+                        else { a6_set_le(s, f.off, v, 8); };
+                    }
+                    elif (y2.sec == f.sec & f.type == A6X_DIFF32)
+                    {
+                        // symbol minus a label of this section: a PC relative value
+                        pb = y2.val;
+                        if (y.temp) { a6_rel_add(s, f.off, A6R_PREL32, 0 - (y.sec + 1), y.val + f.add + f.off - pb); }
+                        else { a6_rel_add(s, f.off, A6R_PREL32, f.sym, f.add + f.off - pb); };
+                    }
+                    else { -> a6_fail(a, "difference across sections\0"); };
+                    i++;
+                    continue;
+                };
+                if (!y.isdef & y.temp) { -> a6_fail(a, "undefined local label\0"); };
+                if (a6_pcrel(f.type) & y.isdef & y.sec == f.sec & y.bind == 0)
+                {
+                    if (!a6_apply(a, s, f.off, f.type, y.val + f.add - f.off)) { -> false; };
+                    i++;
+                    continue;
+                };
+                if (y.temp)
+                {
+                    rs = 0 - (y.sec + 1);
+                    ra = y.val + f.add;
+                }
+                else
+                {
+                    rs = f.sym;
+                    ra = f.add;
+                };
+                a6_rel_add(s, f.off, f.type, rs, ra);
+                i++;
+            };
+            -> a.ok;
+        };
+
+        // ===== ELF writer =====
+
+        a6_strtab_add(ElfBuf* t, byte* name) -> int
+        {
+            int off = t.len;
+            eb_put_n(t, name, ia_strlen(name));
+            eb_put8(t, 0);
+            -> off;
+        };
+
+        a6_sym_listed(A6Sym* y) -> bool
+        {
+            if (y.temp) { -> false; };
+            if (y.name[0] == 0) { -> false; };
+            if (y.comm) { -> true; };
+            if (y.isdef) { -> true; };
+            if (y.used | y.bind != 0) { -> true; };
+            -> false;
+        };
+
+        a6_image(A6* a, ElfBuf* o) -> bool
+        {
+            ElfBuf str, shs, sym;
+            int i, k, nrela, nuser, symtab, strtab, shstr, nlocal, ns, nsh, sbase, symidx, symnm, strnm, shsnm, bnd;
+            int* sec_name;
+            int* rela_name;
+            int* rela_sec;
+            i64* sec_off;
+            i64* rela_off;
+            i64 symoff, stroff, shsoff, shoff;
+            int symshndx;
+            A6Sym* y;
+            A6Rel* r;
+            int ei;
+            i64 info;
+            if (!a6_finish(a)) { -> false; };
+            nuser = a.nsec;
+            nrela = 0;
+            i = 0;
+            while (i < nuser) { if (a.secs[i].nrel > 0) { nrela++; }; i++; };
+            sec_name = (int*)fmalloc(4 * (nuser + 2));
+            rela_name = (int*)fmalloc(4 * (nuser + 2));
+            rela_sec = (int*)fmalloc(4 * (nuser + 2));
+            sec_off = (i64*)fmalloc(8 * (nuser + 2));
+            rela_off = (i64*)fmalloc(8 * (nuser + 2));
+            eb_init(@str);
+            eb_init(@shs);
+            eb_init(@sym);
+            eb_put8(@str, 0);
+            eb_put8(@shs, 0);
+            // section indices
+            i = 0;
+            k = 0;
+            while (i < nuser)
+            {
+                a.secs[i].eidx = i + 1;
+                a.secs[i].ridx = 0;
+                if (a.secs[i].nrel > 0)
+                {
+                    a.secs[i].ridx = 1 + nuser + k;
+                    rela_sec[k] = i;
+                    k++;
+                };
+                i++;
+            };
+            symtab = 1 + nuser + nrela;
+            strtab = symtab + 1;
+            shstr = symtab + 2;
+            nsh = shstr + 1;
+            // symbol numbering: null, file, section symbols, locals, then globals
+            ei = 1;
+            if (a.file[0] != 0) { ei = 2; };
+            ei = ei + nuser;
+            i = 0;
+            while (i < a.nsyms)
+            {
+                y = @a.syms[i];
+                y.eidx = 0;
+                if (a6_sym_listed(y) & y.bind == 0 & y.isdef & !y.comm) { y.eidx = ei; ei++; };
+                i++;
+            };
+            nlocal = ei;
+            i = 0;
+            while (i < a.nsyms)
+            {
+                y = @a.syms[i];
+                if (a6_sym_listed(y) & y.eidx == 0) { y.eidx = ei; ei++; };
+                i++;
+            };
+            ns = ei;
+            // symbol table
+            k = 0;
+            while (k < 24) { eb_put8(@sym, 0); k++; };
+            if (a.file[0] != 0)
+            {
+                eb_put32(@sym, a6_strtab_add(@str, (byte*)a.file));
+                eb_put8(@sym, 4);
+                eb_put8(@sym, 0);
+                eb_put16(@sym, 0xFFF1);
+                eb_put64(@sym, 0);
+                eb_put64(@sym, 0);
+            };
+            i = 0;
+            while (i < nuser)
+            {
+                eb_put32(@sym, 0);
+                eb_put8(@sym, 3);
+                eb_put8(@sym, 0);
+                eb_put16(@sym, i + 1);
+                eb_put64(@sym, 0);
+                eb_put64(@sym, 0);
+                i++;
+            };
+            k = 0;
+            while (k < 2)
+            {
+                i = 0;
+                while (i < a.nsyms)
+                {
+                    y = @a.syms[i];
+                    if (y.eidx != 0 & ((k == 0 & y.eidx < nlocal) | (k == 1 & y.eidx >= nlocal)))
+                    {
+                        eb_put32(@sym, a6_strtab_add(@str, y.name));
+                        bnd = y.bind;
+                        if (!y.isdef & !y.comm) { bnd = 1; };
+                        eb_put8(@sym, (bnd << 4) `| y.type);
+                        eb_put8(@sym, y.other);
+                        if (y.comm) { symshndx = 0xFFF2; }
+                        elif (y.isdef) { symshndx = y.sec + 1; }
+                        else { symshndx = 0; };
+                        eb_put16(@sym, symshndx);
+                        if (y.comm) { eb_put64(@sym, y.calign); }
+                        else { eb_put64(@sym, y.val); };
+                        eb_put64(@sym, y.size);
+                    };
+                    i++;
+                };
+                k++;
+            };
+            // image: header, section data, relocations, tables, section headers
+            eb_init(o);
+            k = 0;
+            while (k < 64) { eb_put8(o, 0); k++; };
+            i = 0;
+            while (i < nuser)
+            {
+                if (a.secs[i].align > 1) { eb_align(o, a.secs[i].align); };
+                sec_off[i] = o.len;
+                if (!a.secs[i].nobits) { eb_put_n(o, a.secs[i].d.m, a.secs[i].d.len); };
+                i++;
+            };
+            sbase = 1;
+            if (a.file[0] != 0) { sbase = 2; };
+            k = 0;
+            while (k < nrela)
+            {
+                eb_align(o, 8);
+                rela_off[k] = o.len;
+                i = rela_sec[k];
+                r = a.secs[i].rel;
+                ei = 0;
+                while (ei < a.secs[i].nrel)
+                {
+                    eb_put64(o, r[ei].off);
+                    if (r[ei].sym < 0) { symidx = sbase + (0 - r[ei].sym - 1); }
+                    else { symidx = a.syms[r[ei].sym].eidx; };
+                    info = ((i64)symidx << 32) `| (i64)r[ei].type;
+                    eb_put64(o, info);
+                    eb_put64(o, r[ei].add);
+                    ei++;
+                };
+                k++;
+            };
+            eb_align(o, 8);
+            symoff = o.len;
+            eb_put_n(o, sym.m, sym.len);
+            stroff = o.len;
+            eb_put_n(o, str.m, str.len);
+            // section name table
+            i = 0;
+            while (i < nuser)
+            {
+                sec_name[i] = a6_strtab_add(@shs, a.secs[i].name);
+                i++;
+            };
+            k = 0;
+            while (k < nrela)
+            {
+                i = rela_sec[k];
+                rela_name[k] = a6_strtab_add(@shs, ia_cat2(".rela\0", a.secs[i].name));
+                k++;
+            };
+            symnm = a6_strtab_add(@shs, ".symtab\0");
+            strnm = a6_strtab_add(@shs, ".strtab\0");
+            shsnm = a6_strtab_add(@shs, ".shstrtab\0");
+            shsoff = o.len;
+            eb_put_n(o, shs.m, shs.len);
+            eb_align(o, 8);
+            shoff = o.len;
+            // null section header
+            k = 0;
+            while (k < 64) { eb_put8(o, 0); k++; };
+            i = 0;
+            while (i < nuser)
+            {
+                eb_put32(o, sec_name[i]);
+                eb_put32(o, a.secs[i].stype);
+                eb_put64(o, a.secs[i].flags);
+                eb_put64(o, 0);
+                eb_put64(o, sec_off[i]);
+                eb_put64(o, a.secs[i].len);
+                eb_put32(o, 0);
+                eb_put32(o, 0);
+                eb_put64(o, a.secs[i].align);
+                eb_put64(o, a.secs[i].entsize);
+                i++;
+            };
+            k = 0;
+            while (k < nrela)
+            {
+                i = rela_sec[k];
+                eb_put32(o, rela_name[k]);
+                eb_put32(o, 4);
+                eb_put64(o, 64);
+                eb_put64(o, 0);
+                eb_put64(o, rela_off[k]);
+                eb_put64(o, (i64)a.secs[i].nrel * 24);
+                eb_put32(o, symtab);
+                eb_put32(o, i + 1);
+                eb_put64(o, 8);
+                eb_put64(o, 24);
+                k++;
+            };
+            // .symtab
+            eb_put32(o, symnm);
+            eb_put32(o, 2);
+            eb_put64(o, 0);
+            eb_put64(o, 0);
+            eb_put64(o, symoff);
+            eb_put64(o, sym.len);
+            eb_put32(o, strtab);
+            eb_put32(o, nlocal);
+            eb_put64(o, 8);
+            eb_put64(o, 24);
+            // .strtab
+            eb_put32(o, strnm);
+            eb_put32(o, 3);
+            eb_put64(o, 0);
+            eb_put64(o, 0);
+            eb_put64(o, stroff);
+            eb_put64(o, str.len);
+            eb_put32(o, 0);
+            eb_put32(o, 0);
+            eb_put64(o, 1);
+            eb_put64(o, 0);
+            // .shstrtab
+            eb_put32(o, shsnm);
+            eb_put32(o, 3);
+            eb_put64(o, 0);
+            eb_put64(o, 0);
+            eb_put64(o, shsoff);
+            eb_put64(o, shs.len);
+            eb_put32(o, 0);
+            eb_put32(o, 0);
+            eb_put64(o, 1);
+            eb_put64(o, 0);
+            // file header
+            eb_patch(o, 0, 0x464C457F, 4);
+            eb_patch(o, 4, 2, 1);
+            eb_patch(o, 5, 1, 1);
+            eb_patch(o, 6, 1, 1);
+            eb_patch(o, 16, 1, 2);
+            eb_patch(o, 18, 183, 2);
+            eb_patch(o, 20, 1, 4);
+            eb_patch(o, 40, shoff, 8);
+            eb_patch(o, 52, 64, 2);
+            eb_patch(o, 58, 64, 2);
+            eb_patch(o, 60, nsh, 2);
+            eb_patch(o, 62, shstr, 2);
+            ffree((byte*)sec_name);
+            ffree((byte*)rela_name);
+            ffree((byte*)rela_sec);
+            ffree((byte*)sec_off);
+            ffree((byte*)rela_off);
+            ffree(str.m);
+            ffree(shs.m);
+            ffree(sym.m);
+            -> o.ok;
+        };
+
+        a6_new() -> A6*
+        {
+            A6* z = (A6*)0;
+            A6* a = (A6*)fmalloc((u64)@z[1]);
+            int i = 0;
+            a.nsec = 0;
+            a.cur = 0;
+            a.syms = (A6Sym*)0;
+            a.nsyms = 0;
+            a.scap = 0;
+            a.fx = (A6Fix*)0;
+            a.nfx = 0;
+            a.fxcap = 0;
+            a.err = (byte*)0;
+            a.line = 0;
+            a.anon = 0;
+            a.ok = true;
+            a.file[0] = 0;
+            a.lcap = 1048576;
+            a.lbuf = (byte*)fmalloc((u64)a.lcap);
+            a.hcap = 4096;
+            a.shash = (int*)fmalloc((u64)(4 * a.hcap));
+            while (i < a.hcap) { a.shash[i] = 0; i++; };
+            // llvm-mc order: .text, .data, .bss
+            a6_sec_get(a, ".text\0", 1, 6);
+            a6_sec_get(a, ".data\0", 1, 3);
+            a6_sec_get(a, ".bss\0", 8, 3);
+            a.secs[0].align = 4;
+            a.secs[1].align = 1;
+            a.secs[2].align = 1;
+            -> a;
+        };
+
+        // Assembles len bytes of text. Returns false with a.err and a.line set on the first error.
+        a6_assemble(A6* a, byte* text, int len) -> bool
+        {
+            int i = 0;
+            int j, n;
+            while (i < len)
+            {
+                j = i;
+                while (j < len & text[j] != 10) { j++; };
+                n = j - i;
+                a.line++;
+                if (n >= a.lcap) { -> a6_fail(a, "line too long\0"); };
+                {
+                    int k = 0;
+                    while (k < n) { a.lbuf[k] = text[i + k]; k++; };
+                    a.lbuf[n] = 0;
+                };
+                if (!a6_line(a, a.lbuf, n)) { if (a.ok) { a6_fail(a, "assembly failed\0"); }; -> false; };
+                i = j + 1;
+            };
+            -> a.ok;
+        };
+
+        a6_write_elf(A6* a, byte* path) -> bool
+        {
+            ElfBuf o;
+            void* f;
+            int wrote;
+            if (!a6_image(a, @o)) { if (a.ok) { a6_fail(a, "cannot build the object\0"); }; -> false; };
+            f = fopen(path, g"wb\0");
+            if (f == (void*)0) { a6_fail(a, "cannot open the output file\0"); -> false; };
+            wrote = fwrite(o.m, 1, o.len, f);
+            fclose(f);
+            if (wrote != o.len) { a6_fail(a, "short write\0"); -> false; };
+            -> true;
+        };
+    };
+};
+
+#endif;
