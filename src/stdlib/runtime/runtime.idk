@@ -224,10 +224,10 @@ def !!exit(int code) -> void
 #ifdef __ARCH_ARM64__
     volatile asm
     {
-        mov w0, $0
+        mov x0, $0
         mov x8, #94
         svc #0
-    } : : "r"(code) : "x0", "x8", "memory";
+    } : : "r"((i64)code) : "x0", "x8", "memory";
 #endif;
     noreturn;
 };
