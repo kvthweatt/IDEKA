@@ -222,12 +222,13 @@ def !!exit(int code) -> void
     } : : "r"(code) : "edi", "rax", "rcx", "r11", "memory";
 #endif;
 #ifdef __ARCH_ARM64__
+    i64 status = (i64)code;
     volatile asm
     {
         mov x0, $0
         mov x8, #94
         svc #0
-    } : : "r"((i64)code) : "x0", "x8", "memory";
+    } : : "r"(status) : "x0", "x8", "memory";
 #endif;
     noreturn;
 };
