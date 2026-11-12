@@ -89,6 +89,15 @@ module IDEKA_Compiler_Entrypoint
         ->;
     };
 
+    // Source -> build/<stem>/<stem>.ll -> (opt) -> llc -> object -> linked executable, as ic.py does
+    // Set once a module's '#[test] = { #[expect_build_fail] }' is known: a failing build is then the expected result
+    bool BUILD_EXPECT_FAIL;
+    // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
+    bool ASM_ONLY;
+    int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
+    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled with iasm and linked with ilink
+    bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
+
     // True when the null terminated argument a is exactly lit[0..n)
     arg_eq(byte* a, byte* lit, int n) -> bool
     {
@@ -905,15 +914,6 @@ module IDEKA_Compiler_Entrypoint
         ffree(txt);
         ->;
     };
-
-    // Source -> build/<stem>/<stem>.ll -> (opt) -> llc -> object -> linked executable, as ic.py does
-    // Set once a module's '#[test] = { #[expect_build_fail] }' is known: a failing build is then the expected result
-    bool BUILD_EXPECT_FAIL;
-    // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
-    bool ASM_ONLY;
-    int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
-    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled with iasm and linked with ilink
-    bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
 
     // Assembles the x86_64 text the x64 backend emitted into an ELF or COFF object with iasm
     iasm_object(byte* text, int len, byte* dst) -> bool
