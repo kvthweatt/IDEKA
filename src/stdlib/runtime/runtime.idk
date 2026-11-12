@@ -607,6 +607,12 @@ def !!FRTStartup() -> int
     argc  = (int)*pargc;
     argv  = (byte**)(FRT_ENTRY_SP + 8);
 #endif;
+#ifdef __ARCH_ARM64__
+    // Same layout on AArch64: argc at the entry sp, the argv pointers after it.
+    pargc = (i64*)FRT_ENTRY_SP;
+    argc  = (int)*pargc;
+    argv  = (byte**)(FRT_ENTRY_SP + 8);
+#endif;
 
     if (argc > 1)
     {
