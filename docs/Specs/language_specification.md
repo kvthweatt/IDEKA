@@ -2805,9 +2805,9 @@ def main() -> int
     return 0;
 };
 ```
-Turns into:
+`foo()` turns into:
 ```
-def foo(int x) -> int : NonZero
+def foo(int x) -> int
 {
     assert(x > 0, "x must be positive");
     x = x / 2;

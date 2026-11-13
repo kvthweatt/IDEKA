@@ -4682,7 +4682,7 @@
                 SI* ph; SI* cm; SI* cb; SI* x; SI* ad; SI* pt; SI* ivp; SI* u; SI* kph; SI* ivph;
                 SI** rph; SI** radd;
                 GB* bb; GB* pr; GB* p0; GB* p1;
-                IRValue* iv; IRValue* nx; IRValue* n; IRValue* s0; IRValue* zero; IRValue* c1; IRValue* v; IRValue* lt;
+                IRValue* iv; IRValue* nx; IRValue* n; IRValue* s0; IRValue* zero; IRValue* az; IRValue* c1; IRValue* v; IRValue* lt;
                 IRValue* diff; IRValue* rem; IRValue* k0; IRValue* knz; IRValue* ivn; IRValue* k1; IRValue* t1; IRValue* t2;
                 IRValue* tot; IRValue* nr; IRValue* ivt; IRValue* four;
                 IRValue** nacc;
@@ -4879,9 +4879,11 @@
                     k = 1;
                     if (rph[i].blks[0] == bb.ib) { k = 0; };
                     v = this.s_res(rph[i].args[1 - k]);
-                    aph[i * 4] = this.s_uphi(iv.ty, v, pr.ib, ub);
+                    // a sum has the type of the accumulator, which need not be the type of the index
+                    az = this.s_kint(rph[i].res.ty, (u64)0);
+                    aph[i * 4] = this.s_uphi(rph[i].res.ty, v, pr.ib, ub);
                     j = 1;
-                    while (j < 4) { aph[i * 4 + j] = this.s_uphi(iv.ty, zero, pr.ib, ub); j++; };
+                    while (j < 4) { aph[i * 4 + j] = this.s_uphi(rph[i].res.ty, az, pr.ib, ub); j++; };
                     i++;
                 };
                 knz = this.s_ucmp(SP_NE, kph.res, zero, cm.res.ty);

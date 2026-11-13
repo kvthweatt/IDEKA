@@ -210,6 +210,8 @@ object A64Module
 
             // state of the AArch64 backend
             int gfn;
+            AI* sm_st;         // set by s_stel: the store of the constant store found
+            i64 sm_val;        // its value
             int bf_sh, bf_w;   // set by the address computation: bit shift and width of a bit packed member, 0 width when none
             byte* arp;         // arena of the machine instructions of one function
             int aru;
@@ -442,6 +444,7 @@ object A64Module
                         ok = this.s_isel();
                     };
                     if (ok) { ok = this.s_edges(); };
+                    if (ok) { this.s_stmerge(); };
                     if (ok) { ok = this.s_ra(); };
                     if (ok)
                     {
@@ -1302,6 +1305,7 @@ object A64Module
             s_isel_store(SI* x) -> void
             {
                 IRType* t = x.ty;
+                AI* a;
                 AM* m;
                 int sz, r;
                 if (this.s_isagg(t))
@@ -1337,7 +1341,8 @@ object A64Module
                     this.s_bf_write(m, this.bf_sh, this.bf_w, r);
                     ->;
                 };
-                this.s_memop(A_ST, r, sz, m);
+                a = this.s_memop(A_ST, r, sz, m);
+                if (x.vol) { a.cc = 1; };
                 ->;
             };
 
@@ -3722,6 +3727,207 @@ object A64Module
                 ->;
             };
 
+            // ----------------------------------------------------------
+            // Merging of stores of constants
+            // ----------------------------------------------------------
+
+            // Looks at instruction j of v: a store of a constant that has no other users, written as a move of the
+            // constant and the store or as a store of the zero register, of 1, 2 or 4 bytes to a plain base and offset
+            // that is not volatile. Returns the number of instructions it takes (2, 1 or 0), leaves the store in sm_st
+            // and the constant in sm_val.
+            s_stel(PtrVec* v, int j, int* uc) -> int
+            {
+                AI* m = (AI*)v.items[j];
+                AI* st;
+                int n = 1;
+                i64 val = (i64)0;
+                if (m.op == A_MOVI)
+                {
+                    if (j + 1 >= v.len | m.d < AR_VBASE) { -> 0; };
+                    if (uc[m.d] != 1) { -> 0; };
+                    st = (AI*)v.items[j + 1];
+                    if (st.op != A_ST | st.d != m.d) { -> 0; };
+                    val = m.imm;
+                    n = 2;
+                }
+                elif (m.op == A_ST) { st = m; if (st.d != AR_ZR) { -> 0; }; }
+                else { -> 0; };
+                if (st.op != A_ST) { -> 0; };
+                if (st.cc != 0 | st.b >= 0 | st.sym != (byte*)0 | st.ma != 0) { -> 0; };
+                if (st.sz != 1 & st.sz != 2 & st.sz != 4) { -> 0; };
+                if (st.fo < 0 & st.a < 0) { -> 0; };
+                if (st.sz == 1) { val = val `& (i64)255; };
+                if (st.sz == 2) { val = val `& (i64)65535; };
+                if (st.sz == 4) { val = val `& (i64)4294967295; };
+                this.sm_st = st;
+                this.sm_val = val;
+                -> n;
+            };
+
+            // Instructions a constant needs when it is made in a register of w bytes
+            s_kcost(i64 val, int w) -> int
+            {
+                u64 u = (u64)val;
+                int n = 0;
+                int i = 0;
+                int nh = 4;
+                if (val == (i64)0) { -> 0; };
+                if (w < 8) { nh = 2; };
+                while (i < nh)
+                {
+                    if (((u >> (u64)(16 * i)) `& (u64)65535) != (u64)0) { n++; };
+                    i++;
+                };
+                -> n;
+            };
+
+            // Runs of stores of constants to adjacent bytes become stores of 8, 4, 2 and 1 bytes
+            s_stmerge() -> void
+            {
+                GF* g = this.sf;
+                int* uc = this.s_iz(g.nvr + 1);
+                int* bytes = this.s_iz(1024);
+                int bi, j, p, c, pos, w, total, cnt, oldc, newc, k, reg;
+                GB* gb;
+                AI* m;
+                AI* st;
+                AI* a;
+                PtrVec* old;
+                PtrVec* nv;
+                i64 nxt, val, v;
+                bool same;
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        j++;
+                        if (this.s_arole(m.op, 0) == 1 & m.d >= AR_VBASE) { uc[m.d]++; };
+                        if (m.a >= AR_VBASE) { uc[m.a]++; };
+                        if (m.b >= AR_VBASE) { uc[m.b]++; };
+                        if (m.c >= AR_VBASE) { uc[m.c]++; };
+                    };
+                };
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    old = gb.mi;
+                    nv = pv_new();
+                    gb.mi = nv;
+                    this.scb = gb;
+                    j = 0;
+                    while (j < old.len)
+                    {
+                        c = this.s_stel(old, j, uc);
+                        if (c == 0)
+                        {
+                            pv_push(nv, old.items[j]);
+                            j++;
+                            continue;
+                        };
+                        st = this.sm_st;
+                        // the run of stores that follow each other
+                        p = j;
+                        total = 0;
+                        cnt = 0;
+                        nxt = st.imm;
+                        same = true;
+                        while (same & p < old.len)
+                        {
+                            c = this.s_stel(old, p, uc);
+                            if (c == 0) { same = false; }
+                            else
+                            {
+                                a = this.sm_st;
+                                if (a.a != st.a | a.fo != st.fo | a.ma != st.ma) { same = false; };
+                                if (cnt > 0 & a.imm != nxt) { same = false; };
+                                if (total + a.sz > 1024) { same = false; };
+                                if (same)
+                                {
+                                    val = this.sm_val;
+                                    k = 0;
+                                    while (k < a.sz)
+                                    {
+                                        bytes[total + k] = (int)((val >> (i64)(8 * k)) `& (i64)255);
+                                        k++;
+                                    };
+                                    total = total + a.sz;
+                                    nxt = nxt + (i64)a.sz;
+                                    cnt++;
+                                    p = p + c;
+                                };
+                            };
+                        };
+                        oldc = p - j;
+                        // what the merged stores cost
+                        newc = 0;
+                        pos = 0;
+                        while (pos < total)
+                        {
+                            w = 1;
+                            if (total - pos >= 2) { w = 2; };
+                            if (total - pos >= 4) { w = 4; };
+                            if (total - pos >= 8) { w = 8; };
+                            val = (i64)0;
+                            k = 0;
+                            while (k < w)
+                            {
+                                val = val `| ((i64)bytes[pos + k] << (i64)(8 * k));
+                                k++;
+                            };
+                            newc = newc + this.s_kcost(val, w) + 1;
+                            pos = pos + w;
+                        };
+                        if (cnt < 2 | newc >= oldc)
+                        {
+                            pv_push(nv, old.items[j]);
+                            j++;
+                            continue;
+                        };
+                        pos = 0;
+                        while (pos < total)
+                        {
+                            w = 1;
+                            if (total - pos >= 2) { w = 2; };
+                            if (total - pos >= 4) { w = 4; };
+                            if (total - pos >= 8) { w = 8; };
+                            val = (i64)0;
+                            k = 0;
+                            while (k < w)
+                            {
+                                val = val `| ((i64)bytes[pos + k] << (i64)(8 * k));
+                                k++;
+                            };
+                            reg = AR_ZR;
+                            if (val != (i64)0)
+                            {
+                                if (w == 8) { reg = this.s_movi(val, 8); } else { reg = this.s_movi(val, 4); };
+                            };
+                            a = this.s_mi(A_ST, w);
+                            a.d = reg;
+                            a.a = st.a;
+                            a.fo = st.fo;
+                            a.ma = st.ma;
+                            a.imm = st.imm + (i64)pos;
+                            pos = pos + w;
+                        };
+                        j = p;
+                    };
+                    pv_free(old);
+                };
+                this.s_ifree(uc);
+                this.s_ifree(bytes);
+                ->;
+            };
+
             // Puts the copies of the phis on the edges. An edge from a block with one successor gets them at the
             // end of that block, any other edge gets a block of its own.
             s_edges() -> bool
@@ -4153,19 +4359,69 @@ object A64Module
             {
                 GF* g = this.sf;
                 AGF* t = (AGF*)g.tg;
-                int i, k;
+                int out16 = this.e_out16();
                 if (t.frame == 0) { ->; };
-                this.e_addimm(o, 31, 31, (i64)0 - (i64)t.frame);
                 if (this.pac) { o.put_str(g"\tpaciasp\n\0"); };
-                this.e_addimm(o, 16, 31, (i64)this.e_out16());
-                o.put_str(g"\tstp x29, x30, [x16]\n\tmov x29, x16\n\0");
-                k = 0;
-                i = 0;
+                if (out16 == 0 & t.frame <= 504)
+                {
+                    // the frame record is at the bottom: one pre indexed store makes the frame
+                    o.put_str(g"\tstp x29, x30, [sp, #-\0");
+                    o.put_int(t.frame);
+                    o.put_str(g"]!\n\tmov x29, sp\n\0");
+                }
+                else
+                {
+                    this.e_addimm(o, 31, 31, (i64)0 - (i64)t.frame);
+                    if (out16 <= 504)
+                    {
+                        o.put_str(g"\tstp x29, x30, [sp, #\0");
+                        o.put_int(out16);
+                        o.put_str(g"]\n\tadd x29, sp, #\0");
+                        o.put_int(out16);
+                        o.put(10);
+                    }
+                    else
+                    {
+                        this.e_addimm(o, 16, 31, (i64)out16);
+                        o.put_str(g"\tstp x29, x30, [x16]\n\tmov x29, x16\n\0");
+                    };
+                };
+                this.e_saves(o, g"str\0", g"stp\0");
+                ->;
+            };
+
+            // Stores or loads the callee saved registers, two at a time where the pair is of one class and in reach
+            e_saves(Buf* o, byte* one, byte* two) -> void
+            {
+                AGF* t = (AGF*)this.sf.tg;
+                int i = 0;
+                int k = 0;
+                int j, off;
                 while (i < 64)
                 {
                     if ((t.saved `& ((i64)1 << (i64)i)) != (i64)0)
                     {
-                        this.e_slot(o, g"str\0", i, t.csbase + 8 * k);
+                        off = t.csbase + 8 * k;
+                        j = i + 1;
+                        if (j < 64 & off + 8 <= 504 & ((i < 32) == (j < 32)))
+                        {
+                            if ((t.saved `& ((i64)1 << (i64)j)) != (i64)0)
+                            {
+                                o.put_str(g"\t\0");
+                                o.put_str(two);
+                                o.put(32);
+                                this.e_r(o, i, 8);
+                                o.put_str(g", \0");
+                                this.e_r(o, j, 8);
+                                o.put_str(g", [x29, #\0");
+                                o.put_int(off);
+                                o.put_str(g"]\n\0");
+                                k = k + 2;
+                                i = i + 2;
+                                continue;
+                            };
+                        };
+                        this.e_slot(o, one, i, off);
                         k++;
                     };
                     i++;
@@ -4200,24 +4456,24 @@ object A64Module
             {
                 GF* g = this.sf;
                 AGF* t = (AGF*)g.tg;
-                int i, k;
+                int out16 = this.e_out16();
                 if (t.frame != 0)
                 {
-                    k = 0;
-                    i = 0;
-                    while (i < 64)
+                    this.e_saves(o, g"ldr\0", g"ldp\0");
+                    if (out16 == 0 & t.frame <= 504)
                     {
-                        if ((t.saved `& ((i64)1 << (i64)i)) != (i64)0)
-                        {
-                            this.e_slot(o, g"ldr\0", i, t.csbase + 8 * k);
-                            k++;
-                        };
-                        i++;
+                        if (t.dyn) { o.put_str(g"\tmov sp, x29\n\0"); };
+                        o.put_str(g"\tldp x29, x30, [sp], #\0");
+                        o.put_int(t.frame);
+                        o.put(10);
+                    }
+                    else
+                    {
+                        if (t.dyn) { this.e_addimm(o, 31, 29, (i64)0 - (i64)out16); };
+                        o.put_str(g"\tldp x29, x30, [x29]\n\0");
+                        this.e_addimm(o, 31, 31, (i64)t.frame);
                     };
-                    this.e_addimm(o, 31, 29, (i64)0 - (i64)this.e_out16());
-                    o.put_str(g"\tldp x29, x30, [x29]\n\0");
                     if (this.pac) { o.put_str(g"\tautiasp\n\0"); };
-                    this.e_addimm(o, 31, 31, (i64)t.frame);
                 };
                 o.put_str(g"\tret\n\0");
                 ->;
