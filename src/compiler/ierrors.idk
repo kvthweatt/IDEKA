@@ -199,6 +199,32 @@ namespace IDEKA
 
         // ===== SUGGESTION =====
 
+        // Column (1-based) of a string literal that should be a char literal, 0 when none.
+        // Set by the parser just before render and consumed by it.
+        int DIAG_CHAR_FIX_COL = 0;
+
+        // The source line with the one character string literal at col rewritten as a char literal.
+        // Returns false when the literal is not exactly one character (or one escape).
+        build_char_fix(Buf* out, int col, byte* raw, int rn) -> bool
+        {
+            int p = col - 1;
+            int q, w;
+            if (p < 0 | p >= rn) { -> false; };
+            if (raw[p] != '"') { -> false; };
+            q = p + 1;
+            w = 1;
+            if (q < rn) { if (raw[q] == 92) { w = 2; }; };
+            if (q + w >= rn) { -> false; };
+            if (raw[q + w] != '"') { -> false; };
+            out.put_n(raw, p);
+            out.put(39);
+            out.put_n(raw + q, w);
+            out.put(39);
+            out.put_n(raw + q + w + 1, rn - (q + w + 1));
+            out.put_str("  // try this\0");
+            -> true;
+        };
+
         // ferrors._build_suggestion. raw is the source line (tabs intact), ex the tab expanded
         // line, expected the missing token type, got the token found instead (type and length),
         // prev_line the line of the token before it (0 when none), tok_line/tok_col where the
@@ -391,6 +417,11 @@ namespace IDEKA
             sug.__init();
             defer sug.__exit();
             have_sug = false;
+            if (DIAG_CHAR_FIX_COL > 0)
+            {
+                have_sug = build_char_fix(@sug, DIAG_CHAR_FIX_COL, src + ls, rn);
+                DIAG_CHAR_FIX_COL = 0;
+            };
             if (expected >= 0)
             {
                 have_sug = build_suggestion(@sug, expected, got, got_len, line, col, prev_line, src + ls, rn, ex.mem, en, dash);

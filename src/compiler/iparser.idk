@@ -597,7 +597,7 @@ namespace IDEKA
             Token* toks;
             int count, pos;
             int* feat_hits;
-            int stub_total, stub_features, err_kind, err_expected, err_got, err_line, err_col, err_prev_line, err_got_len;
+            int stub_total, stub_features, err_kind, err_expected, err_got, err_line, err_col, err_prev_line, err_got_len, err_charfix;
             int* lmap;              // merged line to file local line map, for diagnostics
             byte** lfiles;          // merged line to file path, for diagnostics
             int lmapn;
@@ -661,6 +661,7 @@ namespace IDEKA
                 this.err_col = 0;
                 this.err_prev_line = 0;
                 this.err_got_len = 0;
+                this.err_charfix = 0;
                 this.lmap = (int*)0;
                 this.lfiles = (byte**)0;
                 this.lmapn = 0;
@@ -1066,6 +1067,7 @@ namespace IDEKA
                     case (true) { exp = this.err_expected; }
                     default {};
                 };
+                IDEKA::errors::DIAG_CHAR_FIX_COL = this.err_charfix;
                 -> IDEKA::errors::render(out, this.diag_color, IDEKA::errors::SEV_ERROR, this.error_text(), this.err_line, this.err_col, this.lx.src, this.lx.length, this.lmap, this.lmapn, this.lfiles, exp, this.err_got, this.err_got_len, this.err_prev_line, (byte*)0);
             };
 
@@ -7418,6 +7420,7 @@ namespace IDEKA
                                             this.err_col = sp.err_col;
                                             this.err_prev_line = sp.err_prev_line;
                                             this.err_got_len = sp.err_got_len;
+                                            this.err_charfix = sp.err_charfix;
                                             this.err_msg = sp.err_msg;
                                             -> (Node*)0;
                                         }
@@ -12939,6 +12942,26 @@ namespace IDEKA
                     case (true) { -> d; }
                     default
                     {
+                        // A string literal cannot initialize a scalar char: the suggestion is a char literal
+                        switch (init != (Node*)0)
+                        {
+                            case (true) {
+                            switch (init.kind == NodeKind.STRING_LITERAL & ts.base_type == DataType.CHAR & ts.pointer_depth == 0 & (ts.flags `& TS_ARRAY) == 0 & ts.array_size == (Node*)0 & ts.array_dims == (NodeVec*)0)
+                            {
+                                case (true) {
+                                this.failed = true;
+                                this.err_kind = ParseErr.MESSAGE;
+                                this.err_msg = g"Cannot initialize a char with a string literal\0";
+                                this.err_line = init.line;
+                                this.err_col = init.col;
+                                this.err_charfix = init.col;
+                                ->d;
+                            }
+                                default {};
+                            };
+                        }
+                            default {};
+                        };
                         d.text = name;
                         switch (first)
                         {

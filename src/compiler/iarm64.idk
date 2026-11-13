@@ -188,6 +188,7 @@ struct AGF
 struct AM
 {
     int b, i, sc, fo, ma;
+    int ix32;           // 1 when the index register holds a signed 32 bit value to extend as it is used
     i64 imm;
     byte* sym;
 };
@@ -202,6 +203,7 @@ struct AI
     i64 iu, id, clob;   // registers read, written and destroyed by the instruction, one bit each
     byte* text;
     int ma;             // memory operand kind: 0 normal, 1 incoming argument area
+    int ex;             // 1 when the index register b holds a signed 32 bit value to extend as it is used
 };
 
 object A64Module
@@ -212,6 +214,7 @@ object A64Module
             int gfn;
             AI* sm_st;         // set by s_stel: the store of the constant store found
             i64 sm_val;        // its value
+            bool tbok;         // the function is small enough for tbz and tbnz to reach every label
             int bf_sh, bf_w;   // set by the address computation: bit shift and width of a bit packed member, 0 width when none
             byte* arp;         // arena of the machine instructions of one function
             int aru;
@@ -444,6 +447,7 @@ object A64Module
                         ok = this.s_isel();
                     };
                     if (ok) { ok = this.s_edges(); };
+                    if (ok) { this.s_peep(); };
                     if (ok) { this.s_stmerge(); };
                     if (ok) { ok = this.s_ra(); };
                     if (ok)
@@ -543,6 +547,7 @@ object A64Module
                 m.clob = (i64)0;
                 m.text = (byte*)0;
                 m.ma = 0;
+                m.ex = 0;
                 pv_push(this.scb.mi, (void*)m);
                 -> m;
             };
@@ -765,6 +770,7 @@ object A64Module
                 m.sc = 0;
                 m.fo = 0 - 1;
                 m.ma = 0;
+                m.ix32 = 0;
                 m.imm = (i64)0;
                 m.sym = (byte*)0;
                 -> m;
@@ -778,6 +784,7 @@ object A64Module
                 m.sc = s.sc;
                 m.fo = s.fo;
                 m.ma = s.ma;
+                m.ix32 = s.ix32;
                 m.imm = s.imm;
                 m.sym = s.sym;
                 -> m;
@@ -875,6 +882,7 @@ object A64Module
                     a.a = r;
                     a.b = m.i;
                     a.sc = m.sc;
+                    if (m.ix32 == 1) { a.cc = 2; };
                     r = d;
                 };
                 if (m.imm != (i64)0)
@@ -907,9 +915,11 @@ object A64Module
                     a.a = m.b;
                     a.b = m.i;
                     a.sc = m.sc;
+                    if (m.ix32 == 1) { a.cc = 2; };
                     m.b = r;
                     m.i = 0 - 1;
                     m.sc = 0;
+                    m.ix32 = 0;
                 };
                 ->;
             };
@@ -919,7 +929,11 @@ object A64Module
             {
                 int r = ix;
                 int sh = 0 - 1;
-                if (w < 64) { r = this.s_ext(ix, w, true, 8); };
+                bool x32 = false;
+                // a 32 bit index is extended by the memory operand itself
+                if (w == 32 & (esz == 1 | esz == 2 | esz == 4 | esz == 8 | esz == 16)) { x32 = true; }
+                elif (w < 64 & w != 32) { r = this.s_ext(ix, w, true, 8); }
+                elif (w == 32) { r = ix; };
                 if (esz == 1) { sh = 0; };
                 if (esz == 2) { sh = 1; };
                 if (esz == 4) { sh = 2; };
@@ -927,12 +941,19 @@ object A64Module
                 if (esz == 16) { sh = 4; };
                 if (sh < 0)
                 {
-                    r = this.s_alu(L_MUL, 8, r, this.s_movi((i64)esz, 8), (i64)0);
+                    if (w == 32)
+                    {
+                        // sign extension and product in one
+                        r = this.s_alu(L_MUL, 8, ix, this.s_movi((i64)esz, 4), (i64)0);
+                        ((AI*)this.scb.mi.items[this.scb.mi.len - 1]).cc = 3;
+                    }
+                    else { r = this.s_alu(L_MUL, 8, r, this.s_movi((i64)esz, 8), (i64)0); };
                     sh = 0;
                 };
                 if (m.i >= 0 | m.sym != (byte*)0 | m.fo >= 0 | m.ma != 0) { this.s_amflat(m); };
                 m.i = r;
                 m.sc = sh;
+                if (x32) { m.ix32 = 1; };
                 ->;
             };
 
@@ -1046,6 +1067,7 @@ object A64Module
                 a.sc = m.sc;
                 a.fo = m.fo;
                 a.ma = m.ma;
+                a.ex = m.ix32;
                 a.imm = m.imm;
                 a.sym = m.sym;
                 -> a;
@@ -1146,7 +1168,17 @@ object A64Module
             // Copies the aggregate value v to memory d
             s_agg_to(IRValue* v, AM* d) -> void
             {
-                AM* s = this.s_agg_addr(v);
+                AM* s;
+                // a zero aggregate is stored as zeros, not copied from a block of zeros in memory
+                if (v.fo <= 0 & v.vr == 0 & v.di == (void*)0 & v.text != (byte*)0)
+                {
+                    if (this.a_pre(v.text, g"zeroinitializer\0") | this.a_pre(v.text, g"undef\0"))
+                    {
+                        this.s_zero(d, this.a_size(v.ty));
+                        ->;
+                    };
+                };
+                s = this.s_agg_addr(v);
                 if (this.gwhy != 0) { ->; };
                 this.s_copy(d, s, this.a_size(v.ty));
                 ->;
@@ -1515,8 +1547,8 @@ object A64Module
                 IRValue* a = this.s_res(x.a);
                 IRValue* b = this.s_res(x.b);
                 int k = x.k;
-                int sz, w, ra, rb, d, q, fk;
-                i64 r;
+                int sz, w, ra, rb, d, q, fk, sh;
+                i64 r, pw;
                 bool sgn;
                 AI* m;
                 if (this.s_isfp(t))
@@ -1566,6 +1598,52 @@ object A64Module
                 if (k == SB_SDIV | k == SB_UDIV | k == SB_SREM | k == SB_UREM)
                 {
                     sgn = k == SB_SDIV | k == SB_SREM;
+                    // division by a power of two is a shift: the sign of a negative dividend is added in first
+                    if ((w == 32 | w == 64) & this.s_kint(b))
+                    {
+                        pw = this.scv;
+                        if (pw >= (i64)2 & (pw `& (pw - (i64)1)) == (i64)0)
+                        {
+                            sh = 0;
+                            while (((i64)1 << (i64)sh) != pw) { sh++; };
+                            ra = this.s_vr(a);
+                            if (!sgn)
+                            {
+                                d = this.s_def(x.res, 0);
+                                m = this.s_mi(A_ALU, sz);
+                                if (k == SB_UDIV) { m.k = L_LSR; m.imm = (i64)sh; } else { m.k = L_AND; m.imm = pw - (i64)1; };
+                                m.d = d;
+                                m.a = ra;
+                                ->;
+                            };
+                            // bias = the sign bits shifted down to the low sh bits, added to the dividend as a shifted register
+                            q = ra;
+                            if (sh > 1) { q = this.s_alu(L_ASR, sz, ra, 0 - 1, (i64)(w - 1)); };
+                            q = this.s_alu(L_ADD, sz, ra, q, (i64)0);
+                            m = (AI*)this.scb.mi.items[this.scb.mi.len - 1];
+                            m.sc = w - sh;
+                            if (sh == 1) { m.sc = w - 1; };
+                            m.cc = 1;
+                            if (k == SB_SDIV)
+                            {
+                                d = this.s_def(x.res, 0);
+                                m = this.s_mi(A_ALU, sz);
+                                m.k = L_ASR;
+                                m.imm = (i64)sh;
+                                m.d = d;
+                                m.a = q;
+                                ->;
+                            };
+                            q = this.s_alu(L_AND, sz, q, 0 - 1, (i64)0 - pw);
+                            d = this.s_def(x.res, 0);
+                            m = this.s_mi(A_ALU, sz);
+                            m.k = L_SUB;
+                            m.d = d;
+                            m.a = ra;
+                            m.b = q;
+                            ->;
+                        };
+                    };
                     ra = this.s_vr(a);
                     rb = this.s_vr(b);
                     if (w != 32 & w != 64)
@@ -1736,8 +1814,8 @@ object A64Module
                 if (w > 64) { this.s_fail(g"wide compare\0"); -> CC_EQ; };
                 sz = this.s_isz(t);
                 sgn = p == SP_SLT | p == SP_SLE | p == SP_SGT | p == SP_SGE;
-                ra = this.s_vr(a);
-                if (w != 32 & w != 64) { ra = this.s_ext(ra, w, sgn, sz); };
+                ra = this.s_vr0(a);
+                if (w != 32 & w != 64 & ra != AR_ZR) { ra = this.s_ext(ra, w, sgn, sz); };
                 if (this.s_kint(b))
                 {
                     m = this.s_mi(A_CMP, sz);
@@ -1837,16 +1915,17 @@ object A64Module
                 if (A64_OPT_CBZ == 1 & c.di != (void*)0 & !c.kc)
                 {
                     d = (SI*)c.di;
-                    if (d.flag & d.op == SO_CMP & d.n == 0 & (d.k == SP_EQ | d.k == SP_NE))
+                    if (d.flag & d.op == SO_CMP & d.n == 0 & (d.k == SP_EQ | d.k == SP_NE | d.k == SP_SLT | d.k == SP_SGE))
                     {
                         b = this.s_res(d.b);
-                        if (this.s_kint(b) & this.scv == (i64)0)
+                        w = this.s_wid(this.s_res(d.a).ty);
+                        if (this.s_kint(b) & this.scv == (i64)0 & (d.k == SP_EQ | d.k == SP_NE | w == 32 | w == 64))
                         {
-                            w = this.s_wid(this.s_res(d.a).ty);
                             sz = this.s_isz(this.s_res(d.a).ty);
                             r = this.s_vr(d.a);
                             if (w != 32 & w != 64) { r = this.s_ext(r, w, false, sz); };
-                            if (d.k == SP_EQ) { m = this.s_mi(A_CBZ, sz); } else { m = this.s_mi(A_CBNZ, sz); };
+                            if (d.k == SP_EQ | d.k == SP_SGE) { m = this.s_mi(A_CBZ, sz); } else { m = this.s_mi(A_CBNZ, sz); };
+                            if (d.k == SP_SLT | d.k == SP_SGE) { m.cc = 1; };
                             m.a = r;
                             m.tgt = tt;
                             m = this.s_mi(A_B, 0);
@@ -3391,13 +3470,14 @@ object A64Module
                                 if (g.vhint[d] == 0 - 1) { g.vhint[d] = 0 - (src + 1); };
                                 if (g.vhint[src] == 0 - 1) { g.vhint[src] = 0 - (d + 1); };
                             };
+                            // a hardware register hint is worth more than a link to another register: it replaces a link
                             if (d >= AR_VBASE & src < AR_VBASE)
                             {
-                                if (g.vhint[d] == 0 - 1) { g.vhint[d] = src; };
+                                if (g.vhint[d] < 0) { g.vhint[d] = src; };
                             };
                             if (d < AR_VBASE & src >= AR_VBASE)
                             {
-                                if (g.vhint[src] == 0 - 1) { g.vhint[src] = d; };
+                                if (g.vhint[src] < 0) { g.vhint[src] = d; };
                             };
                         };
                         j--;
@@ -3407,6 +3487,24 @@ object A64Module
                     while (u < g.nl) { g.lpos[g.llist[u]] = 0 - 1; u++; };
                     g.nl = 0;
                     i++;
+                };
+                // a register that is only linked to another register takes the hardware register that one is hinted to:
+                // the colouring reaches them in the order of their definitions, so the link alone would not pass it on
+                e = 0;
+                while (e < 4)
+                {
+                    i = AR_VBASE;
+                    while (i < nv)
+                    {
+                        d = g.vhint[i];
+                        if (d < 0 & d != 0 - 1)
+                        {
+                            u = 0 - d - 1;
+                            if (g.vhint[u] >= 0) { g.vhint[i] = g.vhint[u]; };
+                        };
+                        i++;
+                    };
+                    e++;
                 };
                 // order of definition: the phi registers of a block first, then its instructions
                 if (this.ord != (int*)0) { this.s_ifree(this.ord); };
@@ -3779,6 +3877,87 @@ object A64Module
                     i++;
                 };
                 -> n;
+            };
+
+            // Number of reads of every virtual register of the function
+            s_ucount() -> int*
+            {
+                GF* g = this.sf;
+                int* uc = this.s_iz(g.nvr + 1);
+                int bi, j;
+                GB* gb;
+                AI* m;
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        j++;
+                        if (this.s_arole(m.op, 0) == 1 & m.d >= AR_VBASE) { uc[m.d]++; };
+                        if (m.a >= AR_VBASE) { uc[m.a]++; };
+                        if (m.b >= AR_VBASE) { uc[m.b]++; };
+                        if (m.c >= AR_VBASE) { uc[m.c]++; };
+                    };
+                };
+                -> uc;
+            };
+
+            // Extensions that the instruction in front of them already does: a constant is made extended, a load is
+            // made a sign extending load, and the zero extension of a load of that width is dropped.
+            s_peep() -> void
+            {
+                GF* g = this.sf;
+                int* uc = this.s_ucount();
+                int bi, j, c;
+                GB* gb;
+                AI* m;
+                AI* e;
+                i64 v;
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j + 1 < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        e = (AI*)gb.mi.items[j + 1];
+                        j++;
+                        if (e.op != A_EXT | m.d < AR_VBASE | e.a != m.d) { continue; };
+                        if (uc[m.d] != 1) { continue; };
+                        c = (int)e.imm;
+                        if (c != 8 & c != 16 & c != 32) { continue; };
+                        if (m.op == A_MOVI)
+                        {
+                            v = m.imm;
+                            if (c == 8) { v = v `& (i64)255; if (e.k == 1 & v >= (i64)128) { v = v - (i64)256; }; };
+                            if (c == 16) { v = v `& (i64)65535; if (e.k == 1 & v >= (i64)32768) { v = v - (i64)65536; }; };
+                            if (c == 32) { v = v `& (i64)4294967295; if (e.k == 1 & v >= (i64)2147483648) { v = v - (i64)4294967296; }; };
+                            m.d = e.d;
+                            m.imm = v;
+                            m.sz = e.sz;
+                            if (e.k == 1 & c == 32) { m.sz = 8; };
+                            if (e.k == 0) { m.sz = 4; };
+                            e.op = A_NOP;
+                            continue;
+                        };
+                        if (m.op == A_LD & m.k == 0 & m.sz * 8 == c & m.ma == 0)
+                        {
+                            if (e.k == 1) { m.k = 1; };
+                            m.d = e.d;
+                            e.op = A_NOP;
+                        };
+                    };
+                };
+                this.s_ifree(uc);
+                ->;
             };
 
             // Runs of stores of constants to adjacent bytes become stores of 8, 4, 2 and 1 bytes
@@ -4519,17 +4698,23 @@ object A64Module
                     {
                         this.tb.put_str(g"[\0");
                         this.eb_name(b);
-                        this.tb.put_str(g", x\0");
+                        if (m.ex == 1) { this.tb.put_str(g", w\0"); } else { this.tb.put_str(g", x\0"); };
                         this.tb.put_int(ix);
-                        if (sc > 0) { this.tb.put_str(g", lsl #\0"); this.tb.put_int(sc); };
+                        if (m.ex == 1)
+                        {
+                            this.tb.put_str(g", sxtw\0");
+                            if (sc > 0) { this.tb.put_str(g" #\0"); this.tb.put_int(sc); };
+                        }
+                        elif (sc > 0) { this.tb.put_str(g", lsl #\0"); this.tb.put_int(sc); };
                         this.tb.put(93);
                         ->;
                     };
                     o.put_str(g"\tadd x17, \0");
                     this.e_b(o, b);
-                    o.put_str(g", x\0");
+                    if (m.ex == 1) { o.put_str(g", w\0"); } else { o.put_str(g", x\0"); };
                     o.put_int(ix);
-                    if (sc > 0) { o.put_str(g", lsl #\0"); o.put_int(sc); };
+                    if (m.ex == 1) { o.put_str(g", sxtw #\0"); o.put_int(sc); }
+                    elif (sc > 0) { o.put_str(g", lsl #\0"); o.put_int(sc); };
                     o.put(10);
                     b = 17;
                 };
@@ -4546,6 +4731,104 @@ object A64Module
                 };
                 this.e_movi(o, 16, off, 8);
                 this.tb.put_str(g", x16]\0");
+                ->;
+            };
+
+            // Two loads or two stores of 4 or 8 bytes at neighbouring addresses off one base become ldp or stp.
+            // Returns the number of instructions after j that were consumed, or -1 when no pair is formed.
+            e_pair(Buf* o, GB* gb, int j) -> int
+            {
+                AI* m = (AI*)gb.mi.items[j];
+                AI* n2;
+                AI* f;
+                AI* s2;
+                int sz = m.sz;
+                int k, b, b2, d1, d2;
+                i64 off1, off2, lo;
+                if (m.k != 0 | m.sym != (byte*)0 | m.b >= 0 | m.cc == 1 | m.ex != 0) { -> 0 - 1; };
+                if (sz != 4 & sz != 8) { -> 0 - 1; };
+                k = j + 1;
+                while (k < gb.mi.len)
+                {
+                    n2 = (AI*)gb.mi.items[k];
+                    if (n2.op != A_NOP) { break; };
+                    k++;
+                };
+                if (k >= gb.mi.len) { -> 0 - 1; };
+                n2 = (AI*)gb.mi.items[k];
+                if (n2.op != m.op | n2.sz != sz | n2.k != 0 | n2.sym != (byte*)0 | n2.b >= 0 | n2.cc == 1 | n2.ex != 0) { -> 0 - 1; };
+                if (n2.fo != m.fo | n2.ma != m.ma) { -> 0 - 1; };
+                off1 = m.imm;
+                off2 = n2.imm;
+                if (m.fo >= 0 | m.ma == 1)
+                {
+                    b = this.e_fbase();
+                    off1 = off1 + this.e_fooff(m);
+                    off2 = off2 + this.e_fooff(n2);
+                }
+                else
+                {
+                    if (n2.a != m.a) { -> 0 - 1; };
+                    b = this.s_phys(m.a);
+                };
+                d1 = this.s_phys(m.d);
+                d2 = this.s_phys(n2.d);
+                if ((d1 < 32) != (d2 < 32)) { -> 0 - 1; };
+                if (m.op == A_LD)
+                {
+                    if (d1 == d2 | d1 == b | d2 == b) { -> 0 - 1; };
+                };
+                f = m;
+                s2 = n2;
+                lo = off1;
+                if (off2 == off1 + (i64)sz) { lo = off1; }
+                elif (off1 == off2 + (i64)sz) { f = n2; s2 = m; lo = off2; }
+                else { -> 0 - 1; };
+                if (lo % (i64)sz != (i64)0) { -> 0 - 1; };
+                if (lo < (i64)(0 - 64 * sz) | lo > (i64)(63 * sz)) { -> 0 - 1; };
+                if (m.op == A_LD) { o.put_str(g"\tldp \0"); } else { o.put_str(g"\tstp \0"); };
+                this.e_r(o, this.s_phys(f.d), sz);
+                o.put_str(g", \0");
+                this.e_r(o, this.s_phys(s2.d), sz);
+                o.put_str(g", [\0");
+                this.tb.clear();
+                this.eb_name(b);
+                o.put_str(this.tb.mem);
+                if (lo != (i64)0) { o.put_str(g", #\0"); put_i64(o, lo); };
+                o.put_str(g"]\n\0");
+                -> k - j;
+            };
+
+            // Branch to tgt when the register of m is zero (isz) or nonzero (not isz); with m.cc == 1 the test is
+            // the sign bit instead: zero stands for non negative.
+            e_cbr(Buf* o, AI* m, bool isz, int tgt) -> void
+            {
+                int sz = m.sz;
+                if (m.cc == 1)
+                {
+                    if (this.tbok)
+                    {
+                        if (isz) { o.put_str(g"\ttbz \0"); } else { o.put_str(g"\ttbnz \0"); };
+                        this.e_pr(o, m.a, sz);
+                        o.put_str(g", #\0");
+                        o.put_int(sz * 8 - 1);
+                        o.put_str(g", \0");
+                    }
+                    else
+                    {
+                        o.put_str(g"\tcmp \0");
+                        this.e_pr(o, m.a, sz);
+                        if (isz) { o.put_str(g", #0\n\tb.ge \0"); } else { o.put_str(g", #0\n\tb.lt \0"); };
+                    };
+                    this.e_label(o, tgt);
+                    o.put(10);
+                    ->;
+                };
+                if (isz) { o.put_str(g"\tcbz \0"); } else { o.put_str(g"\tcbnz \0"); };
+                this.e_pr(o, m.a, sz);
+                o.put_str(g", \0");
+                this.e_label(o, tgt);
+                o.put(10);
                 ->;
             };
 
@@ -4634,7 +4917,7 @@ object A64Module
                             o.put_str(g", \0");
                             this.e_r(o, a, sz);
                             o.put_str(g", #\0");
-                            put_u64(o, (u64)v);
+                            if (sz == 4) { put_u64(o, (u64)v `& (u64)4294967295); } else { put_u64(o, (u64)v); };
                             o.put(10);
                             ->;
                         };
@@ -4652,6 +4935,18 @@ object A64Module
                     o.put(10);
                     ->;
                 };
+                if (k == L_MUL & m.cc == 3)
+                {
+                    // the product of two signed 32 bit values as a 64 bit value
+                    o.put_str(g"\tsmull \0");
+                    this.e_r(o, d, 8);
+                    o.put_str(g", \0");
+                    this.e_r(o, a, 4);
+                    o.put_str(g", \0");
+                    this.e_pr(o, m.b, 4);
+                    o.put(10);
+                    ->;
+                };
                 o.put_str(g"\t\0");
                 o.put_str(this.e_aluname(k));
                 o.put(32);
@@ -4659,10 +4954,15 @@ object A64Module
                 o.put_str(g", \0");
                 this.e_r(o, a, sz);
                 o.put_str(g", \0");
-                this.e_pr(o, m.b, sz);
-                if (m.sc > 0)
+                if (m.cc == 2) { this.e_pr(o, m.b, 4); } else { this.e_pr(o, m.b, sz); };
+                if (m.cc == 2)
                 {
-                    o.put_str(g", lsl #\0");
+                    o.put_str(g", sxtw #\0");
+                    o.put_int(m.sc);
+                }
+                elif (m.sc > 0)
+                {
+                    if (m.cc == 1) { o.put_str(g", lsr #\0"); } else { o.put_str(g", lsl #\0"); };
                     o.put_int(m.sc);
                 };
                 o.put(10);
@@ -4693,7 +4993,7 @@ object A64Module
                         o.put_str(g"\ttst \0");
                         this.e_r(o, a, sz);
                         o.put_str(g", #\0");
-                        put_u64(o, (u64)v);
+                        if (sz == 4) { put_u64(o, (u64)v `& (u64)4294967295); } else { put_u64(o, (u64)v); };
                         o.put(10);
                         ->;
                     };
@@ -4939,7 +5239,7 @@ object A64Module
                 AI* n2;
                 int op = m.op;
                 int sz = m.sz;
-                int d, a, b, c, tn, cc;
+                int d, a, b, c, tn, cc, k;
                 AGF* t = (AGF*)this.sf.tg;
                 byte* mn;
                 if (op == A_NOP) { -> 0; };
@@ -4948,6 +5248,22 @@ object A64Module
                     d = this.s_phys(m.d);
                     a = this.s_phys(m.a);
                     if (d == a) { -> 0; };
+                    // the copy back of a register that was just copied from the one being written changes nothing
+                    if (d < 31 & a < 31 & m.d >= 0 & m.a >= 0)
+                    {
+                        k = j - 1;
+                        while (k >= 0)
+                        {
+                            n2 = (AI*)gb.mi.items[k];
+                            if (n2.op == A_NOP) { k--; continue; };
+                            if (n2.op == A_MOV & n2.d >= 0 & n2.a >= 0)
+                            {
+                                if (this.s_phys(n2.d) == this.s_phys(n2.a)) { k--; continue; };
+                                if (this.s_phys(n2.d) == a & this.s_phys(n2.a) == d) { -> 0; };
+                            };
+                            break;
+                        };
+                    };
                     if (d >= 32)
                     {
                         o.put_str(g"\tfmov \0");
@@ -5100,6 +5416,8 @@ object A64Module
                 };
                 if (op == A_LD | op == A_ST)
                 {
+                    k = this.e_pair(o, gb, j);
+                    if (k >= 0) { -> k; };
                     this.e_maddr(o, m, sz);
                     d = this.s_phys(m.d);
                     if (op == A_LD) { mn = g"ldr\0"; } else { mn = g"str\0"; };
@@ -5164,22 +5482,11 @@ object A64Module
                         n2 = (AI*)gb.mi.items[j + 1];
                         if (n2.op == A_B)
                         {
-                            if (n2.tgt != nxid)
-                            {
-                                if (op == A_CBZ) { o.put_str(g"\tcbnz \0"); } else { o.put_str(g"\tcbz \0"); };
-                                this.e_pr(o, m.a, sz);
-                                o.put_str(g", \0");
-                                this.e_label(o, n2.tgt);
-                                o.put(10);
-                            };
+                            if (n2.tgt != nxid) { this.e_cbr(o, m, op == A_CBNZ, n2.tgt); };
                             -> 1;
                         };
                     };
-                    if (op == A_CBZ) { o.put_str(g"\tcbz \0"); } else { o.put_str(g"\tcbnz \0"); };
-                    this.e_pr(o, m.a, sz);
-                    o.put_str(g", \0");
-                    this.e_label(o, m.tgt);
-                    o.put(10);
+                    this.e_cbr(o, m, op == A_CBZ, m.tgt);
                     -> 0;
                 };
                 if (op == A_BL)
@@ -5438,6 +5745,16 @@ object A64Module
                 this.e_layout();
                 this.e_head(f, out);
                 this.e_prologue(out);
+                // a test and branch reaches 32 KB: an instruction is counted as up to 4 words of 4 bytes
+                this.tbok = false;
+                i = 0;
+                j = 0;
+                while (i < g.nb)
+                {
+                    if (g.rpo[i].mi != (PtrVec*)0) { j = j + g.rpo[i].mi.len; };
+                    i++;
+                };
+                if (j < 2000) { this.tbok = true; };
                 i = 0;
                 while (i < g.nb)
                 {

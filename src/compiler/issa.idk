@@ -8555,16 +8555,19 @@
                     g.capvr = nc;
                 };
                 i = g.nvr;
-                g.vcls[i] = cls;
-                g.vwgt[i] = 0;
-                g.vcol[i] = 0 - 2;
-                g.vslot[i] = 0;
-                g.vforb[i] = (i64)0;
-                g.vhint[i] = 0 - 1;
-                g.vdef[i] = 0 - 1;
-                g.vglob[i] = 0 - 1;
-                g.vuse[i] = 0;
-                g.nvr = i + 1;
+                g
+                {
+                    .vcls[i] = cls;
+                    .vwgt[i] = 0;
+                    .vcol[i] = 0 - 2;
+                    .vslot[i] = 0;
+                    .vforb[i] = 0;
+                    .vhint[i] = 0 - 1;
+                    .vdef[i] = 0 - 1;
+                    .vglob[i] = 0 - 1;
+                    .vuse[i] = 0;
+                    .nvr = i + 1;
+                };
                 -> i;
             };
 
