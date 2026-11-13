@@ -31,14 +31,14 @@ It is built on these modules:
 A bot that answers `!ping` with `pong`:
 
 ```
-#import <standard.idk>, <socket_object_raw.idk>, <ffifio.idk>, <cryptography.idk>, <tls.idk>, <webclient.idk>, <json.idk>, <discord.idk>;
+#import <standard.idk>, <webclient.idk>, <discord.idk>;
 
 using standard::discord;
 
 global DISCORD_BOT g_bot;
 global DISCORD_EVENT g_ev;
 
-def main() -> int
+main() -> int
 {
     if (discord_start(@g_bot, "discord_token.txt\0",
                       INTENT_GUILD_MESSAGES + INTENT_DIRECT_MESSAGES + INTENT_MESSAGE_CONTENT) != 0) { return 1; };
@@ -50,8 +50,9 @@ def main() -> int
             discord_reply(@g_bot, @g_ev, "pong\0");
         };
     };
-    return 0;
+    -> 0;
 };
+
 ```
 
 This is `examples/discord_ping_bot.idk`.

@@ -2,7 +2,7 @@
 // Put the bot token in discord_token.txt (single line) in the working directory.
 // Trust roots: /etc/ssl/certs/ca-certificates.crt on Linux, otherwise cacert.pem in the working directory.
 // The bot needs the Message Content intent enabled in the Discord developer portal.
-#import <standard.idk>, <socket_object_raw.idk>, <ffifio.idk>, <cryptography.idk>, <tls.idk>, <webclient.idk>, <json.idk>, <discord.idk>;
+#import <standard.idk>, <webclient.idk>, <discord.idk>;
 
 using standard::discord;
 
