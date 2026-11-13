@@ -1,0 +1,53 @@
+// Leaves a hot journal behind: commits 300 rows, then starts a transaction, changes a lot and exits without commit or close.
+#import <standard.idk>, <sqlite.idk>, <sqlite_sql.idk>, <sqlite_write.idk>;
+
+using standard::io::console,
+      standard::sqlite;
+
+global SQLITE_DB g_db;
+global SQ_STMT g_st;
+global byte[100000] g_sql;
+
+def main() -> int
+{
+    int i, p, k;
+    byte* head = "insert into t values \0";
+    if (sq_open_rw(@g_db, "tests/sqlite_c.db\0", 1) != 0) { print("open failed\n\0"); return 1; };
+    sq_exec(@g_st, @g_db, "create table t(id integer primary key, s text)");
+    for (i = 0; i < 300; i++)
+    {
+        p = 0;
+        while (head[p] != (byte)0) { g_sql[p] = head[p]; p++; };
+        g_sql[p] = (byte)40; p++;
+        k = i + 1;
+        g_sql[p] = (byte)(48 + (k / 100) % 10); p++;
+        g_sql[p] = (byte)(48 + (k / 10) % 10); p++;
+        g_sql[p] = (byte)(48 + k % 10); p++;
+        g_sql[p] = (byte)44; p++;
+        g_sql[p] = (byte)39; p++; g_sql[p] = (byte)115; p++; g_sql[p] = (byte)39; p++;
+        g_sql[p] = (byte)41; p++; g_sql[p] = (byte)0;
+        if (sq_exec(@g_st, @g_db, @g_sql[0]) != 0) { print("setup failed\n\0"); return 1; };
+    };
+    sq_exec(@g_st, @g_db, "begin");
+    sq_exec(@g_st, @g_db, "update t set s = 'changed in transaction, never committed' where id % 2 = 0");
+    sq_exec(@g_st, @g_db, "delete from t where id > 250");
+    sq_exec(@g_st, @g_db, "create table doomed(x)");
+    for (i = 0; i < 400; i++)
+    {
+        p = 0;
+        while (head[p] != (byte)0) { g_sql[p] = head[p]; p++; };
+        g_sql[p] = (byte)40; p++;
+        k = 1000 + i;
+        g_sql[p] = (byte)(48 + (k / 1000) % 10); p++;
+        g_sql[p] = (byte)(48 + (k / 100) % 10); p++;
+        g_sql[p] = (byte)(48 + (k / 10) % 10); p++;
+        g_sql[p] = (byte)(48 + k % 10); p++;
+        g_sql[p] = (byte)44; p++;
+        g_sql[p] = (byte)39; p++; g_sql[p] = (byte)122; p++; g_sql[p] = (byte)39; p++;
+        g_sql[p] = (byte)41; p++; g_sql[p] = (byte)0;
+        sq_exec(@g_st, @g_db, @g_sql[0]);
+    };
+    print("crashing with an open transaction\n\0");
+    flush();
+    return 0;
+};

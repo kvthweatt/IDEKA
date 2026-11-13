@@ -1,0 +1,325 @@
+// Author: Karac V. Thweatt
+
+// eventloop.idk - Single threaded I/O event loop (poll on Linux, WSAPoll on Windows) with timers.
+//
+//   evloop_init(EVLOOP*) -> void
+//   evloop_add(EVLOOP*, fd, events, handler, ctx) -> int     0 on success, 1 when full or fd already added
+//        handler is def(int fd, int events, void* ctx) -> void
+//        events is EV_READ and/or EV_WRITE, the handler receives what happened (EV_ERROR on error or hangup)
+//   evloop_modify(EVLOOP*, fd, events) -> int
+//   evloop_remove(EVLOOP*, fd) -> void                       safe to call from inside a handler
+//   evloop_timer(EVLOOP*, delay_ms, repeat_ms, handler, ctx) -> int    timer id or -1
+//        handler is def(void* ctx) -> void, repeat_ms 0 means one shot
+//   evloop_cancel_timer(EVLOOP*, id) -> void
+//   evloop_poll(EVLOOP*, max_wait_ms) -> int                 one pass, returns callbacks run or -1
+//   evloop_run(EVLOOP*) -> void                              polls until evloop_stop
+//   evloop_stop(EVLOOP*) -> void
+//
+// One loop belongs to one thread. To use it from several threads, give each thread its own loop
+// and pass work between them with the channels in concurrency.idk.
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_SOCKETS
+#import <socket_object_raw.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_TIME
+#import <runtime\timing.idk>;
+#endif;
+
+#ifdef __WINDOWS__
+extern
+{
+    def !!
+        WSAPoll(void*, u32, int) -> int;
+};
+#endif;
+
+#ifndef IDEKA_STANDARD_EVENTLOOP
+#def IDEKA_STANDARD_EVENTLOOP 1;
+
+using standard::time;
+
+namespace standard
+{
+    namespace eventloop
+    {
+        global const int EV_READ = 1,
+                         EV_WRITE = 2,
+                         EV_ERROR = 4,
+                         EV_MAX_FDS = 256,
+                         EV_MAX_TIMERS = 64;
+
+        struct EVLOOP
+        {
+            int nfds;
+            int[256] fd;
+            int[256] want;
+            void*[256] fn;
+            void*[256] ctx;
+            byte[4096] pfds;        // pollfd array: 8 bytes per entry on Linux, 16 on Windows
+            int[256] pmap;          // pollfd slot -> entry index
+            int ntimers;
+            i64[64] due;
+            i64[64] interval;
+            int[64] tactive;
+            void*[64] tfn;
+            void*[64] tctx;
+            int stop;
+            int dirty;              // entries removed during a pass, compact afterwards
+        };
+
+        def ev_now_ms() -> i64
+        {
+            return ns_to_ms(time_now());
+        };
+
+        def evloop_init(EVLOOP* l) -> void
+        {
+            l.nfds = 0;
+            l.ntimers = 0;
+            l.stop = 0;
+            l.dirty = 0;
+        };
+
+        def ev_find(EVLOOP* l, int fd) -> int
+        {
+            int i;
+            for (i = 0; i < l.nfds; i++) { if (l.fd[i] == fd) { return i; }; };
+            return 0 - 1;
+        };
+
+        def evloop_add(EVLOOP* l, int fd, int events, void* handler, void* ctx) -> int
+        {
+            if (l.nfds >= 256) { return 1; };
+            if (fd < 0) { return 1; };
+            if (ev_find(l, fd) >= 0) { return 1; };
+            l.fd[l.nfds] = fd;
+            l.want[l.nfds] = events;
+            l.fn[l.nfds] = handler;
+            l.ctx[l.nfds] = ctx;
+            l.nfds++;
+            return 0;
+        };
+
+        def evloop_modify(EVLOOP* l, int fd, int events) -> int
+        {
+            int i = ev_find(l, fd);
+            if (i < 0) { return 1; };
+            l.want[i] = events;
+            return 0;
+        };
+
+        def evloop_remove(EVLOOP* l, int fd) -> void
+        {
+            int i = ev_find(l, fd);
+            if (i < 0) { return; };
+            l.fd[i] = 0 - 1;
+            l.want[i] = 0;
+            l.dirty = 1;
+        };
+
+        def evloop_timer(EVLOOP* l, int delay_ms, int repeat_ms, void* handler, void* ctx) -> int
+        {
+            int i;
+            for (i = 0; i < l.ntimers; i++) { if (l.tactive[i] == 0) { break; }; };
+            if (i == l.ntimers)
+            {
+                if (l.ntimers >= 64) { return 0 - 1; };
+                l.ntimers++;
+            };
+            l.due[i] = ev_now_ms() + (i64)delay_ms;
+            l.interval[i] = (i64)repeat_ms;
+            l.tfn[i] = handler;
+            l.tctx[i] = ctx;
+            l.tactive[i] = 1;
+            return i;
+        };
+
+        def evloop_cancel_timer(EVLOOP* l, int id) -> void
+        {
+            if (id < 0 | id >= l.ntimers) { return; };
+            l.tactive[id] = 0;
+        };
+
+        def ev_compact(EVLOOP* l) -> void
+        {
+            int i;
+            int j = 0;
+            for (i = 0; i < l.nfds; i++)
+            {
+                if (l.fd[i] >= 0)
+                {
+                    if (i != j)
+                    {
+                        l.fd[j] = l.fd[i];
+                        l.want[j] = l.want[i];
+                        l.fn[j] = l.fn[i];
+                        l.ctx[j] = l.ctx[i];
+                    };
+                    j++;
+                };
+            };
+            l.nfds = j;
+            l.dirty = 0;
+        };
+
+        // pollfd access. Linux: i32 fd, i16 events, i16 revents. Windows: u64 socket, i16 events, i16 revents.
+        def ev_pset(byte* p, int slot, int fd, int pev) -> void
+        {
+            byte* e;
+#ifdef __WINDOWS__
+            e = p + slot * 16;
+            e[0] = (byte)(fd `& 255); e[1] = (byte)((fd >> 8) `& 255);
+            e[2] = (byte)((fd >> 16) `& 255); e[3] = (byte)((fd >> 24) `& 255);
+            e[4] = (byte)0; e[5] = (byte)0; e[6] = (byte)0; e[7] = (byte)0;
+            e[8] = (byte)(pev `& 255); e[9] = (byte)((pev >> 8) `& 255);
+            e[10] = (byte)0; e[11] = (byte)0;
+#else
+            e = p + slot * 8;
+            e[0] = (byte)(fd `& 255); e[1] = (byte)((fd >> 8) `& 255);
+            e[2] = (byte)((fd >> 16) `& 255); e[3] = (byte)((fd >> 24) `& 255);
+            e[4] = (byte)(pev `& 255); e[5] = (byte)((pev >> 8) `& 255);
+            e[6] = (byte)0; e[7] = (byte)0;
+#endif;
+        };
+
+        def ev_prev(byte* p, int slot) -> int
+        {
+            byte* e;
+#ifdef __WINDOWS__
+            e = p + slot * 16;
+            return (int)e[10] `| ((int)e[11] << 8);
+#else
+            e = p + slot * 8;
+            return (int)e[6] `| ((int)e[7] << 8);
+#endif;
+        };
+
+        // Translates the generic events to poll bits and back.
+        def ev_to_poll(int want) -> int
+        {
+            int r = 0;
+#ifdef __WINDOWS__
+            if ((want `& EV_READ) != 0) { r = r `| 256; };      // POLLRDNORM
+            if ((want `& EV_WRITE) != 0) { r = r `| 16; };      // POLLWRNORM
+#else
+            if ((want `& EV_READ) != 0) { r = r `| 1; };        // POLLIN
+            if ((want `& EV_WRITE) != 0) { r = r `| 4; };       // POLLOUT
+#endif;
+            return r;
+        };
+
+        def ev_from_poll(int rev) -> int
+        {
+            int r = 0;
+#ifdef __WINDOWS__
+            if ((rev `& 768) != 0) { r = r `| EV_READ; };       // POLLRDNORM | POLLRDBAND
+            if ((rev `& 16) != 0) { r = r `| EV_WRITE; };
+            if ((rev `& 7) != 0) { r = r `| EV_ERROR; };        // POLLERR | POLLHUP | POLLNVAL
+#else
+            if ((rev `& 1) != 0) { r = r `| EV_READ; };
+            if ((rev `& 4) != 0) { r = r `| EV_WRITE; };
+            if ((rev `& 56) != 0) { r = r `| EV_ERROR; };       // POLLERR | POLLHUP | POLLNVAL
+#endif;
+            return r;
+        };
+
+        def evloop_poll(EVLOOP* l, int max_wait_ms) -> int
+        {
+            int i, n, rc, slot, ev, timeout, count;
+            int ran = 0;
+            i64 now, wait;
+
+            if (l.dirty != 0) { ev_compact(l); };
+
+            // time until the nearest timer
+            timeout = max_wait_ms;
+            now = ev_now_ms();
+            for (i = 0; i < l.ntimers; i++)
+            {
+                if (l.tactive[i] != 0)
+                {
+                    wait = l.due[i] - now;
+                    if (wait < (i64)0) { wait = (i64)0; };
+                    if (timeout < 0 | wait < (i64)timeout) { timeout = (int)wait; };
+                };
+            };
+
+            // build the poll set
+            n = 0;
+            for (i = 0; i < l.nfds; i++)
+            {
+                if (l.fd[i] >= 0 & l.want[i] != 0)
+                {
+                    ev_pset(@l.pfds[0], n, l.fd[i], ev_to_poll(l.want[i]));
+                    l.pmap[n] = i;
+                    n++;
+                };
+            };
+
+            if (n == 0)
+            {
+                // nothing to poll: just wait for the next timer
+                if (timeout > 0) { sleep_ms((u32)timeout); };
+            }
+            else
+            {
+#ifdef __WINDOWS__
+                rc = WSAPoll((void*)@l.pfds[0], (u32)n, timeout);
+#else
+                rc = poll((void*)@l.pfds[0], (u32)n, timeout);
+#endif;
+                if (rc < 0) { return 0 - 1; };
+                if (rc > 0)
+                {
+                    count = l.nfds;
+                    for (slot = 0; slot < n; slot++)
+                    {
+                        ev = ev_from_poll(ev_prev(@l.pfds[0], slot));
+                        if (ev == 0) { continue; };
+                        i = l.pmap[slot];
+                        if (i >= count) { continue; };
+                        if (l.fd[i] < 0) { continue; };
+                        def{}* h(int, int, void*) -> void = l.fn[i];
+                        h(l.fd[i], ev, l.ctx[i]);
+                        ran++;
+                    };
+                };
+            };
+
+            // due timers
+            now = ev_now_ms();
+            for (i = 0; i < l.ntimers; i++)
+            {
+                if (l.tactive[i] != 0 & l.due[i] <= now)
+                {
+                    if (l.interval[i] > (i64)0) { l.due[i] = now + l.interval[i]; } else { l.tactive[i] = 0; };
+                    def{}* th(void*) -> void = l.tfn[i];
+                    th(l.tctx[i]);
+                    ran++;
+                };
+            };
+
+            if (l.dirty != 0) { ev_compact(l); };
+            return ran;
+        };
+
+        def evloop_run(EVLOOP* l) -> void
+        {
+            l.stop = 0;
+            while (l.stop == 0) { evloop_poll(l, 1000); };
+        };
+
+        def evloop_stop(EVLOOP* l) -> void
+        {
+            l.stop = 1;
+        };
+
+    }; // eventloop
+}; // standard
+
+#endif; // IDEKA_STANDARD_EVENTLOOP

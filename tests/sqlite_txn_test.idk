@@ -1,0 +1,119 @@
+// Transaction tests. Prints "<label> <value>" lines; tests/sqlite_txn_check.py compares them and runs integrity_check on tests/sqlite_t.db.
+#import <standard.idk>, <sqlite.idk>, <sqlite_sql.idk>, <sqlite_write.idk>;
+
+using standard::io::console,
+      standard::sqlite;
+
+global SQLITE_DB g_db;
+global SQ_STMT g_st;
+global SQ_STMT g_q;
+global byte[200000] g_sql;
+
+def count(byte* sql) -> int
+{
+    int n = 0;
+    int rc;
+    if (sq_prepare(@g_q, @g_db, sql) != 0) { return 0 - 1; };
+    rc = sq_step(@g_q);
+    while (rc == 1) { n++; rc = sq_step(@g_q); };
+    sq_finalize(@g_q);
+    return n;
+};
+
+def show(byte* tag, int v) -> void
+{
+    print(tag); print(" \0"); print(v); print("\n\0");
+};
+
+def run(byte* sql) -> int
+{
+    return sq_exec(@g_st, @g_db, sql);
+};
+
+def put_int(byte* dst, int pos, int v) -> int
+{
+    byte[16] t;
+    int n = 0;
+    int k;
+    if (v == 0) { dst[pos] = (byte)48; return pos + 1; };
+    while (v > 0) { t[n] = (byte)(48 + v % 10); v = v / 10; n++; };
+    for (k = n - 1; k >= 0; k--) { dst[pos] = t[k]; pos++; };
+    return pos;
+};
+
+// multi-row insert of ids lo..hi-1 into t with text of length 40
+def insert_range(int lo, int hi) -> int
+{
+    int p, i, k;
+    byte* head = "insert into t values \0";
+    p = 0;
+    while (head[p] != (byte)0) { g_sql[p] = head[p]; p++; };
+    for (i = lo; i < hi; i++)
+    {
+        if (i > lo) { g_sql[p] = (byte)44; p++; };
+        g_sql[p] = (byte)40; p++;
+        p = put_int(@g_sql[0], p, i);
+        g_sql[p] = (byte)44; p++;
+        g_sql[p] = (byte)39; p++;
+        for (k = 0; k < 40; k++) { g_sql[p] = (byte)(97 + (i + k) % 26); p++; };
+        g_sql[p] = (byte)39; p++;
+        g_sql[p] = (byte)41; p++;
+    };
+    g_sql[p] = (byte)0;
+    return run(@g_sql[0]);
+};
+
+def main() -> int
+{
+    int rc;
+    if (sq_open_rw(@g_db, "tests/sqlite_t.db\0", 1) != 0) { print("open failed\n\0"); return 1; };
+    show("create \0", run("create table t(id integer primary key, s text)"));
+    show("insert1 \0", insert_range(1, 201));
+    show("count_after_insert1 \0", count("select id from t"));
+
+    show("begin \0", run("begin"));
+    show("insert_in_txn \0", insert_range(201, 1201));
+    show("count_in_txn \0", count("select id from t"));
+    show("nested_begin_fails \0", run("begin"));
+    show("rollback \0", run("rollback"));
+    show("count_after_rollback \0", count("select id from t"));
+    show("rollback_without_txn_fails \0", run("rollback"));
+
+    show("begin2 \0", run("begin transaction"));
+    show("update_in_txn \0", run("update t set s = 'updated' where id <= 50"));
+    show("delete_in_txn \0", run("delete from t where id > 150"));
+    show("create_in_txn \0", run("create table u(a, b)"));
+    show("insert_u \0", run("insert into u values (1, 'x'), (2, 'y')"));
+    show("commit \0", run("commit"));
+    show("count_t_after_commit \0", count("select id from t"));
+    show("count_u_after_commit \0", count("select a from u"));
+    show("commit_without_txn_fails \0", run("commit"));
+
+    // statement atomicity in autocommit mode: last tuple repeats an id
+    show("dup_multi_insert_fails \0", run("insert into t values (9001, 'a'), (9002, 'b'), (5, 'dup')"));
+    show("count_after_failed_insert \0", count("select id from t"));
+
+    // statement undo inside an explicit transaction: the failed statement is undone, the rest is kept
+    show("begin3 \0", run("begin"));
+    show("ok_insert \0", run("insert into t values (7001, 'kept')"));
+    show("failing_insert \0", run("insert into t values (7002, 'gone'), (7003, 'gone'), (7001, 'dup')"));
+    show("count_in_txn3 \0", count("select id from t"));
+    show("commit3 \0", run("commit"));
+    show("count_after_commit3 \0", count("select id from t"));
+
+    // create table rolled back
+    show("begin4 \0", run("begin"));
+    show("create_w \0", run("create table w(x)"));
+    show("insert_w \0", run("insert into w values (1)"));
+    show("rollback4 \0", run("rollback"));
+    show("w_exists_after_rollback \0", count("select x from w"));
+
+    // larger transaction with splits, committed
+    show("begin5 \0", run("begin"));
+    show("insert_big \0", insert_range(10000, 12000));
+    show("delete_some \0", run("delete from t where id between 10100 and 10900"));
+    show("commit5 \0", run("commit"));
+    show("count_final \0", count("select id from t"));
+    sq_close(@g_db);
+    return 0;
+};

@@ -1,0 +1,24 @@
+// Opens tests/sqlite_c2.db (a copy of the crashed database plus its hot journal), which triggers recovery, then counts rows.
+#import <standard.idk>, <sqlite.idk>, <sqlite_sql.idk>, <sqlite_write.idk>;
+
+using standard::io::console,
+      standard::sqlite;
+
+global SQLITE_DB g_db;
+global SQ_STMT g_q;
+
+def main() -> int
+{
+    int n, rc;
+    if (sq_open_rw(@g_db, "tests/sqlite_c2.db\0", 0) != 0) { print("open failed\n\0"); return 1; };
+    if (sq_schema_load(@g_db) < 0) { print("schema failed\n\0"); return 1; };
+    n = 0;
+    if (sq_prepare(@g_q, @g_db, "select id from t") != 0) { print("prepare failed\n\0"); return 1; };
+    rc = sq_step(@g_q);
+    while (rc == 1) { n++; rc = sq_step(@g_q); };
+    sq_finalize(@g_q);
+    print("rows \0"); print(n); print("\n\0");
+    print("tables \0"); print(g_db.nschema); print("\n\0");
+    sq_close(@g_db);
+    return 0;
+};

@@ -891,8 +891,8 @@ namespace standard
                 // AES context structure
                 struct AES_CTX
                 {
-                    u32[44] round_keys;     // Expanded key schedule (11 rounds * 4 words)
-                    u32 nr;                 // Number of rounds (10 for AES-128)
+                    u32[60] round_keys;     // Expanded key schedule (AES-128 uses 44 words, AES-256 uses 60)
+                    u32 nr;                 // Number of rounds (10 for AES-128, 14 for AES-256)
                 };
                 
                 // AES S-Box (Substitution box)
@@ -1169,6 +1169,39 @@ namespace standard
                     return;
                 };
                 
+                // Key expansion for AES-256 (32 byte key, 14 rounds)
+                def aes_key_expansion_256(AES_CTX* ctx, byte* key) -> void
+                {
+                    u32 i, temp;
+
+                    for (i = 0; i < 8; i++)
+                    {
+                        ctx.round_keys[i] = (((u32)key[i * 4] & 0xFF) << 24) |
+                                            (((u32)key[i * 4 + 1] & 0xFF) << 16) |
+                                            (((u32)key[i * 4 + 2] & 0xFF) << 8) |
+                                            ((u32)key[i * 4 + 3] & 0xFF);
+                    };
+
+                    for (i = 8; i < 60; i++)
+                    {
+                        temp = ctx.round_keys[i - 1];
+
+                        if ((i % 8) == 0)
+                        {
+                            temp = sub_word(rot_word(temp)) ^| RCON[i / 8 - 1];
+                        };
+                        if ((i % 8) == 4)
+                        {
+                            temp = sub_word(temp);
+                        };
+
+                        ctx.round_keys[i] = ctx.round_keys[i - 8] ^| temp;
+                    };
+
+                    ctx.nr = 14;
+                    return;
+                };
+
                 // AES-128 encryption
                 def aes_encrypt_block(AES_CTX* ctx, byte* plaintext, byte* ciphertext) -> void
                 {
@@ -1249,7 +1282,7 @@ namespace standard
                 // AES-GCM  (Galois/Counter Mode)
                 //
                 // Provides authenticated encryption with associated data (AEAD).
-                // Supports AES-128 only (matches the AES_CTX key schedule above).
+                // Supports AES-128 (gcm_init) and AES-256 (gcm_init_256).
                 //
                 // GCM builds on two primitives:
                 //   CTR mode  -- stream cipher using AES-ECB on an incrementing counter
@@ -1268,7 +1301,7 @@ namespace standard
                 // GCM context — stores expanded key and the GHASH subkey H
                 struct GCM_CTX
                 {
-                    AES_CTX aes;        // AES-128 key schedule
+                    AES_CTX aes;        // AES key schedule
                     byte[16] H;         // GHASH subkey: AES_K(0^128)
                 };
 
@@ -1413,6 +1446,26 @@ namespace standard
                     int i;
 
                     aes_key_expansion(@ctx.aes, key);
+
+                    for (i = 0; i < 16; i++)
+                    {
+                        zero_block[i] = '\0';
+                    };
+
+                    aes_encrypt_block(@ctx.aes, @zero_block[0], @ctx.H[0]);
+                    return;
+                };
+
+                // ------------------------------------------------------------------
+                // gcm_init_256: Prepare a GCM_CTX from a 32-byte AES-256 key.
+                //   gcm_encrypt and gcm_decrypt work unchanged, the context carries the round count.
+                // ------------------------------------------------------------------
+                def gcm_init_256(GCM_CTX* ctx, byte* key) -> void
+                {
+                    byte[16] zero_block;
+                    int i;
+
+                    aes_key_expansion_256(@ctx.aes, key);
 
                     for (i = 0; i < 16; i++)
                     {
@@ -1637,6 +1690,269 @@ namespace standard
                     };
 
                     return (diff == 0) ? 1 : 0;
+                };
+            };
+
+            // =====================================================================
+            // ChaCha20-Poly1305 (RFC 8439)
+            //
+            //   chacha20_xor(key[32], counter, nonce[12], in, len, out) -> void
+            //   poly1305_mac(key[32], msg, len, tag[16]) -> void
+            //   chachapoly_encrypt(key[32], nonce[12], aad, aad_len, plain, plain_len, cipher, tag[16]) -> void
+            //   chachapoly_decrypt(key[32], nonce[12], aad, aad_len, cipher, cipher_len, plain, tag[16]) -> int
+            //        returns 1 when the tag is valid, 0 otherwise (nothing is written to plain on failure)
+            // =====================================================================
+            namespace ChaCha20Poly1305
+            {
+                def cc_rotl(u32 x, u32 n) -> u32
+                {
+                    return (x << n) `| (x >> (32u - n));
+                };
+
+                def cc_le32(byte* p) -> u32
+                {
+                    return (u32)p[0] `| ((u32)p[1] << 8u) `| ((u32)p[2] << 16u) `| ((u32)p[3] << 24u);
+                };
+
+                def cc_put32(byte* p, u32 v) -> void
+                {
+                    p[0] = (byte)(v `& 255u);
+                    p[1] = (byte)((v >> 8u) `& 255u);
+                    p[2] = (byte)((v >> 16u) `& 255u);
+                    p[3] = (byte)((v >> 24u) `& 255u);
+                };
+
+                def cc_qr(u32* x, int a, int b, int c, int d) -> void
+                {
+                    x[a] = x[a] + x[b]; x[d] = cc_rotl(x[d] ^| x[a], 16u);
+                    x[c] = x[c] + x[d]; x[b] = cc_rotl(x[b] ^| x[c], 12u);
+                    x[a] = x[a] + x[b]; x[d] = cc_rotl(x[d] ^| x[a], 8u);
+                    x[c] = x[c] + x[d]; x[b] = cc_rotl(x[b] ^| x[c], 7u);
+                };
+
+                // One 64 byte keystream block.
+                def chacha20_block(byte* key, u32 counter, byte* nonce, byte* out) -> void
+                {
+                    u32[16] st, x;
+                    int i;
+                    st[0] = 1634760805u; st[1] = 857760878u; st[2] = 2036477234u; st[3] = 1797285236u;
+                    for (i = 0; i < 8; i++) { st[4 + i] = cc_le32(key + i * 4); };
+                    st[12] = counter;
+                    st[13] = cc_le32(nonce);
+                    st[14] = cc_le32(nonce + 4);
+                    st[15] = cc_le32(nonce + 8);
+                    for (i = 0; i < 16; i++) { x[i] = st[i]; };
+                    for (i = 0; i < 10; i++)
+                    {
+                        cc_qr(@x[0], 0, 4, 8, 12);
+                        cc_qr(@x[0], 1, 5, 9, 13);
+                        cc_qr(@x[0], 2, 6, 10, 14);
+                        cc_qr(@x[0], 3, 7, 11, 15);
+                        cc_qr(@x[0], 0, 5, 10, 15);
+                        cc_qr(@x[0], 1, 6, 11, 12);
+                        cc_qr(@x[0], 2, 7, 8, 13);
+                        cc_qr(@x[0], 3, 4, 9, 14);
+                    };
+                    for (i = 0; i < 16; i++) { cc_put32(out + i * 4, x[i] + st[i]); };
+                };
+
+                // XORs len bytes of in with the keystream starting at block counter. in and out may alias.
+                def chacha20_xor(byte* key, u32 counter, byte* nonce, byte* inp, int len, byte* out) -> void
+                {
+                    byte[64] ks;
+                    int off = 0;
+                    int i, n;
+                    while (off < len)
+                    {
+                        chacha20_block(key, counter, nonce, @ks[0]);
+                        counter = counter + 1u;
+                        n = len - off;
+                        if (n > 64) { n = 64; };
+                        for (i = 0; i < n; i++) { out[off + i] = inp[off + i] ^| ks[i]; };
+                        off = off + n;
+                    };
+                };
+
+                // Poly1305 with 26 bit limbs (the 32 bit "donna" layout).
+                struct POLY1305
+                {
+                    u64 r0, r1, r2, r3, r4;
+                    u64 h0, h1, h2, h3, h4;
+                    u64 pad0, pad1, pad2, pad3;
+                    byte[16] buf;
+                    int buflen;
+                };
+
+                def poly_init(POLY1305* p, byte* key) -> void
+                {
+                    // clamp r and split into 26 bit limbs
+                    p.r0 = (u64)(cc_le32(key) `& 67108863u);
+                    p.r1 = (u64)((cc_le32(key + 3) >> 2u) `& 67108611u);
+                    p.r2 = (u64)((cc_le32(key + 6) >> 4u) `& 67092735u);
+                    p.r3 = (u64)((cc_le32(key + 9) >> 6u) `& 66076671u);
+                    p.r4 = (u64)((cc_le32(key + 12) >> 8u) `& 1048575u);
+                    p.h0 = (u64)0; p.h1 = (u64)0; p.h2 = (u64)0; p.h3 = (u64)0; p.h4 = (u64)0;
+                    p.pad0 = (u64)cc_le32(key + 16);
+                    p.pad1 = (u64)cc_le32(key + 20);
+                    p.pad2 = (u64)cc_le32(key + 24);
+                    p.pad3 = (u64)cc_le32(key + 28);
+                    p.buflen = 0;
+                };
+
+                // hibit is 16777216 for a full block, 0 for the final padded block
+                def poly_block(POLY1305* p, byte* m, u64 hibit) -> void
+                {
+                    u64 mask = (u64)67108863;
+                    u64 s1 = p.r1 * (u64)5;
+                    u64 s2 = p.r2 * (u64)5;
+                    u64 s3 = p.r3 * (u64)5;
+                    u64 s4 = p.r4 * (u64)5;
+                    u64 h0, h1, h2, h3, h4, d0, d1, d2, d3, d4, c;
+
+                    h0 = p.h0 + ((u64)cc_le32(m) `& mask);
+                    h1 = p.h1 + ((u64)(cc_le32(m + 3) >> 2u) `& mask);
+                    h2 = p.h2 + ((u64)(cc_le32(m + 6) >> 4u) `& mask);
+                    h3 = p.h3 + ((u64)(cc_le32(m + 9) >> 6u) `& mask);
+                    h4 = p.h4 + ((u64)(cc_le32(m + 12) >> 8u) `| hibit);
+
+                    d0 = h0 * p.r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+                    d1 = h0 * p.r1 + h1 * p.r0 + h2 * s4 + h3 * s3 + h4 * s2;
+                    d2 = h0 * p.r2 + h1 * p.r1 + h2 * p.r0 + h3 * s4 + h4 * s3;
+                    d3 = h0 * p.r3 + h1 * p.r2 + h2 * p.r1 + h3 * p.r0 + h4 * s4;
+                    d4 = h0 * p.r4 + h1 * p.r3 + h2 * p.r2 + h3 * p.r1 + h4 * p.r0;
+
+                    c = d0 >> (u64)26; h0 = d0 `& mask;
+                    d1 = d1 + c; c = d1 >> (u64)26; h1 = d1 `& mask;
+                    d2 = d2 + c; c = d2 >> (u64)26; h2 = d2 `& mask;
+                    d3 = d3 + c; c = d3 >> (u64)26; h3 = d3 `& mask;
+                    d4 = d4 + c; c = d4 >> (u64)26; h4 = d4 `& mask;
+                    h0 = h0 + c * (u64)5; c = h0 >> (u64)26; h0 = h0 `& mask;
+                    h1 = h1 + c;
+
+                    p.h0 = h0; p.h1 = h1; p.h2 = h2; p.h3 = h3; p.h4 = h4;
+                };
+
+                def poly_update(POLY1305* p, byte* m, int len) -> void
+                {
+                    int i;
+                    int off = 0;
+                    if (p.buflen > 0)
+                    {
+                        while (p.buflen < 16 & off < len) { p.buf[p.buflen] = m[off]; p.buflen++; off++; };
+                        if (p.buflen < 16) { return; };
+                        poly_block(p, @p.buf[0], (u64)16777216);
+                        p.buflen = 0;
+                    };
+                    while (len - off >= 16)
+                    {
+                        poly_block(p, m + off, (u64)16777216);
+                        off = off + 16;
+                    };
+                    while (off < len) { p.buf[p.buflen] = m[off]; p.buflen++; off++; };
+                };
+
+                def poly_final(POLY1305* p, byte* tag) -> void
+                {
+                    u64 mask = (u64)67108863;
+                    u64 h0, h1, h2, h3, h4, c, g0, g1, g2, g3, g4, nmask, f;
+                    u32 w0, w1, w2, w3;
+                    int i;
+
+                    if (p.buflen > 0)
+                    {
+                        p.buf[p.buflen] = (byte)1;
+                        for (i = p.buflen + 1; i < 16; i++) { p.buf[i] = (byte)0; };
+                        poly_block(p, @p.buf[0], (u64)0);
+                    };
+
+                    h0 = p.h0; h1 = p.h1; h2 = p.h2; h3 = p.h3; h4 = p.h4;
+
+                    c = h1 >> (u64)26; h1 = h1 `& mask;
+                    h2 = h2 + c; c = h2 >> (u64)26; h2 = h2 `& mask;
+                    h3 = h3 + c; c = h3 >> (u64)26; h3 = h3 `& mask;
+                    h4 = h4 + c; c = h4 >> (u64)26; h4 = h4 `& mask;
+                    h0 = h0 + c * (u64)5; c = h0 >> (u64)26; h0 = h0 `& mask;
+                    h1 = h1 + c;
+
+                    // compute h + -p, select h when h < p
+                    g0 = h0 + (u64)5; c = g0 >> (u64)26; g0 = g0 `& mask;
+                    g1 = h1 + c; c = g1 >> (u64)26; g1 = g1 `& mask;
+                    g2 = h2 + c; c = g2 >> (u64)26; g2 = g2 `& mask;
+                    g3 = h3 + c; c = g3 >> (u64)26; g3 = g3 `& mask;
+                    g4 = h4 + c - (u64)67108864;
+
+                    // g4 wrapped (bit 63 set) means h < p: keep h
+                    nmask = (g4 >> (u64)63) - (u64)1;     // all ones when h >= p, zero when h < p
+                    g0 = g0 `& nmask; g1 = g1 `& nmask; g2 = g2 `& nmask; g3 = g3 `& nmask; g4 = g4 `& nmask;
+                    nmask = `!nmask;
+                    h0 = (h0 `& nmask) `| g0;
+                    h1 = (h1 `& nmask) `| g1;
+                    h2 = (h2 `& nmask) `| g2;
+                    h3 = (h3 `& nmask) `| g3;
+                    h4 = (h4 `& nmask) `| g4;
+
+                    // h = h % 2^128 as four 32 bit words
+                    w0 = (u32)((h0 `| (h1 << (u64)26)) `& (u64)4294967295);
+                    w1 = (u32)(((h1 >> (u64)6) `| (h2 << (u64)20)) `& (u64)4294967295);
+                    w2 = (u32)(((h2 >> (u64)12) `| (h3 << (u64)14)) `& (u64)4294967295);
+                    w3 = (u32)(((h3 >> (u64)18) `| (h4 << (u64)8)) `& (u64)4294967295);
+
+                    // mac = (h + pad) % 2^128
+                    f = (u64)w0 + p.pad0;                       cc_put32(tag, (u32)(f `& (u64)4294967295));
+                    f = (u64)w1 + p.pad1 + (f >> (u64)32);      cc_put32(tag + 4, (u32)(f `& (u64)4294967295));
+                    f = (u64)w2 + p.pad2 + (f >> (u64)32);      cc_put32(tag + 8, (u32)(f `& (u64)4294967295));
+                    f = (u64)w3 + p.pad3 + (f >> (u64)32);      cc_put32(tag + 12, (u32)(f `& (u64)4294967295));
+                };
+
+                def poly1305_mac(byte* key, byte* msg, int len, byte* tag) -> void
+                {
+                    POLY1305 p;
+                    poly_init(@p, key);
+                    poly_update(@p, msg, len);
+                    poly_final(@p, tag);
+                };
+
+                // MAC over aad || pad || cipher || pad || le64(aad_len) || le64(cipher_len)
+                def chachapoly_tag(byte* key, byte* nonce, byte* aad, int aad_len, byte* cipher, int cipher_len, byte* tag) -> void
+                {
+                    byte[64] block0;
+                    byte[16] zeros, lens;
+                    POLY1305 p;
+                    int i;
+                    for (i = 0; i < 16; i++) { zeros[i] = (byte)0; };
+                    chacha20_block(key, 0u, nonce, @block0[0]);
+                    poly_init(@p, @block0[0]);
+                    poly_update(@p, aad, aad_len);
+                    if (aad_len % 16 != 0) { poly_update(@p, @zeros[0], 16 - aad_len % 16); };
+                    poly_update(@p, cipher, cipher_len);
+                    if (cipher_len % 16 != 0) { poly_update(@p, @zeros[0], 16 - cipher_len % 16); };
+                    for (i = 0; i < 8; i++)
+                    {
+                        lens[i] = (byte)(((u64)aad_len >> (u64)(8 * i)) `& (u64)255);
+                        lens[8 + i] = (byte)(((u64)cipher_len >> (u64)(8 * i)) `& (u64)255);
+                    };
+                    poly_update(@p, @lens[0], 16);
+                    poly_final(@p, tag);
+                };
+
+                def chachapoly_encrypt(byte* key, byte* nonce, byte* aad, int aad_len,
+                                       byte* plain, int plain_len, byte* cipher, byte* tag) -> void
+                {
+                    chacha20_xor(key, 1u, nonce, plain, plain_len, cipher);
+                    chachapoly_tag(key, nonce, aad, aad_len, cipher, plain_len, tag);
+                };
+
+                def chachapoly_decrypt(byte* key, byte* nonce, byte* aad, int aad_len,
+                                       byte* cipher, int cipher_len, byte* plain, byte* tag) -> int
+                {
+                    byte[16] expect;
+                    int i;
+                    int diff = 0;
+                    chachapoly_tag(key, nonce, aad, aad_len, cipher, cipher_len, @expect[0]);
+                    for (i = 0; i < 16; i++) { diff = diff `| ((int)expect[i] ^| (int)tag[i]); };
+                    if (diff != 0) { return 0; };
+                    chacha20_xor(key, 1u, nonce, cipher, cipher_len, plain);
+                    return 1;
                 };
             };
         };
@@ -1907,6 +2223,607 @@ namespace standard
                 };
 
             };  // namespace X25519
+        };
+
+        // =====================================================================
+        // Ed25519 (RFC 8032)
+        //
+        //   ed25519_publickey(seed[32], pub[32]) -> void
+        //   ed25519_sign(seed[32], msg, msg_len, sig[64]) -> void
+        //   ed25519_verify(pub[32], msg, msg_len, sig[64]) -> int       1 when valid, else 0
+        //
+        // Field arithmetic is mod 2^255-19 on 8 limbs of 32 bits held in u64 slots.
+        // A field element is u64[8], a point is u64[32]: X, Y, Z, T (extended coordinates).
+        // =====================================================================
+        namespace Ed25519
+        {
+            global u64[8] ED_D, ED_D2, ED_SQRTM1;
+            global u64[32] ED_BASE;
+            global int ed_ready;
+
+            // ---- field ----
+
+            def fe_copy(u64* r, u64* a) -> void
+            {
+                int i;
+                for (i = 0; i < 8; i++) { r[i] = a[i]; };
+            };
+
+            def fe_zero(u64* r) -> void
+            {
+                int i;
+                for (i = 0; i < 8; i++) { r[i] = (u64)0; };
+            };
+
+            def fe_one(u64* r) -> void
+            {
+                fe_zero(r);
+                r[0] = (u64)1;
+            };
+
+            // folds a carry c out of bit 256 back in (2^256 = 38 mod p), three rounds always
+            def fe_fold(u64* r, u64 c) -> void
+            {
+                int i, k;
+                u64 t;
+                for (k = 0; k < 3; k++)
+                {
+                    t = c * (u64)38;
+                    c = (u64)0;
+                    for (i = 0; i < 8; i++)
+                    {
+                        t = r[i] + t;
+                        r[i] = t `& (u64)4294967295;
+                        t = t >> (u64)32;
+                    };
+                    c = t;
+                };
+            };
+
+            def fe_add(u64* r, u64* a, u64* b) -> void
+            {
+                int i;
+                u64 t = (u64)0;
+                for (i = 0; i < 8; i++)
+                {
+                    t = a[i] + b[i] + t;
+                    r[i] = t `& (u64)4294967295;
+                    t = t >> (u64)32;
+                };
+                fe_fold(r, t);
+            };
+
+            def fe_sub(u64* r, u64* a, u64* b) -> void
+            {
+                int i, k;
+                u64 t, br, d;
+                br = (u64)0;
+                for (i = 0; i < 8; i++)
+                {
+                    d = a[i] + (u64)4294967296 - b[i] - br;
+                    r[i] = d `& (u64)4294967295;
+                    br = (u64)1 - (d >> (u64)32);
+                };
+                // a borrow means the result wrapped by 2^256, which is 38 mod p: take 38 away
+                for (k = 0; k < 3; k++)
+                {
+                    t = br * (u64)38;
+                    br = (u64)0;
+                    for (i = 0; i < 8; i++)
+                    {
+                        d = r[i] + (u64)4294967296 - t;
+                        r[i] = d `& (u64)4294967295;
+                        t = (u64)1 - (d >> (u64)32);
+                    };
+                    br = t;
+                };
+            };
+
+            def fe_mul(u64* r, u64* a, u64* b) -> void
+            {
+                u64[17] t;
+                int i, j;
+                u64 p, c;
+                for (i = 0; i < 17; i++) { t[i] = (u64)0; };
+                for (i = 0; i < 8; i++)
+                {
+                    for (j = 0; j < 8; j++)
+                    {
+                        p = a[i] * b[j];
+                        t[i + j] = t[i + j] + (p `& (u64)4294967295);
+                        t[i + j + 1] = t[i + j + 1] + (p >> (u64)32);
+                    };
+                };
+                c = (u64)0;
+                for (i = 0; i < 16; i++)
+                {
+                    t[i] = t[i] + c;
+                    c = t[i] >> (u64)32;
+                    t[i] = t[i] `& (u64)4294967295;
+                };
+                // value = lo + 2^256 * hi, and 2^256 = 38 mod p
+                c = (u64)0;
+                for (i = 0; i < 8; i++)
+                {
+                    p = t[i] + t[i + 8] * (u64)38 + c;
+                    r[i] = p `& (u64)4294967295;
+                    c = p >> (u64)32;
+                };
+                fe_fold(r, c);
+            };
+
+            def fe_sq(u64* r, u64* a) -> void
+            {
+                fe_mul(r, a, a);
+            };
+
+            def fe_neg(u64* r, u64* a) -> void
+            {
+                u64[8] z;
+                fe_zero(@z[0]);
+                fe_sub(r, @z[0], a);
+            };
+
+            // canonical reduction into 32 little endian bytes
+            def fe_tobytes(byte* out, u64* a) -> void
+            {
+                u64[8] v, w;
+                u64 b, c, q, mk;
+                int i;
+                fe_copy(@v[0], a);
+                // fold bit 255: v = (v mod 2^255) + 19 * bit
+                b = v[7] >> (u64)31;
+                v[7] = v[7] `& (u64)2147483647;
+                c = b * (u64)19;
+                for (i = 0; i < 8; i++)
+                {
+                    c = v[i] + c;
+                    v[i] = c `& (u64)4294967295;
+                    c = c >> (u64)32;
+                };
+                // now v < 2^255 + 19: compute v + 19, if that reaches 2^255 then v >= p
+                c = (u64)19;
+                for (i = 0; i < 8; i++)
+                {
+                    c = v[i] + c;
+                    w[i] = c `& (u64)4294967295;
+                    c = c >> (u64)32;
+                };
+                q = w[7] >> (u64)31;
+                w[7] = w[7] `& (u64)2147483647;
+                mk = (u64)0 - q;
+                for (i = 0; i < 8; i++) { v[i] = (v[i] `& `!mk) `| (w[i] `& mk); };
+                for (i = 0; i < 8; i++)
+                {
+                    out[i * 4] = (byte)(v[i] `& (u64)255);
+                    out[i * 4 + 1] = (byte)((v[i] >> (u64)8) `& (u64)255);
+                    out[i * 4 + 2] = (byte)((v[i] >> (u64)16) `& (u64)255);
+                    out[i * 4 + 3] = (byte)((v[i] >> (u64)24) `& (u64)255);
+                };
+            };
+
+            // reads 32 bytes, ignoring bit 255
+            def fe_frombytes(u64* r, byte* inp) -> void
+            {
+                int i;
+                for (i = 0; i < 8; i++)
+                {
+                    r[i] = (u64)inp[i * 4] `| ((u64)inp[i * 4 + 1] << (u64)8) `| ((u64)inp[i * 4 + 2] << (u64)16) `| ((u64)inp[i * 4 + 3] << (u64)24);
+                };
+                r[7] = r[7] `& (u64)2147483647;
+            };
+
+            def fe_isneg(u64* a) -> int
+            {
+                byte[32] b;
+                fe_tobytes(@b[0], a);
+                return (int)(b[0] `& (byte)1);
+            };
+
+            def fe_equal(u64* a, u64* b) -> int
+            {
+                byte[32] x, y;
+                int i, d;
+                d = 0;
+                fe_tobytes(@x[0], a);
+                fe_tobytes(@y[0], b);
+                for (i = 0; i < 32; i++) { d = d `| ((int)x[i] ^| (int)y[i]); };
+                if (d == 0) { return 1; };
+                return 0;
+            };
+
+            def fe_sqk(u64* r, u64* a, int k) -> void
+            {
+                int i;
+                fe_sq(r, a);
+                for (i = 1; i < k; i++) { fe_sq(r, r); };
+            };
+
+            // r = z^(2^250 - 1), and t11 = z^11 for the caller
+            def fe_pow250(u64* r, u64* t11, u64* z) -> void
+            {
+                u64[8] t0, t1, t2, t3;
+                fe_sq(@t0[0], z);
+                fe_sqk(@t1[0], @t0[0], 2);
+                fe_mul(@t1[0], z, @t1[0]);
+                fe_mul(@t0[0], @t0[0], @t1[0]);
+                fe_copy(t11, @t0[0]);
+                fe_sq(@t2[0], @t0[0]);
+                fe_mul(@t1[0], @t1[0], @t2[0]);
+                fe_sqk(@t2[0], @t1[0], 5);
+                fe_mul(@t1[0], @t2[0], @t1[0]);
+                fe_sqk(@t2[0], @t1[0], 10);
+                fe_mul(@t2[0], @t2[0], @t1[0]);
+                fe_sqk(@t3[0], @t2[0], 20);
+                fe_mul(@t2[0], @t3[0], @t2[0]);
+                fe_sqk(@t2[0], @t2[0], 10);
+                fe_mul(@t1[0], @t2[0], @t1[0]);
+                fe_sqk(@t2[0], @t1[0], 50);
+                fe_mul(@t2[0], @t2[0], @t1[0]);
+                fe_sqk(@t3[0], @t2[0], 100);
+                fe_mul(@t2[0], @t3[0], @t2[0]);
+                fe_sqk(@t2[0], @t2[0], 50);
+                fe_mul(r, @t2[0], @t1[0]);
+            };
+
+            // r = z^(p-2)
+            def fe_invert(u64* r, u64* z) -> void
+            {
+                u64[8] t, t11;
+                fe_pow250(@t[0], @t11[0], z);
+                fe_sqk(@t[0], @t[0], 5);
+                fe_mul(r, @t[0], @t11[0]);
+            };
+
+            // r = z^((p-5)/8) = z^(2^252 - 3)
+            def fe_pow22523(u64* r, u64* z) -> void
+            {
+                u64[8] t, t11;
+                fe_pow250(@t[0], @t11[0], z);
+                fe_sqk(@t[0], @t[0], 2);
+                fe_mul(r, @t[0], z);
+            };
+
+            def fe_small(u64* r, u64 v) -> void
+            {
+                fe_zero(r);
+                r[0] = v;
+            };
+
+            // ---- points ----
+
+            def pt_add(u64* r, u64* p, u64* q) -> void
+            {
+                u64[8] a, b, c, d, e, f, g, h, t1, t2;
+                // A = (Y1-X1)(Y2-X2), B = (Y1+X1)(Y2+X2), C = T1*2d*T2, D = 2*Z1*Z2
+                fe_sub(@t1[0], p + 8, p);
+                fe_sub(@t2[0], q + 8, q);
+                fe_mul(@a[0], @t1[0], @t2[0]);
+                fe_add(@t1[0], p + 8, p);
+                fe_add(@t2[0], q + 8, q);
+                fe_mul(@b[0], @t1[0], @t2[0]);
+                fe_mul(@t1[0], p + 24, q + 24);
+                fe_mul(@c[0], @t1[0], @ED_D2[0]);
+                fe_mul(@t1[0], p + 16, q + 16);
+                fe_add(@d[0], @t1[0], @t1[0]);
+                fe_sub(@e[0], @b[0], @a[0]);
+                fe_sub(@f[0], @d[0], @c[0]);
+                fe_add(@g[0], @d[0], @c[0]);
+                fe_add(@h[0], @b[0], @a[0]);
+                fe_mul(r, @e[0], @f[0]);
+                fe_mul(r + 8, @g[0], @h[0]);
+                fe_mul(r + 16, @f[0], @g[0]);
+                fe_mul(r + 24, @e[0], @h[0]);
+            };
+
+            def pt_copy(u64* r, u64* p) -> void
+            {
+                int i;
+                for (i = 0; i < 32; i++) { r[i] = p[i]; };
+            };
+
+            def pt_identity(u64* r) -> void
+            {
+                fe_zero(r);
+                fe_one(r + 8);
+                fe_one(r + 16);
+                fe_zero(r + 24);
+            };
+
+            def pt_neg(u64* r, u64* p) -> void
+            {
+                fe_neg(r, p);
+                fe_copy(r + 8, p + 8);
+                fe_copy(r + 16, p + 16);
+                fe_neg(r + 24, p + 24);
+            };
+
+            // r = k * p for a 32 byte little endian scalar, the control flow does not depend on k
+            def pt_scalarmult(u64* r, byte* k, u64* p) -> void
+            {
+                u64[32] acc, sum;
+                int i, j, bit;
+                u64 mk;
+                pt_identity(@acc[0]);
+                for (i = 255; i >= 0; i--)
+                {
+                    pt_add(@acc[0], @acc[0], @acc[0]);
+                    pt_add(@sum[0], @acc[0], p);
+                    bit = ((int)k[i / 8] >> (i % 8)) `& 1;
+                    mk = (u64)0 - (u64)bit;
+                    for (j = 0; j < 32; j++) { acc[j] = (acc[j] `& `!mk) `| (sum[j] `& mk); };
+                };
+                pt_copy(r, @acc[0]);
+            };
+
+            def pt_encode(byte* out, u64* p) -> void
+            {
+                u64[8] zi, x, y;
+                fe_invert(@zi[0], p + 16);
+                fe_mul(@x[0], p, @zi[0]);
+                fe_mul(@y[0], p + 8, @zi[0]);
+                fe_tobytes(out, @y[0]);
+                out[31] = out[31] ^| (byte)(fe_isneg(@x[0]) << 7);
+            };
+
+            // returns 1 on success
+            def pt_decode(u64* r, byte* inp) -> int
+            {
+                u64[8] y, y2, u, v, v3, v7, x, vxx, t, one;
+                int sign;
+                sign = (int)(inp[31] >> (byte)7);
+                fe_frombytes(@y[0], inp);
+                fe_one(@one[0]);
+                fe_sq(@y2[0], @y[0]);
+                fe_sub(@u[0], @y2[0], @one[0]);
+                fe_mul(@v[0], @y2[0], @ED_D[0]);
+                fe_add(@v[0], @v[0], @one[0]);
+                fe_sq(@v3[0], @v[0]);
+                fe_mul(@v3[0], @v3[0], @v[0]);
+                fe_sq(@v7[0], @v3[0]);
+                fe_mul(@v7[0], @v7[0], @v[0]);
+                fe_mul(@t[0], @u[0], @v7[0]);
+                fe_pow22523(@t[0], @t[0]);
+                fe_mul(@x[0], @t[0], @u[0]);
+                fe_mul(@x[0], @x[0], @v3[0]);
+                fe_sq(@vxx[0], @x[0]);
+                fe_mul(@vxx[0], @vxx[0], @v[0]);
+                if (fe_equal(@vxx[0], @u[0]) == 0)
+                {
+                    fe_neg(@t[0], @u[0]);
+                    if (fe_equal(@vxx[0], @t[0]) == 0) { return 0; };
+                    fe_mul(@x[0], @x[0], @ED_SQRTM1[0]);
+                };
+                if (fe_isneg(@x[0]) != sign) { fe_neg(@x[0], @x[0]); };
+                // x = 0 with the sign bit set is not a valid encoding
+                fe_zero(@t[0]);
+                if (fe_equal(@x[0], @t[0]) == 1 & sign == 1) { return 0; };
+                fe_copy(r, @x[0]);
+                fe_copy(r + 8, @y[0]);
+                fe_one(r + 16);
+                fe_mul(r + 24, @x[0], @y[0]);
+                return 1;
+            };
+
+            def ed_init() -> void
+            {
+                u64[8] a, b, t;
+                byte[32] enc;
+                int i;
+                if (ed_ready != 0) { return; };
+                // d = -121665 / 121666
+                fe_small(@a[0], (u64)121665);
+                fe_neg(@a[0], @a[0]);
+                fe_small(@b[0], (u64)121666);
+                fe_invert(@b[0], @b[0]);
+                fe_mul(@ED_D[0], @a[0], @b[0]);
+                fe_add(@ED_D2[0], @ED_D[0], @ED_D[0]);
+                // sqrt(-1) = 2^((p-1)/4)
+                fe_small(@a[0], (u64)2);
+                fe_pow22523(@t[0], @a[0]);          // 2^((p-5)/8)
+                fe_sq(@t[0], @t[0]);                // 2^((p-5)/4)
+                fe_mul(@ED_SQRTM1[0], @t[0], @a[0]);// 2^((p-1)/4)
+                // base point: y = 4/5, x positive
+                enc[0] = (byte)88;
+                for (i = 1; i < 32; i++) { enc[i] = (byte)102; };
+                ed_ready = 1;
+                pt_decode(@ED_BASE[0], @enc[0]);
+            };
+
+            // ---- scalars mod L = 2^252 + 27742317777372353535851937790883648493 ----
+
+            def sc_geq_l(u64* a) -> int
+            {
+                int i;
+                u64[8] l;
+                l[0] = (u64)1559614445; l[1] = (u64)1477600026; l[2] = (u64)2734136534; l[3] = (u64)350157278;
+                l[4] = (u64)0; l[5] = (u64)0; l[6] = (u64)0; l[7] = (u64)268435456;
+                for (i = 7; i >= 0; i--)
+                {
+                    if (a[i] > l[i]) { return 1; };
+                    if (a[i] < l[i]) { return 0; };
+                };
+                return 1;
+            };
+
+            def sc_sub_l(u64* a) -> void
+            {
+                int i;
+                u64[8] l;
+                u64 br, d;
+                l[0] = (u64)1559614445; l[1] = (u64)1477600026; l[2] = (u64)2734136534; l[3] = (u64)350157278;
+                l[4] = (u64)0; l[5] = (u64)0; l[6] = (u64)0; l[7] = (u64)268435456;
+                br = (u64)0;
+                for (i = 0; i < 8; i++)
+                {
+                    d = a[i] + (u64)4294967296 - l[i] - br;
+                    a[i] = d `& (u64)4294967295;
+                    br = (u64)1 - (d >> (u64)32);
+                };
+            };
+
+            // reduces a 512 bit little endian number (16 limbs of 32 bits) mod L into 8 limbs
+            def sc_reduce(u64* inp16, u64* out8) -> void
+            {
+                int i, b, j;
+                u64 c, bit;
+                for (i = 0; i < 8; i++) { out8[i] = (u64)0; };
+                for (b = 511; b >= 0; b--)
+                {
+                    bit = (inp16[b / 32] >> (u64)(b % 32)) `& (u64)1;
+                    c = bit;
+                    for (j = 0; j < 8; j++)
+                    {
+                        c = (out8[j] << (u64)1) `| c;
+                        out8[j] = c `& (u64)4294967295;
+                        c = c >> (u64)32;
+                    };
+                    if (sc_geq_l(out8) == 1) { sc_sub_l(out8); };
+                };
+            };
+
+            def sc_from_bytes(u64* out16, byte* inp, int n) -> void
+            {
+                int i;
+                for (i = 0; i < 16; i++) { out16[i] = (u64)0; };
+                for (i = 0; i < n; i++) { out16[i / 4] = out16[i / 4] `| ((u64)inp[i] << (u64)(8 * (i % 4))); };
+            };
+
+            def sc_to_bytes(byte* out, u64* a8) -> void
+            {
+                int i;
+                for (i = 0; i < 32; i++) { out[i] = (byte)((a8[i / 4] >> (u64)(8 * (i % 4))) `& (u64)255); };
+            };
+
+            // r = (a * b + c) mod L, all 8 limb scalars
+            def sc_muladd(u64* r, u64* a, u64* b, u64* c) -> void
+            {
+                u64[17] t;
+                u64[16] full;
+                int i, j;
+                u64 p, cr;
+                for (i = 0; i < 17; i++) { t[i] = (u64)0; };
+                for (i = 0; i < 8; i++)
+                {
+                    for (j = 0; j < 8; j++)
+                    {
+                        p = a[i] * b[j];
+                        t[i + j] = t[i + j] + (p `& (u64)4294967295);
+                        t[i + j + 1] = t[i + j + 1] + (p >> (u64)32);
+                    };
+                };
+                for (i = 0; i < 8; i++) { t[i] = t[i] + c[i]; };
+                cr = (u64)0;
+                for (i = 0; i < 16; i++)
+                {
+                    t[i] = t[i] + cr;
+                    cr = t[i] >> (u64)32;
+                    full[i] = t[i] `& (u64)4294967295;
+                };
+                sc_reduce(@full[0], r);
+            };
+
+            // ---- API ----
+
+            def ed_expand(byte* seed, byte* a, byte* prefix) -> void
+            {
+                byte[64] h;
+                int i;
+                SHA384::sha512(seed, (u64)32, @h[0]);
+                for (i = 0; i < 32; i++) { a[i] = h[i]; prefix[i] = h[32 + i]; };
+                a[0] = a[0] `& (byte)248;
+                a[31] = a[31] `& (byte)127;
+                a[31] = a[31] `| (byte)64;
+            };
+
+            def ed25519_publickey(byte* seed, byte* pub) -> void
+            {
+                byte[32] a, prefix;
+                u64[32] A;
+                ed_init();
+                ed_expand(seed, @a[0], @prefix[0]);
+                pt_scalarmult(@A[0], @a[0], @ED_BASE[0]);
+                pt_encode(pub, @A[0]);
+            };
+
+            def ed25519_sign(byte* seed, byte* msg, int msg_len, byte* sig) -> void
+            {
+                byte[32] a, prefix, pub, rb, kb;
+                byte[64] h;
+                u64[32] R, A;
+                u64[16] wide;
+                u64[8] r, k, sa, s, zero;
+                SHA384_CTX ctx;
+                int i;
+                ed_init();
+                ed_expand(seed, @a[0], @prefix[0]);
+                pt_scalarmult(@A[0], @a[0], @ED_BASE[0]);
+                pt_encode(@pub[0], @A[0]);
+
+                SHA384::sha512_init(@ctx);
+                SHA384::sha512_update(@ctx, @prefix[0], (u64)32);
+                SHA384::sha512_update(@ctx, msg, (u64)msg_len);
+                SHA384::sha512_final(@ctx, @h[0]);
+                sc_from_bytes(@wide[0], @h[0], 64);
+                sc_reduce(@wide[0], @r[0]);
+                sc_to_bytes(@kb[0], @r[0]);
+                pt_scalarmult(@R[0], @kb[0], @ED_BASE[0]);
+                pt_encode(@rb[0], @R[0]);
+
+                SHA384::sha512_init(@ctx);
+                SHA384::sha512_update(@ctx, @rb[0], (u64)32);
+                SHA384::sha512_update(@ctx, @pub[0], (u64)32);
+                SHA384::sha512_update(@ctx, msg, (u64)msg_len);
+                SHA384::sha512_final(@ctx, @h[0]);
+                sc_from_bytes(@wide[0], @h[0], 64);
+                sc_reduce(@wide[0], @k[0]);
+
+                // S = (r + k * a) mod L
+                sc_from_bytes(@wide[0], @a[0], 32);
+                for (i = 0; i < 8; i++) { sa[i] = wide[i]; };
+                sc_muladd(@s[0], @k[0], @sa[0], @r[0]);
+
+                for (i = 0; i < 32; i++) { sig[i] = rb[i]; };
+                sc_to_bytes(sig + 32, @s[0]);
+            };
+
+            def ed25519_verify(byte* pub, byte* msg, int msg_len, byte* sig) -> int
+            {
+                byte[32] kb, sb, chk;
+                byte[64] h;
+                u64[32] A, nA, SB, kA, R2;
+                u64[16] wide;
+                u64[8] k, s;
+                SHA384_CTX ctx;
+                int i, d;
+                ed_init();
+                // S must be below L
+                sc_from_bytes(@wide[0], sig + 32, 32);
+                for (i = 0; i < 8; i++) { s[i] = wide[i]; };
+                if (sc_geq_l(@s[0]) == 1) { return 0; };
+                if (pt_decode(@A[0], pub) == 0) { return 0; };
+
+                SHA384::sha512_init(@ctx);
+                SHA384::sha512_update(@ctx, sig, (u64)32);
+                SHA384::sha512_update(@ctx, pub, (u64)32);
+                SHA384::sha512_update(@ctx, msg, (u64)msg_len);
+                SHA384::sha512_final(@ctx, @h[0]);
+                sc_from_bytes(@wide[0], @h[0], 64);
+                sc_reduce(@wide[0], @k[0]);
+                sc_to_bytes(@kb[0], @k[0]);
+                sc_to_bytes(@sb[0], @s[0]);
+
+                // R' = S*B - k*A must encode to the R in the signature
+                pt_scalarmult(@SB[0], @sb[0], @ED_BASE[0]);
+                pt_neg(@nA[0], @A[0]);
+                pt_scalarmult(@kA[0], @kb[0], @nA[0]);
+                pt_add(@R2[0], @SB[0], @kA[0]);
+                pt_encode(@chk[0], @R2[0]);
+                d = 0;
+                for (i = 0; i < 32; i++) { d = d `| ((int)chk[i] ^| (int)sig[i]); };
+                if (d == 0) { return 1; };
+                return 0;
+            };
         };
 
         namespace KDF
@@ -2238,6 +3155,195 @@ namespace standard
                 };
 
             }; // HKDF
+
+            // =================================================================
+            // PBKDF2 (RFC 8018) with HMAC-SHA256 or HMAC-SHA512
+            //
+            //   pbkdf2_sha256(pw, pw_len, salt, salt_len, iterations, out, out_len) -> bool
+            //   pbkdf2_sha512(pw, pw_len, salt, salt_len, iterations, out, out_len) -> bool
+            //
+            // Returns false when salt_len is above 256 or iterations is below 1.
+            // =================================================================
+            namespace PBKDF2
+            {
+                // sbuf holds the salt followed by 4 spare bytes, which are overwritten with the block counter.
+                def pbkdf2_buf(byte* pw, int pw_len, byte* sbuf, int salt_len, int iterations,
+                               byte* out, int out_len, bool wide) -> bool
+                {
+                    byte[64] u, t;
+                    int hlen, blocks, bi, i, j, n;
+                    if (iterations < 1 | out_len < 1) { return false; };
+                    hlen = 32;
+                    if (wide) { hlen = 64; };
+                    blocks = (out_len + hlen - 1) / hlen;
+                    for (bi = 1; bi <= blocks; bi++)
+                    {
+                        sbuf[salt_len] = (byte)((bi >> 24) `& 255);
+                        sbuf[salt_len + 1] = (byte)((bi >> 16) `& 255);
+                        sbuf[salt_len + 2] = (byte)((bi >> 8) `& 255);
+                        sbuf[salt_len + 3] = (byte)(bi `& 255);
+                        if (wide) { HKDF::hmac_sha512(pw, pw_len, sbuf, salt_len + 4, @u[0]); }
+                        else { HKDF::hmac_sha256(pw, pw_len, sbuf, salt_len + 4, @u[0]); };
+                        for (i = 0; i < hlen; i++) { t[i] = u[i]; };
+                        for (j = 1; j < iterations; j++)
+                        {
+                            if (wide) { HKDF::hmac_sha512(pw, pw_len, @u[0], hlen, @u[0]); }
+                            else { HKDF::hmac_sha256(pw, pw_len, @u[0], hlen, @u[0]); };
+                            for (i = 0; i < hlen; i++) { t[i] = t[i] ^| u[i]; };
+                        };
+                        n = out_len - (bi - 1) * hlen;
+                        if (n > hlen) { n = hlen; };
+                        for (i = 0; i < n; i++) { out[(bi - 1) * hlen + i] = t[i]; };
+                    };
+                    return true;
+                };
+
+                def pbkdf2_core(byte* pw, int pw_len, byte* salt, int salt_len, int iterations,
+                                byte* out, int out_len, bool wide) -> bool
+                {
+                    byte[320] sblock;
+                    int i;
+                    if (salt_len > 256) { return false; };
+                    for (i = 0; i < salt_len; i++) { sblock[i] = salt[i]; };
+                    return pbkdf2_buf(pw, pw_len, @sblock[0], salt_len, iterations, out, out_len, wide);
+                };
+
+                def pbkdf2_sha256(byte* pw, int pw_len, byte* salt, int salt_len, int iterations,
+                                  byte* out, int out_len) -> bool
+                {
+                    return pbkdf2_core(pw, pw_len, salt, salt_len, iterations, out, out_len, false);
+                };
+
+                def pbkdf2_sha512(byte* pw, int pw_len, byte* salt, int salt_len, int iterations,
+                                  byte* out, int out_len) -> bool
+                {
+                    return pbkdf2_core(pw, pw_len, salt, salt_len, iterations, out, out_len, true);
+                };
+            }; // PBKDF2
+
+            // =================================================================
+            // scrypt (RFC 7914)
+            //
+            //   scrypt_work_size(N, r, p) -> u64          bytes of scratch the caller must supply
+            //   scrypt(pw, pw_len, salt, salt_len, N, r, p, work, out, out_len) -> bool
+            //
+            // N must be a power of two above 1, r and p at least 1, salt_len at most 256.
+            // work is the scratch buffer of scrypt_work_size bytes (no allocator is used).
+            // Typical interactive parameters: N = 16384, r = 8, p = 1 (16 MiB of scratch).
+            // =================================================================
+            namespace Scrypt
+            {
+                def sc_rotl(u32 x, u32 n) -> u32
+                {
+                    return (x << n) `| (x >> (32u - n));
+                };
+
+                def sc_le32(byte* p) -> u32
+                {
+                    return (u32)p[0] `| ((u32)p[1] << 8u) `| ((u32)p[2] << 16u) `| ((u32)p[3] << 24u);
+                };
+
+                def sc_put32(byte* p, u32 v) -> void
+                {
+                    p[0] = (byte)(v `& 255u);
+                    p[1] = (byte)((v >> 8u) `& 255u);
+                    p[2] = (byte)((v >> 16u) `& 255u);
+                    p[3] = (byte)((v >> 24u) `& 255u);
+                };
+
+                // Salsa20/8 core on 64 bytes in place
+                def salsa20_8(byte* b) -> void
+                {
+                    u32[16] x, in16;
+                    int i;
+                    for (i = 0; i < 16; i++) { in16[i] = sc_le32(b + i * 4); x[i] = in16[i]; };
+                    for (i = 0; i < 8; i = i + 2)
+                    {
+                        x[4] = x[4] ^| sc_rotl(x[0] + x[12], 7u);   x[8] = x[8] ^| sc_rotl(x[4] + x[0], 9u);
+                        x[12] = x[12] ^| sc_rotl(x[8] + x[4], 13u); x[0] = x[0] ^| sc_rotl(x[12] + x[8], 18u);
+                        x[9] = x[9] ^| sc_rotl(x[5] + x[1], 7u);    x[13] = x[13] ^| sc_rotl(x[9] + x[5], 9u);
+                        x[1] = x[1] ^| sc_rotl(x[13] + x[9], 13u);  x[5] = x[5] ^| sc_rotl(x[1] + x[13], 18u);
+                        x[14] = x[14] ^| sc_rotl(x[10] + x[6], 7u); x[2] = x[2] ^| sc_rotl(x[14] + x[10], 9u);
+                        x[6] = x[6] ^| sc_rotl(x[2] + x[14], 13u);  x[10] = x[10] ^| sc_rotl(x[6] + x[2], 18u);
+                        x[3] = x[3] ^| sc_rotl(x[15] + x[11], 7u);  x[7] = x[7] ^| sc_rotl(x[3] + x[15], 9u);
+                        x[11] = x[11] ^| sc_rotl(x[7] + x[3], 13u); x[15] = x[15] ^| sc_rotl(x[11] + x[7], 18u);
+                        x[1] = x[1] ^| sc_rotl(x[0] + x[3], 7u);    x[2] = x[2] ^| sc_rotl(x[1] + x[0], 9u);
+                        x[3] = x[3] ^| sc_rotl(x[2] + x[1], 13u);   x[0] = x[0] ^| sc_rotl(x[3] + x[2], 18u);
+                        x[6] = x[6] ^| sc_rotl(x[5] + x[4], 7u);    x[7] = x[7] ^| sc_rotl(x[6] + x[5], 9u);
+                        x[4] = x[4] ^| sc_rotl(x[7] + x[6], 13u);   x[5] = x[5] ^| sc_rotl(x[4] + x[7], 18u);
+                        x[11] = x[11] ^| sc_rotl(x[10] + x[9], 7u); x[8] = x[8] ^| sc_rotl(x[11] + x[10], 9u);
+                        x[9] = x[9] ^| sc_rotl(x[8] + x[11], 13u);  x[10] = x[10] ^| sc_rotl(x[9] + x[8], 18u);
+                        x[12] = x[12] ^| sc_rotl(x[15] + x[14], 7u); x[13] = x[13] ^| sc_rotl(x[12] + x[15], 9u);
+                        x[14] = x[14] ^| sc_rotl(x[13] + x[12], 13u); x[15] = x[15] ^| sc_rotl(x[14] + x[13], 18u);
+                    };
+                    for (i = 0; i < 16; i++) { sc_put32(b + i * 4, x[i] + in16[i]); };
+                };
+
+                // BlockMix over 2r 64 byte blocks, y is scratch of the same size, result left in b
+                def block_mix(byte* b, byte* y, int r) -> void
+                {
+                    byte[64] x;
+                    int i, k;
+                    for (k = 0; k < 64; k++) { x[k] = b[(2 * r - 1) * 64 + k]; };
+                    for (i = 0; i < 2 * r; i++)
+                    {
+                        for (k = 0; k < 64; k++) { x[k] = x[k] ^| b[i * 64 + k]; };
+                        salsa20_8(@x[0]);
+                        // even blocks go first, odd blocks second
+                        if (i % 2 == 0) { for (k = 0; k < 64; k++) { y[(i / 2) * 64 + k] = x[k]; }; }
+                        else { for (k = 0; k < 64; k++) { y[(r + i / 2) * 64 + k] = x[k]; }; };
+                    };
+                    for (k = 0; k < 128 * r; k++) { b[k] = y[k]; };
+                };
+
+                def scrypt_work_size(u64 N, int r, int p) -> u64
+                {
+                    // V (N * 128 * r) + X (128 * r) + Y (128 * r) + B (p * 128 * r) + 4 spare bytes
+                    return N * (u64)128 * (u64)r + (u64)(128 * r) * (u64)(2 + p) + (u64)4;
+                };
+
+                def romix(byte* b, int r, u64 N, byte* v, byte* x, byte* y) -> void
+                {
+                    u64 i, j;
+                    int k;
+                    int blen = 128 * r;
+                    for (k = 0; k < blen; k++) { x[k] = b[k]; };
+                    for (i = (u64)0; i < N; i++)
+                    {
+                        for (k = 0; k < blen; k++) { v[i * (u64)blen + (u64)k] = x[k]; };
+                        block_mix(x, y, r);
+                    };
+                    for (i = (u64)0; i < N; i++)
+                    {
+                        // Integerify: first 8 bytes of the last 64 byte block, little endian
+                        j = (u64)sc_le32(x + (2 * r - 1) * 64) `| ((u64)sc_le32(x + (2 * r - 1) * 64 + 4) << (u64)32);
+                        j = j `& (N - (u64)1);
+                        for (k = 0; k < blen; k++) { x[k] = x[k] ^| v[j * (u64)blen + (u64)k]; };
+                        block_mix(x, y, r);
+                    };
+                    for (k = 0; k < blen; k++) { b[k] = x[k]; };
+                };
+
+                def scrypt(byte* pw, int pw_len, byte* salt, int salt_len, u64 N, int r, int p,
+                           byte* work, byte* out, int out_len) -> bool
+                {
+                    byte* v;
+                    byte* x;
+                    byte* y;
+                    byte* b;
+                    int i;
+                    int blen = 128 * r;
+                    if (N < (u64)2 | (N `& (N - (u64)1)) != (u64)0 | r < 1 | p < 1) { return false; };
+                    v = work;
+                    x = work + N * (u64)blen;
+                    y = x + blen;
+                    b = y + blen;
+                    if (!PBKDF2::pbkdf2_sha256(pw, pw_len, salt, salt_len, 1, b, p * blen)) { return false; };
+                    for (i = 0; i < p; i++) { romix(b + i * blen, r, N, v, x, y); };
+                    // the final PBKDF2 uses B as its salt, with 4 spare bytes after it in work
+                    return PBKDF2::pbkdf2_buf(pw, pw_len, b, p * blen, 1, out, out_len, false);
+                };
+            }; // Scrypt
         }; // kdf
 
         namespace ECDSA

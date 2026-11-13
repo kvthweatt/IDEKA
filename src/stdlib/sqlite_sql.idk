@@ -1,0 +1,29 @@
+// Author: Karac V. Thweatt
+
+// sqlite_sql.idk - Public entry point of the native SQLite engine. Import this one file to get the reader,
+// the query engine and the write path.
+//
+//   sq_open(SQLITE_DB*, byte* path) -> int                   open read-only
+//   sq_open_rw(SQLITE_DB*, byte* path, int create) -> int    open for writing, creating the file when create is 1
+//   sq_close(SQLITE_DB*) -> void
+//   sq_schema_load(SQLITE_DB*) -> int
+//   sq_exec(SQ_STMT*, SQLITE_DB*, byte* sql) -> int          any statement; 0 on success, otherwise st.err holds the message
+//   sq_prepare(SQ_STMT*, SQLITE_DB*, byte* sql) -> int       prepares any statement (INSERT / UPDATE / DELETE run on the first step)
+//   sq_step(SQ_STMT*) -> int                                 1 row available, 0 done, -1 error
+//   sq_finalize(SQ_STMT*) -> void
+//   sq_column_count / sq_column_name / sq_column_type / sq_column_int / sq_column_real / sq_column_bytes
+//   sq_column_ptr / sq_column_text, sq_bind_int / sq_bind_real / sq_bind_text / sq_bind_blob / sq_bind_null
+//
+// See sqlite_core.idk for the supported SQL and sqlite_write.idk for the write path.
+
+#ifndef IDEKA_STANDARD_SQLITE_CORE
+#import <sqlite_core.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_SQLITE_WRITE
+#import <sqlite_write.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_SQLITE_SQL
+#def IDEKA_STANDARD_SQLITE_SQL 1;
+#endif; // IDEKA_STANDARD_SQLITE_SQL

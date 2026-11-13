@@ -1,0 +1,93 @@
+// Stress test for standard::memory::allocators::threaded.
+// Several threads allocate, fill, verify, reallocate and free blocks through the tf* functions.
+#import <standard.idk>, <threading.idk>, <allocators.idk>;
+
+using standard::io::console,
+      standard::threading,
+      standard::memory::allocators::threaded;
+
+global int g_bad = 0;
+global int g_done = 0;
+global i32 g_stat_lock = 0;
+
+def churn(void* arg) -> void*
+{
+    int id = (int)arg;
+    int round, i, j, n;
+    u64[64] slots;
+    int[64] sizes;
+    byte* b;
+    byte tag;
+    int bad = 0;
+
+    for (i = 0; i < 64; i++) { slots[i] = (u64)0; sizes[i] = 0; };
+
+    for (round = 0; round < 20000; round++)
+    {
+        i = (round * 7 + id * 13) % 64;
+        if (slots[i] != (u64)0)
+        {
+            // verify then free or grow
+            b = (byte*)slots[i];
+            tag = (byte)(i + id);
+            for (j = 0; j < sizes[i]; j++) { if (b[j] != tag) { bad++; break; }; };
+            if (round % 3 == 0)
+            {
+                n = sizes[i] * 2;
+                if (n > 6000) { n = 64; };
+                slots[i] = tfrealloc(slots[i], (size_t)n);
+                b = (byte*)slots[i];
+                // keep the old prefix check valid: refill whole block
+                sizes[i] = n;
+                for (j = 0; j < n; j++) { b[j] = tag; };
+            }
+            else
+            {
+                tffree(slots[i]);
+                slots[i] = (u64)0;
+            };
+        }
+        else
+        {
+            n = 16 + ((round * 31 + id) % 500);
+            slots[i] = tfmalloc((size_t)n);
+            if (slots[i] == (u64)0) { bad++; continue; };
+            b = (byte*)slots[i];
+            tag = (byte)(i + id);
+            sizes[i] = n;
+            for (j = 0; j < n; j++) { b[j] = tag; };
+        };
+    };
+    for (i = 0; i < 64; i++) { if (slots[i] != (u64)0) { tffree(slots[i]); }; };
+    standard::atomic::spin_lock(@g_stat_lock);
+    g_bad = g_bad + bad;
+    g_done++;
+    standard::atomic::spin_unlock(@g_stat_lock);
+    return (void*)0;
+};
+
+def main() -> int
+{
+    Thread[4] t;
+    int i;
+    u64 z;
+    byte* zb;
+    int zero_ok = 1;
+
+    for (i = 0; i < 4; i++) { thread_create(@churn, (void*)(i + 1), @t[i]); };
+    for (i = 0; i < 4; i++) { thread_join(@t[i]); };
+
+    print("threads done: \0"); print(g_done); print("\n\0");
+    print("corrupt blocks: \0"); print(g_bad); print("\n\0");
+
+    z = tfcalloc((size_t)100, (size_t)8);
+    zb = (byte*)z;
+    for (i = 0; i < 800; i++) { if (zb[i] != (byte)0) { zero_ok = 0; }; };
+    print("tfcalloc zeroed: \0"); print(zero_ok); print("\n\0");
+    print("tfcalloc overflow refused: \0"); print(tfcalloc((size_t)0xFFFFFFFFFFFF, (size_t)0xFFFFFFFFFFFF) == (u64)0); print("\n\0");
+    tffree(z);
+
+    if (g_done == 4 & g_bad == 0 & zero_ok == 1) { print("ALL PASS\n\0"); } else { print("FAIL\n\0"); };
+    flush();
+    return 0;
+};

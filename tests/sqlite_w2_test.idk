@@ -1,0 +1,138 @@
+// Runs the statements in tests/sqlite_w2.sql (one per line) against tests/sqlite_w2.db and prints rows and results.
+// tests/sqlite_q_check.py runs the same queries with Python sqlite3 and compares the output.
+#import <standard.idk>, <sqlite.idk>, <sqlite_core.idk>, <sqlite_write.idk>;
+
+using standard::io::console,
+      standard::sqlite;
+
+global SQLITE_DB g_db;
+global SQ_STMT g_st;
+global byte[300000] g_line;
+global byte[4000000] g_buf;
+
+def hexd(int v) -> byte
+{
+    if (v < 10) { return (byte)(48 + v); };
+    return (byte)(55 + v);
+};
+
+def put_value(SQ_STMT* st, int i) -> void
+{
+    int t, n, k;
+    byte* p;
+    t = sq_column_type(st, i);
+    if (t == SQ_NULL) { print("NULL\0"); return; };
+    if (t == SQ_BLOB)
+    {
+        n = sq_column_bytes(st, i);
+        p = sq_column_ptr(st, i);
+        print("X'\0");
+        for (k = 0; k < n; k++)
+        {
+            g_buf[0] = hexd((int)p[k] / 16);
+            g_buf[1] = hexd((int)p[k] % 16);
+            g_buf[2] = (byte)0;
+            print(@g_buf[0]);
+        };
+        print("'\0");
+        return;
+    };
+    sq_column_text(st, i, @g_buf[0], 3990000);
+    if (t == SQ_REAL) { print("r:\0"); };
+    print(@g_buf[0]);
+};
+
+def isselect(byte* s) -> bool
+{
+    int k = 0;
+    while (s[k] == (byte)32) { k++; };
+    if ((s[k] | (byte)32) == (byte)115 & (s[k + 1] | (byte)32) == (byte)101 & (s[k + 2] | (byte)32) == (byte)108) { return true; };
+    if ((s[k] | (byte)32) == (byte)119 & (s[k + 1] | (byte)32) == (byte)105 & (s[k + 2] | (byte)32) == (byte)116) { return true; };
+    return false;
+};
+
+def main() -> int
+{
+    void* f;
+    int n, len, i, nc, rc;
+    f = fopen("tests/sqlite_w2.sql\0", "rb\0");
+    if ((u64)f == (u64)0) { print("missing tests/sqlite_w2.sql\n\0"); return 1; };
+    if (sq_open_rw(@g_db, "tests/sqlite_w2.db\0", 1) != 0) { print("open failed\n\0"); return 1; };
+    if (sq_schema_load(@g_db) < 0) { print("schema failed\n\0"); return 1; };
+    n = 0;
+    while ((u64)fgets(@g_line[0], 299990, f) != (u64)0)
+    {
+        len = 0;
+        while (g_line[len] != (byte)0) { len++; };
+        while (len > 0)
+        {
+            if (g_line[len - 1] == (byte)10 | g_line[len - 1] == (byte)13) { len--; g_line[len] = (byte)0; } else { break; };
+        };
+        if (len == 0) { continue; };
+        n++;
+        print("## \0"); print(n); print("\n\0");
+        if (sq_prepare(@g_st, @g_db, @g_line[0]) != 0)
+        {
+            print("ERROR\n#msg \0"); print(@g_st.err[0]); print("\n\0");
+            sq_finalize(@g_st);
+            continue;
+        };
+        if (isselect(@g_line[0]) == false)
+        {
+            rc = sq_step(@g_st);
+            if (rc < 0)
+            {
+                print("ERROR\n#msg \0"); print(@g_st.err[0]); print("\n\0");
+                sq_finalize(@g_st);
+                continue;
+            };
+            if (sq_column_count(@g_st) == 0)
+            {
+                print("OK\n\0");
+                sq_finalize(@g_st);
+                continue;
+            };
+            // RETURNING rows: print them below, the first row is already current
+            nc = sq_column_count(@g_st);
+            for (i = 0; i < nc; i++)
+            {
+                if (i > 0) { print("|\0"); };
+                sq_column_name(@g_st, i, @g_buf[0], 200);
+                print(@g_buf[0]);
+            };
+            print("\n\0");
+            while (rc == 1)
+            {
+                for (i = 0; i < nc; i++)
+                {
+                    if (i > 0) { print("|\0"); };
+                    put_value(@g_st, i);
+                };
+                print("\n\0");
+                rc = sq_step(@g_st);
+            };
+            sq_finalize(@g_st);
+            continue;
+        };
+        nc = sq_column_count(@g_st);
+        for (i = 0; i < nc; i++)
+        {
+            if (i > 0) { print("|\0"); };
+            sq_column_name(@g_st, i, @g_buf[0], 200);
+            print(@g_buf[0]);
+        };
+        print("\n\0");
+        while (sq_step(@g_st) == 1)
+        {
+            for (i = 0; i < nc; i++)
+            {
+                if (i > 0) { print("|\0"); };
+                put_value(@g_st, i);
+            };
+            print("\n\0");
+        };
+        sq_finalize(@g_st);
+    };
+    sq_close(@g_db);
+    return 0;
+};

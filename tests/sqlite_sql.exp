@@ -1,0 +1,629 @@
+Q select * from t_small
+C id|a|b|c|d
+i1|i0|t2:v0|r0|b4:00ff0007
+i2|i1|t2:v1|r1|b4:01fe0007
+i3|i-1|t2:v2|r-1|b4:02fd0007
+i4|i127|t2:v3|r127|b4:03fc0007
+i5|i128|t2:v4|r128|b4:04fb0007
+i6|i-128|t2:v5|r-128|b4:05fa0007
+i7|i-129|t2:v6|r-129|b4:06f90007
+i8|i255|t2:v7|r255|b4:07f80007
+i9|i256|t2:v8|r256|b4:08f70007
+i10|i32767|t2:v9|r32767|b4:09f60007
+i11|i32768|t3:v10|r32768|b4:0af50007
+i12|i-32768|t3:v11|r-32768|b4:0bf40007
+i13|i8388607|t3:v12|r8388607|b4:0cf30007
+i14|i8388608|t3:v13|r8388608|b4:0df20007
+i15|i-8388608|t3:v14|r-8388608|b4:0ef10007
+i16|i2147483647|t3:v15|r500|b4:0ff00007
+i17|i2147483648|t3:v16|r500|b4:10ef0007
+i18|i-2147483648|t3:v17|r500|b4:11ee0007
+i19|i-2147483649|t3:v18|r500|b4:12ed0007
+i20|i1099511627776|t3:v19|r500|b4:13ec0007
+i21|i-1099511627776|t3:v20|r500|b4:14eb0007
+i22|i140737488355328|t3:v21|r500|b4:15ea0007
+i23|i140737488355329|t3:v22|r500|b4:16e90007
+i24|i-140737488355328|t3:v23|r500|b4:17e80007
+i25|i281474976710656|t3:v24|r500|b4:18e70007
+i26|i4611686018427387904|t3:v25|r500|b4:19e60007
+i27|i-4611686018427387904|t3:v26|r500|b4:1ae50007
+i28|i9223372036854775807|t3:v27|r500|b4:1be40007
+i29|i-9223372036854775807|t3:v28|r500|b4:1ce30007
+i100|N|N|N|N
+i101|i5|t13:héllo 世界|r-2250|b0:
+Q select id, a, b from t_small where a > 100 order by a desc
+C id|a|b
+i28|i9223372036854775807|t3:v27
+i26|i4611686018427387904|t3:v25
+i25|i281474976710656|t3:v24
+i23|i140737488355329|t3:v22
+i22|i140737488355328|t3:v21
+i20|i1099511627776|t3:v19
+i17|i2147483648|t3:v16
+i16|i2147483647|t3:v15
+i14|i8388608|t3:v13
+i13|i8388607|t3:v12
+i11|i32768|t3:v10
+i10|i32767|t2:v9
+i9|i256|t2:v8
+i8|i255|t2:v7
+i5|i128|t2:v4
+i4|i127|t2:v3
+Q select rowid, a+1, a*2, a-1, a/3, a%7 from t_small where id < 25
+C id|a+1|a*2|a-1|a/3|a%7
+i1|i1|i0|i-1|i0|i0
+i2|i2|i2|i0|i0|i1
+i3|i0|i-2|i-2|i0|i-1
+i4|i128|i254|i126|i42|i1
+i5|i129|i256|i127|i42|i2
+i6|i-127|i-256|i-129|i-42|i-2
+i7|i-128|i-258|i-130|i-43|i-3
+i8|i256|i510|i254|i85|i3
+i9|i257|i512|i255|i85|i4
+i10|i32768|i65534|i32766|i10922|i0
+i11|i32769|i65536|i32767|i10922|i1
+i12|i-32767|i-65536|i-32769|i-10922|i-1
+i13|i8388608|i16777214|i8388606|i2796202|i3
+i14|i8388609|i16777216|i8388607|i2796202|i4
+i15|i-8388607|i-16777216|i-8388609|i-2796202|i-4
+i16|i2147483648|i4294967294|i2147483646|i715827882|i1
+i17|i2147483649|i4294967296|i2147483647|i715827882|i2
+i18|i-2147483647|i-4294967296|i-2147483649|i-715827882|i-2
+i19|i-2147483648|i-4294967298|i-2147483650|i-715827883|i-3
+i20|i1099511627777|i2199023255552|i1099511627775|i366503875925|i2
+i21|i-1099511627775|i-2199023255552|i-1099511627777|i-366503875925|i-2
+i22|i140737488355329|i281474976710656|i140737488355327|i46912496118442|i4
+i23|i140737488355330|i281474976710658|i140737488355328|i46912496118443|i5
+i24|i-140737488355327|i-281474976710656|i-140737488355329|i-46912496118442|i-4
+Q select upper(b), lower(b), length(b), substr(b,2), substr(b,-2,1), b||'-'||id from t_small
+C upper(b)|lower(b)|length(b)|substr(b,2)|substr(b,-2,1)|b||'-'||id
+t2:V0|t2:v0|i2|t1:0|t1:v|t4:v0-1
+t2:V1|t2:v1|i2|t1:1|t1:v|t4:v1-2
+t2:V2|t2:v2|i2|t1:2|t1:v|t4:v2-3
+t2:V3|t2:v3|i2|t1:3|t1:v|t4:v3-4
+t2:V4|t2:v4|i2|t1:4|t1:v|t4:v4-5
+t2:V5|t2:v5|i2|t1:5|t1:v|t4:v5-6
+t2:V6|t2:v6|i2|t1:6|t1:v|t4:v6-7
+t2:V7|t2:v7|i2|t1:7|t1:v|t4:v7-8
+t2:V8|t2:v8|i2|t1:8|t1:v|t4:v8-9
+t2:V9|t2:v9|i2|t1:9|t1:v|t5:v9-10
+t3:V10|t3:v10|i3|t2:10|t1:1|t6:v10-11
+t3:V11|t3:v11|i3|t2:11|t1:1|t6:v11-12
+t3:V12|t3:v12|i3|t2:12|t1:1|t6:v12-13
+t3:V13|t3:v13|i3|t2:13|t1:1|t6:v13-14
+t3:V14|t3:v14|i3|t2:14|t1:1|t6:v14-15
+t3:V15|t3:v15|i3|t2:15|t1:1|t6:v15-16
+t3:V16|t3:v16|i3|t2:16|t1:1|t6:v16-17
+t3:V17|t3:v17|i3|t2:17|t1:1|t6:v17-18
+t3:V18|t3:v18|i3|t2:18|t1:1|t6:v18-19
+t3:V19|t3:v19|i3|t2:19|t1:1|t6:v19-20
+t3:V20|t3:v20|i3|t2:20|t1:2|t6:v20-21
+t3:V21|t3:v21|i3|t2:21|t1:2|t6:v21-22
+t3:V22|t3:v22|i3|t2:22|t1:2|t6:v22-23
+t3:V23|t3:v23|i3|t2:23|t1:2|t6:v23-24
+t3:V24|t3:v24|i3|t2:24|t1:2|t6:v24-25
+t3:V25|t3:v25|i3|t2:25|t1:2|t6:v25-26
+t3:V26|t3:v26|i3|t2:26|t1:2|t6:v26-27
+t3:V27|t3:v27|i3|t2:27|t1:2|t6:v27-28
+t3:V28|t3:v28|i3|t2:28|t1:2|t6:v28-29
+N|N|N|N|N|N
+t13:HéLLO 世界|t13:héllo 世界|i8|t12:éllo 世界|t3:世|t17:héllo 世界-101
+Q select typeof(a), typeof(c), typeof(d), typeof(b) from t_small
+C typeof(a)|typeof(c)|typeof(d)|typeof(b)
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t7:integer|t4:real|t4:blob|t4:text
+t4:null|t4:null|t4:null|t4:null
+t7:integer|t4:real|t4:blob|t4:text
+Q select id from t_small where b like 'v1%' or b like '%0'
+C id
+i1
+i2
+i11
+i12
+i13
+i14
+i15
+i16
+i17
+i18
+i19
+i20
+i21
+Q select id from t_small where a between -200 and 300
+C id
+i1
+i2
+i3
+i4
+i5
+i6
+i7
+i8
+i9
+i101
+Q select id from t_small where a in (0, 1, 127, 99999)
+C id
+i1
+i2
+i4
+Q select id from t_small where a not in (0,1) and a is not null
+C id
+i3
+i4
+i5
+i6
+i7
+i8
+i9
+i10
+i11
+i12
+i13
+i14
+i15
+i16
+i17
+i18
+i19
+i20
+i21
+i22
+i23
+i24
+i25
+i26
+i27
+i28
+i29
+i101
+Q select a, b from t_big where a > 100 and a < 130 order by a
+C a|b
+i101|t23:row 101 xxxxxxxxxxxxxxx
+i102|t24:row 102 xxxxxxxxxxxxxxxx
+i104|t11:row 104 xxx
+i105|t27:row 105 xxxxxxxxxxxxxxxxxxx
+i107|t35:row 107 xxxxxxxxxxxxxxxxxxxxxxxxxxx
+i108|t24:row 108 xxxxxxxxxxxxxxxx
+i110|t39:row 110 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i111|t29:row 111 xxxxxxxxxxxxxxxxxxxxx
+i113|t33:row 113 xxxxxxxxxxxxxxxxxxxxxxxxx
+i114|t16:row 114 xxxxxxxx
+i116|t35:row 116 xxxxxxxxxxxxxxxxxxxxxxxxxxx
+i117|t22:row 117 xxxxxxxxxxxxxx
+i119|t39:row 119 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i120|t26:row 120 xxxxxxxxxxxxxxxxxx
+i122|t21:row 122 xxxxxxxxxxxxx
+i123|t25:row 123 xxxxxxxxxxxxxxxxx
+i125|t19:row 125 xxxxxxxxxxx
+i126|t13:row 126 xxxxx
+i128|t16:row 128 xxxxxxxx
+i129|t28:row 129 xxxxxxxxxxxxxxxxxxxx
+Q select a from t_big order by c desc, a limit 10
+C a
+i2334
+i609
+i2405
+i114
+i1581
+i2651
+i1523
+i2315
+i1718
+i1215
+Q select a, c from t_big order by c, a limit 10 offset 5
+C a|c
+i2877|i-992615
+i1299|i-991194
+i1472|i-990933
+i534|i-990468
+i2025|i-990374
+i1073|i-989266
+i504|i-989208
+i2979|i-989132
+i686|i-988988
+i2042|i-988563
+Q select * from t_big where a = 2999
+C a|b|c
+i2999|t21:row 2999 xxxxxxxxxxxx|i580784
+Q select k, length(t), length(b) from t_ovf
+C k|length(t)|length(b)
+i0|i0|i0
+i100|i100|i100
+i1000|i1000|i1000
+i4000|i4000|i4000
+i4070|i4070|i4070
+i4100|i4100|i4100
+i5000|i5000|i5000
+i12000|i12000|i12000
+i50000|i50000|i50000
+i200000|i200000|i200000
+Q select k, substr(t, 3995, 20) from t_ovf where k >= 4000 order by k desc
+C k|substr(t, 3995, 20)
+i200000|t20:qxelszgnubipwdkryfmt
+i50000|t20:kryfmtahovcjqxelszgn
+i12000|t20:wdkryfmtahovcjqxelsz
+i5000|t20:qxelszgnubipwdkryfmt
+i4100|t20:ahovcjqxelszgnubipwd
+i4070|t20:wdkryfmtahovcjqxelsz
+i4000|t6:elszgn
+Q select * from t_empty
+C a|b
+Q select * from t_mixed order by a, rowid
+C a|b|c
+i1|N|b1:00
+i3|r4500|b3:000102
+i5|N|b5:0001020304
+i7|N|b7:00010203040506
+i9|r13500|b9:0001020304050607
+i11|N|b11:0001020304050607
+i13|N|b13:0001020304050607
+i15|r22500|b15:0001020304050607
+i17|N|b17:0001020304050607
+i19|N|b19:0001020304050607
+i21|r31500|b1:00
+i23|N|b3:000102
+i25|N|b5:0001020304
+i27|r40500|b7:00010203040506
+i29|N|b9:0001020304050607
+i31|N|b11:0001020304050607
+i33|r49500|b13:0001020304050607
+i35|N|b15:0001020304050607
+i37|N|b17:0001020304050607
+i39|r58500|b19:0001020304050607
+i41|N|b1:00
+i43|N|b3:000102
+i45|r67500|b5:0001020304
+i47|N|b7:00010203040506
+i49|N|b9:0001020304050607
+t2:s0|r0|b0:
+t3:s10|N|b10:0001020304050607
+t3:s12|r18000|b12:0001020304050607
+t3:s14|N|b14:0001020304050607
+t3:s16|N|b16:0001020304050607
+t3:s18|r27000|b18:0001020304050607
+t2:s2|N|b2:0001
+t3:s20|N|b0:
+t3:s22|N|b2:0001
+t3:s24|r36000|b4:00010203
+t3:s26|N|b6:000102030405
+t3:s28|N|b8:0001020304050607
+t3:s30|r45000|b10:0001020304050607
+t3:s32|N|b12:0001020304050607
+t3:s34|N|b14:0001020304050607
+t3:s36|r54000|b16:0001020304050607
+t3:s38|N|b18:0001020304050607
+t2:s4|N|b4:00010203
+t3:s40|N|b0:
+t3:s42|r63000|b2:0001
+t3:s44|N|b4:00010203
+t3:s46|N|b6:000102030405
+t3:s48|r72000|b8:0001020304050607
+t2:s6|r9000|b6:000102030405
+t2:s8|N|b8:0001020304050607
+Q select a, b from t_mixed where b is null limit 7
+C a|b
+i1|N
+t2:s2|N
+t2:s4|N
+i5|N
+i7|N
+t2:s8|N
+t3:s10|N
+Q select coalesce(b, -1), ifnull(a, 'x') from t_mixed
+C coalesce(b, -1)|ifnull(a, 'x')
+r0|t2:s0
+i-1|i1
+i-1|t2:s2
+r4500|i3
+i-1|t2:s4
+i-1|i5
+r9000|t2:s6
+i-1|i7
+i-1|t2:s8
+r13500|i9
+i-1|t3:s10
+i-1|i11
+r18000|t3:s12
+i-1|i13
+i-1|t3:s14
+r22500|i15
+i-1|t3:s16
+i-1|i17
+r27000|t3:s18
+i-1|i19
+i-1|t3:s20
+r31500|i21
+i-1|t3:s22
+i-1|i23
+r36000|t3:s24
+i-1|i25
+i-1|t3:s26
+r40500|i27
+i-1|t3:s28
+i-1|i29
+r45000|t3:s30
+i-1|i31
+i-1|t3:s32
+r49500|i33
+i-1|t3:s34
+i-1|i35
+r54000|t3:s36
+i-1|i37
+i-1|t3:s38
+r58500|i39
+i-1|t3:s40
+i-1|i41
+r63000|t3:s42
+i-1|i43
+i-1|t3:s44
+r67500|i45
+i-1|t3:s46
+i-1|i47
+r72000|t3:s48
+i-1|i49
+Q select 1+2, 'a'||'b', 7/2, 7.0/2, 7%3, -5, abs(-3), 'it''s', null
+C 1+2|'a'||'b'|7/2|7.0/2|7%3|-5|abs(-3)|'it''s'|null
+i3|t2:ab|i3|r3500|i1|i-5|i3|t4:it's|N
+Q select a as x, b as y from t_small order by x desc
+C x|y
+i9223372036854775807|t3:v27
+i4611686018427387904|t3:v25
+i281474976710656|t3:v24
+i140737488355329|t3:v22
+i140737488355328|t3:v21
+i1099511627776|t3:v19
+i2147483648|t3:v16
+i2147483647|t3:v15
+i8388608|t3:v13
+i8388607|t3:v12
+i32768|t3:v10
+i32767|t2:v9
+i256|t2:v8
+i255|t2:v7
+i128|t2:v4
+i127|t2:v3
+i5|t13:héllo 世界
+i1|t2:v1
+i0|t2:v0
+i-1|t2:v2
+i-128|t2:v5
+i-129|t2:v6
+i-32768|t3:v11
+i-8388608|t3:v14
+i-2147483648|t3:v17
+i-2147483649|t3:v18
+i-1099511627776|t3:v20
+i-140737488355328|t3:v23
+i-4611686018427387904|t3:v26
+i-9223372036854775807|t3:v28
+N|N
+Q select a, b from t_small where a is not null order by 1, 2
+C a|b
+i-9223372036854775807|t3:v28
+i-4611686018427387904|t3:v26
+i-140737488355328|t3:v23
+i-1099511627776|t3:v20
+i-2147483649|t3:v18
+i-2147483648|t3:v17
+i-8388608|t3:v14
+i-32768|t3:v11
+i-129|t2:v6
+i-128|t2:v5
+i-1|t2:v2
+i0|t2:v0
+i1|t2:v1
+i5|t13:héllo 世界
+i127|t2:v3
+i128|t2:v4
+i255|t2:v7
+i256|t2:v8
+i32767|t2:v9
+i32768|t3:v10
+i8388607|t3:v12
+i8388608|t3:v13
+i2147483647|t3:v15
+i2147483648|t3:v16
+i1099511627776|t3:v19
+i140737488355328|t3:v21
+i140737488355329|t3:v22
+i281474976710656|t3:v24
+i4611686018427387904|t3:v25
+i9223372036854775807|t3:v27
+Q select round(c, 1), round(2.5), round(-2.5) from t_small where id < 5
+C round(c, 1)|round(2.5)|round(-2.5)
+r0|r3000|r-3000
+r0|r3000|r-3000
+r0|r3000|r-3000
+r100|r3000|r-3000
+Q select min(a, 5), max(a, 5), nullif(a, 0) from t_small
+C min(a, 5)|max(a, 5)|nullif(a, 0)
+i0|i5|N
+i1|i5|i1
+i-1|i5|i-1
+i5|i127|i127
+i5|i128|i128
+i-128|i5|i-128
+i-129|i5|i-129
+i5|i255|i255
+i5|i256|i256
+i5|i32767|i32767
+i5|i32768|i32768
+i-32768|i5|i-32768
+i5|i8388607|i8388607
+i5|i8388608|i8388608
+i-8388608|i5|i-8388608
+i5|i2147483647|i2147483647
+i5|i2147483648|i2147483648
+i-2147483648|i5|i-2147483648
+i-2147483649|i5|i-2147483649
+i5|i1099511627776|i1099511627776
+i-1099511627776|i5|i-1099511627776
+i5|i140737488355328|i140737488355328
+i5|i140737488355329|i140737488355329
+i-140737488355328|i5|i-140737488355328
+i5|i281474976710656|i281474976710656
+i5|i4611686018427387904|i4611686018427387904
+i-4611686018427387904|i5|i-4611686018427387904
+i5|i9223372036854775807|i9223372036854775807
+i-9223372036854775807|i5|i-9223372036854775807
+N|N|N
+i5|i5|i5
+Q select id from t_small where not (a > 5)
+C id
+i1
+i2
+i3
+i6
+i7
+i12
+i15
+i18
+i19
+i21
+i24
+i27
+i29
+i101
+Q select id, a from t_small where a > 1 and (b like 'v%' or c < 0) order by id desc limit 3
+C id|a
+i101|i5
+i28|i9223372036854775807
+i26|i4611686018427387904
+Q select a*1.5, a+0.25 from t_small where id < 8
+C a*1.5|a+0.25
+r0|r250
+r1500|r1250
+r-1500|r-750
+r190500|r127250
+r192000|r128250
+r-192000|r-127750
+r-193500|r-128750
+Q select t_big.a from t_big where t_big.a < 5
+C a
+i0
+i2
+i3
+Q select a, b from t_big where c > 999000 order by a
+C a|b
+i4185|t14:row 4185 xxxxx
+i6738|t35:row 6738 xxxxxxxxxxxxxxxxxxxxxxxxxx
+i7184|t12:row 7184 xxx
+i8396|t11:row 8396 xx
+i9512|t46:row 9512 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i10157|t20:row 10157 xxxxxxxxxx
+i11021|t46:row 11021 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i16916|t36:row 16916 xxxxxxxxxxxxxxxxxxxxxxxxxx
+i17375|t40:row 17375 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i17870|t13:row 17870 xxx
+i18146|t48:row 18146 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Q select a from t_big order by b, a limit 20
+C a
+i0
+i10001
+i10002
+i10004
+i10005
+i10007
+i10008
+i1001
+i10010
+i10011
+i10013
+i10014
+i10016
+i10017
+i10019
+i1002
+i10020
+i10022
+i10023
+i10025
+Q select * from t_big where a between 5000 and 5010
+C a|b|c
+i5000|t28:row 5000 xxxxxxxxxxxxxxxxxxx|i-942037
+i5001|t35:row 5001 xxxxxxxxxxxxxxxxxxxxxxxxxx|i-924433
+i5003|t22:row 5003 xxxxxxxxxxxxx|i505369
+i5004|t31:row 5004 xxxxxxxxxxxxxxxxxxxxxx|i-995072
+i5006|t26:row 5006 xxxxxxxxxxxxxxxxx|i-920001
+i5007|t40:row 5007 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|i-706278
+i5009|t22:row 5009 xxxxxxxxxxxxx|i913588
+i5010|t11:row 5010 xx|i-505738
+Q select a, b from t_big order by a desc limit 5
+C a|b
+i19998|t12:row 19998 xx
+i19997|t49:row 19997 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i19995|t10:row 19995 
+i19994|t29:row 19994 xxxxxxxxxxxxxxxxxxx
+i19992|t26:row 19992 xxxxxxxxxxxxxxxx
+Q select length(b) from t_big where a < 12
+C length(b)
+i32
+i30
+i26
+i37
+i36
+i36
+i7
+i18
+Q select a from t_big where b like 'row 1_ %'
+C a
+i11
+i12
+i14
+i15
+i17
+i18
+Q select a/0, a%0, 1/0 from t_small limit 2
+C a/0|a%0|1/0
+N|N|N
+N|N|N
+Q select typeof(1/2.0), typeof(1+1), typeof('1'+1), '12abc'+1, '3.5'*2
+C typeof(1/2.0)|typeof(1+1)|typeof('1'+1)|'12abc'+1|'3.5'*2
+t4:real|t7:integer|t7:integer|i13|r7000
+Q select typeof(9223372036854775807 + 1), typeof(-9223372036854775807 - 10), typeof(3000000000*4000000000), typeof(4611686018427387904*2), typeof(-4611686018427387904*2), typeof(9223372036854775807*-1)
+C typeof(9223372036854775807 + 1)|typeof(-9223372036854775807 - 10)|typeof(3000000000*4000000000)|typeof(4611686018427387904*2)|typeof(-4611686018427387904*2)|typeof(9223372036854775807*-1)
+t4:real|t4:real|t4:real|t4:real|t7:integer|t7:integer
+Q select substr('hello', 0, 3), substr('hello', -3), substr('hello', 2, -1), substr('héllo wörld', 2, 4)
+C substr('hello', 0, 3)|substr('hello', -3)|substr('hello', 2, -1)|substr('héllo wörld', 2, 4)
+t2:he|t3:llo|t1:h|t5:éllo
+Q select a, c from t_big order by c desc limit 3
+C a|c
+i4269|i999596
+i4401|i999484
+i5216|i999412
+Q select x'00ff7f', hex(x'00ff7f'), hex('abc'), hex(255), typeof(x''), length(x'0102'), hex(d) from t_small where id < 4
+C x'00ff7f'|hex(x'00ff7f')|hex('abc')|hex(255)|typeof(x'')|length(x'0102')|hex(d)
+b3:00ff7f|t6:00FF7F|t6:616263|t6:323535|t4:blob|i2|t8:00FF0007
+b3:00ff7f|t6:00FF7F|t6:616263|t6:323535|t4:blob|i2|t8:01FE0007
+b3:00ff7f|t6:00FF7F|t6:616263|t6:323535|t4:blob|i2|t8:02FD0007
+Q select 1 where 0
+C 1
+Q select 5 limit 0
+C 5

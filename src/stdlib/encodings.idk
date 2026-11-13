@@ -152,7 +152,7 @@ namespace standard
         {
             int groups, rem, out;
             groups = src_len / 5;
-            rem    = src_len `% 5;
+            rem    = src_len % 5;
             out    = groups * 8;
             if (rem > 0)
             {
@@ -335,7 +335,7 @@ namespace standard
                 while (j < len | carry != 0)
                 {
                     carry += 256 * (int)tmp[j];
-                    tmp[j] = (byte)(carry `% 58);
+                    tmp[j] = (byte)(carry % 58);
                     carry  = carry / 58;
                     j++;
                 };
@@ -444,7 +444,7 @@ namespace standard
         {
             int groups, rem, out;
             groups = src_len / 3;
-            rem    = src_len `% 3;
+            rem    = src_len % 3;
             out    = groups * 4;
             if (rem > 0)
             {

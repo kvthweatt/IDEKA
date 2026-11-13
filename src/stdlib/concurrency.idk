@@ -1,0 +1,256 @@
+// Author: Karac V. Thweatt
+
+// concurrency.idk - Channels and a thread pool built on threading.idk.
+//
+//   CHANNEL: bounded blocking queue of u64 values (pointers or integers)
+//     channel_init(CHANNEL*, capacity) -> int          0 on success
+//     channel_send(CHANNEL*, u64) -> bool              blocks while full, false when closed
+//     channel_recv(CHANNEL*, u64*) -> bool             blocks while empty, false when closed and drained
+//     channel_try_recv(CHANNEL*, u64*) -> int          1 got a value, 0 empty, -1 closed and drained
+//     channel_close(CHANNEL*) -> void                  wakes every waiter, sends fail after this
+//     channel_destroy(CHANNEL*) -> void
+//
+//   THREAD_POOL: fixed set of worker threads running submitted jobs
+//     pool_init(THREAD_POOL*, workers, queue_capacity) -> int    0 on success, workers 1..64
+//     pool_submit(THREAD_POOL*, job, arg) -> bool      job is def(void*) -> void, blocks while the queue is full
+//     pool_wait(THREAD_POOL*) -> void                  returns when every submitted job has finished
+//     pool_shutdown(THREAD_POOL*) -> void              finishes queued jobs, stops and joins the workers
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_THREADING
+#import <runtime\threading.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_CONCURRENCY
+#def IDEKA_STANDARD_CONCURRENCY 1;
+
+using standard::threading;
+
+namespace standard
+{
+    namespace concurrency
+    {
+        struct CHANNEL
+        {
+            Mutex m;
+            CondVar not_empty, not_full;
+            u64* buf;
+            int cap, head, count, closed;
+        };
+
+        struct POOL_TASK
+        {
+            void* fn;
+            void* arg;
+        };
+
+        struct THREAD_POOL
+        {
+            Mutex m;
+            CondVar not_empty, not_full, idle;
+            POOL_TASK* ring;
+            Thread[64] threads;
+            int nthreads, cap, head, count, pending, closed;
+        };
+
+        // ---- channel ----
+
+        def channel_init(CHANNEL* c, int cap) -> int
+        {
+            if (cap < 1) { return 1; };
+            c.buf = (u64*)fmalloc((u64)cap * (u64)8);
+            if ((u64)c.buf == (u64)0) { return 1; };
+            c.cap = cap;
+            c.head = 0;
+            c.count = 0;
+            c.closed = 0;
+            if (mutex_init(@c.m) != THREAD_OK) { ffree((u64)c.buf); return 1; };
+            if (condvar_init(@c.not_empty) != THREAD_OK) { ffree((u64)c.buf); return 1; };
+            if (condvar_init(@c.not_full) != THREAD_OK) { ffree((u64)c.buf); return 1; };
+            return 0;
+        };
+
+        def channel_send(CHANNEL* c, u64 v) -> bool
+        {
+            mutex_lock(@c.m);
+            while (c.count == c.cap & c.closed == 0) { condvar_wait(@c.not_full, @c.m); };
+            if (c.closed != 0)
+            {
+                mutex_unlock(@c.m);
+                return false;
+            };
+            c.buf[(c.head + c.count) % c.cap] = v;
+            c.count++;
+            condvar_signal(@c.not_empty);
+            mutex_unlock(@c.m);
+            return true;
+        };
+
+        def channel_recv(CHANNEL* c, u64* out) -> bool
+        {
+            mutex_lock(@c.m);
+            while (c.count == 0 & c.closed == 0) { condvar_wait(@c.not_empty, @c.m); };
+            if (c.count == 0)
+            {
+                mutex_unlock(@c.m);
+                return false;
+            };
+            *out = c.buf[c.head];
+            c.head = (c.head + 1) % c.cap;
+            c.count--;
+            condvar_signal(@c.not_full);
+            mutex_unlock(@c.m);
+            return true;
+        };
+
+        def channel_try_recv(CHANNEL* c, u64* out) -> int
+        {
+            mutex_lock(@c.m);
+            if (c.count == 0)
+            {
+                if (c.closed != 0) { mutex_unlock(@c.m); return 0 - 1; };
+                mutex_unlock(@c.m);
+                return 0;
+            };
+            *out = c.buf[c.head];
+            c.head = (c.head + 1) % c.cap;
+            c.count--;
+            condvar_signal(@c.not_full);
+            mutex_unlock(@c.m);
+            return 1;
+        };
+
+        def channel_close(CHANNEL* c) -> void
+        {
+            mutex_lock(@c.m);
+            c.closed = 1;
+            condvar_broadcast(@c.not_empty);
+            condvar_broadcast(@c.not_full);
+            mutex_unlock(@c.m);
+        };
+
+        def channel_destroy(CHANNEL* c) -> void
+        {
+            ffree((u64)c.buf);
+            c.buf = (u64*)0;
+            condvar_destroy(@c.not_empty);
+            condvar_destroy(@c.not_full);
+            mutex_destroy(@c.m);
+        };
+
+        // ---- thread pool ----
+        // The job queue is a ring allocated once in pool_init, so submitting and running
+        // jobs never touches the heap (the heap allocator is not thread safe).
+
+        def pool_worker(void* arg) -> void*
+        {
+            THREAD_POOL* p = (THREAD_POOL*)arg;
+            void* fn;
+            void* jarg;
+            while (true)
+            {
+                mutex_lock(@p.m);
+                while (p.count == 0 & p.closed == 0) { condvar_wait(@p.not_empty, @p.m); };
+                if (p.count == 0)
+                {
+                    mutex_unlock(@p.m);
+                    break;
+                };
+                fn = p.ring[p.head].fn;
+                jarg = p.ring[p.head].arg;
+                p.head = (p.head + 1) % p.cap;
+                p.count--;
+                condvar_signal(@p.not_full);
+                mutex_unlock(@p.m);
+
+                def{}* job(void*) -> void = fn;
+                job(jarg);
+
+                mutex_lock(@p.m);
+                p.pending--;
+                if (p.pending == 0) { condvar_broadcast(@p.idle); };
+                mutex_unlock(@p.m);
+            };
+            return (void*)0;
+        };
+
+        def pool_shutdown(THREAD_POOL* p) -> void
+        {
+            int i;
+            mutex_lock(@p.m);
+            p.closed = 1;
+            condvar_broadcast(@p.not_empty);
+            condvar_broadcast(@p.not_full);
+            mutex_unlock(@p.m);
+            for (i = 0; i < p.nthreads; i++) { thread_join(@p.threads[i]); };
+            p.nthreads = 0;
+            ffree((u64)p.ring);
+            p.ring = (POOL_TASK*)0;
+            condvar_destroy(@p.not_empty);
+            condvar_destroy(@p.not_full);
+            condvar_destroy(@p.idle);
+            mutex_destroy(@p.m);
+        };
+
+        def pool_init(THREAD_POOL* p, int workers, int queue_cap) -> int
+        {
+            int i;
+            if (workers < 1 | workers > 64 | queue_cap < 1) { return 1; };
+            p.nthreads = 0;
+            p.pending = 0;
+            p.head = 0;
+            p.count = 0;
+            p.closed = 0;
+            p.cap = queue_cap;
+            p.ring = (POOL_TASK*)fmalloc((u64)queue_cap * (u64)16);
+            if ((u64)p.ring == (u64)0) { return 1; };
+            if (mutex_init(@p.m) != THREAD_OK) { return 1; };
+            if (condvar_init(@p.not_empty) != THREAD_OK) { return 1; };
+            if (condvar_init(@p.not_full) != THREAD_OK) { return 1; };
+            if (condvar_init(@p.idle) != THREAD_OK) { return 1; };
+            for (i = 0; i < workers; i++)
+            {
+                if (thread_create(@pool_worker, (void*)p, @p.threads[i]) != THREAD_OK)
+                {
+                    pool_shutdown(p);
+                    return 1;
+                };
+                p.nthreads++;
+            };
+            return 0;
+        };
+
+        def pool_submit(THREAD_POOL* p, void* job, void* arg) -> bool
+        {
+            int tail;
+            mutex_lock(@p.m);
+            while (p.count == p.cap & p.closed == 0) { condvar_wait(@p.not_full, @p.m); };
+            if (p.closed != 0)
+            {
+                mutex_unlock(@p.m);
+                return false;
+            };
+            tail = (p.head + p.count) % p.cap;
+            p.ring[tail].fn = job;
+            p.ring[tail].arg = arg;
+            p.count++;
+            p.pending++;
+            condvar_signal(@p.not_empty);
+            mutex_unlock(@p.m);
+            return true;
+        };
+
+        def pool_wait(THREAD_POOL* p) -> void
+        {
+            mutex_lock(@p.m);
+            while (p.pending > 0) { condvar_wait(@p.idle, @p.m); };
+            mutex_unlock(@p.m);
+        };
+
+    }; // concurrency
+}; // standard
+
+#endif; // IDEKA_STANDARD_CONCURRENCY

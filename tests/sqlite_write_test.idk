@@ -1,0 +1,42 @@
+// Runs the statements in tests/sqlite_write.sql (one per line) against a new database tests/sqlite_w.db.
+// tests/sqlite_write_check.py then verifies the file with Python sqlite3.
+#import <standard.idk>, <sqlite.idk>, <sqlite_sql.idk>, <sqlite_write.idk>;
+
+using standard::io::console,
+      standard::sqlite;
+
+global SQLITE_DB g_db;
+global SQ_STMT g_st;
+global byte[300000] g_line;
+
+def main() -> int
+{
+    void* f;
+    int n, ok, bad, len, i;
+    f = fopen("tests/sqlite_write.sql\0", "rb\0");
+    if ((u64)f == (u64)0) { print("missing tests/sqlite_write.sql\n\0"); return 1; };
+    if (sq_open_rw(@g_db, "tests/sqlite_w.db\0", 1) != 0) { print("open failed\n\0"); return 1; };
+    n = 0; ok = 0; bad = 0;
+    while ((u64)fgets(@g_line[0], 299990, f) != (u64)0)
+    {
+        len = 0;
+        while (g_line[len] != (byte)0) { len++; };
+        while (len > 0)
+        {
+            if (g_line[len - 1] == (byte)10 | g_line[len - 1] == (byte)13) { len--; g_line[len] = (byte)0; } else { break; };
+        };
+        if (len == 0) { continue; };
+        n++;
+        if (sq_exec(@g_st, @g_db, @g_line[0]) == 0) { ok++; }
+        else
+        {
+            bad++;
+            print("line \0"); print(n); print(": \0"); print(@g_st.err[0]); print("\n\0");
+            if (bad > 10) { break; };
+        };
+    };
+    fclose(f);
+    sq_close(@g_db);
+    print("statements \0"); print(n); print(" ok \0"); print(ok); print(" failed \0"); print(bad); print("\n\0");
+    return 0;
+};

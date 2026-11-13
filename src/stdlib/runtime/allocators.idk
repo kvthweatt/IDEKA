@@ -21,6 +21,10 @@
 #import <types.idk>;
 #endif;
 
+#ifndef IDEKA_STANDARD_ATOMICS
+#import <atomics.idk>;
+#endif;
+
 #ifndef IDEKA_STANDARD_ALLOCATORS
 #def IDEKA_STANDARD_ALLOCATORS 1;
 
@@ -1087,6 +1091,73 @@ namespace standard
 
                     return float(free_bytes) / float(committed);
                 } # effect {Pure};
+            };
+
+            // Thread safe front end for the standard heap.
+            //
+            // The standard heap (stdheap) keeps its bins, bump pointer, slab list and block table in
+            // plain globals and takes no locks. These functions serialize access to it with one
+            // spinlock. The heap is only safe when every thread that allocates concurrently goes
+            // through tfmalloc, tffree, tfrealloc and tfcalloc. Mixing them with fmalloc or ffree
+            // on other threads at the same time is still a race.
+            //
+            //   tfmalloc(size)          like fmalloc
+            //   tffree(ptr)             like ffree
+            //   tfrealloc(ptr, size)    like frealloc
+            //   tfcalloc(count, size)   zeroed block of count * size bytes, 0 on overflow
+            namespace threaded
+            {
+                i32 g_tf_lock = 0;
+
+                def tfmalloc(size_t size) -> u64
+                {
+                    u64 p;
+                    standard::atomic::spin_lock(@g_tf_lock);
+                    p = standard::memory::allocators::stdheap::fmalloc(size);
+                    standard::atomic::spin_unlock(@g_tf_lock);
+                    return p;
+                } # effect {*Alloc.Heap};
+
+                def tfmalloc(ulong size) -> u64
+                {
+                    return tfmalloc((size_t)size);
+                } # effect {*Alloc.Heap};
+
+                def tffree(u64 ptr) -> void
+                {
+                    standard::atomic::spin_lock(@g_tf_lock);
+                    standard::memory::allocators::stdheap::ffree(ptr);
+                    standard::atomic::spin_unlock(@g_tf_lock);
+                } # effect {*Alloc.Heap};
+
+                def tffree(byte* ptr) -> void
+                {
+                    tffree((u64)ptr);
+                } # effect {*Alloc.Heap};
+
+                def tfrealloc(u64 ptr, size_t new_size) -> u64
+                {
+                    u64 p;
+                    standard::atomic::spin_lock(@g_tf_lock);
+                    p = standard::memory::allocators::stdheap::frealloc(ptr, new_size);
+                    standard::atomic::spin_unlock(@g_tf_lock);
+                    return p;
+                } # effect {*Alloc.Heap};
+
+                def tfcalloc(size_t count, size_t size) -> u64
+                {
+                    size_t total, i;
+                    u64 p;
+                    byte* b;
+                    switch (count == 0 | size == 0) { case (1) { return 0; } default {}; };
+                    total = count * size;
+                    switch (total / size != count) { case (1) { return 0; } default {}; };
+                    p = tfmalloc(total);
+                    switch (p is void) { case (1) { return 0; } default {}; };
+                    b = (byte*)p;
+                    for (i = 0; i < total; i++) { b[i] = (byte)0; };
+                    return p;
+                } # effect {*Alloc.Heap};
             };
 
             namespace stdstack

@@ -1,0 +1,81 @@
+// Tests channel and thread pool from concurrency.idk.
+#import <standard.idk>, <threading.idk>, <concurrency.idk>;
+
+using standard::io::console,
+      standard::threading,
+      standard::concurrency;
+
+global THREAD_POOL g_pool;
+global CHANNEL g_ch, g_ch2;
+global Mutex g_mtx;
+global i64 g_sum = 0;
+global int g_jobs = 0;
+global int fails = 0;
+
+def check(byte* name, bool ok) -> void
+{
+    if (ok) { print(name); print(" ok\n\0"); } else { print(name); print(" FAIL\n\0"); fails++; };
+    flush();
+};
+
+def add_job(void* arg) -> void
+{
+    mutex_lock(@g_mtx);
+    g_sum = g_sum + (i64)arg;
+    g_jobs++;
+    mutex_unlock(@g_mtx);
+};
+
+def producer(void* arg) -> void*
+{
+    int i;
+    for (i = 1; i <= 200; i++) { channel_send(@g_ch, (u64)i); };
+    channel_close(@g_ch);
+    return (void*)0;
+};
+
+def main() -> int
+{
+    int i;
+    u64 v = (u64)0;
+    i64 total = 0;
+    int got = 0;
+    Thread t;
+
+    mutex_init(@g_mtx);
+
+    // pool: 4 workers, a small queue so submit has to block
+    check("pool init\0", pool_init(@g_pool, 4, 8) == 0);
+    for (i = 1; i <= 1000; i++) { pool_submit(@g_pool, @add_job, (void*)i); };
+    pool_wait(@g_pool);
+    check("1000 jobs ran\0", g_jobs == 1000);
+    check("sum correct\0", g_sum == (i64)500500);
+
+    // pool is reusable after wait
+    for (i = 1; i <= 100; i++) { pool_submit(@g_pool, @add_job, (void*)1); };
+    pool_wait(@g_pool);
+    check("reuse after wait\0", g_jobs == 1100 & g_sum == (i64)500600);
+
+    pool_shutdown(@g_pool);
+    check("init rejects zero workers\0", pool_init(@g_pool, 0, 4) != 0);
+
+    // channel: producer thread, small capacity, consumer here
+    check("channel init\0", channel_init(@g_ch, 4) == 0);
+    thread_create(@producer, (void*)0, @t);
+    while (channel_recv(@g_ch, @v)) { total = total + (i64)v; got++; };
+    thread_join(@t);
+    check("channel received all\0", got == 200 & total == (i64)20100);
+    check("send after close fails\0", !channel_send(@g_ch, (u64)1));
+    check("try_recv closed and drained\0", channel_try_recv(@g_ch, @v) == 0 - 1);
+    channel_destroy(@g_ch);
+
+    check("channel2 init\0", channel_init(@g_ch2, 2) == 0);
+    check("try_recv empty\0", channel_try_recv(@g_ch2, @v) == 0);
+    channel_send(@g_ch2, (u64)42);
+    check("try_recv value\0", channel_try_recv(@g_ch2, @v) == 1 & v == (u64)42);
+    channel_destroy(@g_ch2);
+
+    if (fails == 0) { print("ALL PASS\n\0"); } else { print("FAILS\n\0"); };
+    flush();
+    return fails;
+};

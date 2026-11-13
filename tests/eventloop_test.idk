@@ -1,0 +1,107 @@
+// Event loop test: a loopback echo server, a client driven by timers, and a repeating timer.
+#import <standard.idk>, <socket_object_raw.idk>, <eventloop.idk>;
+
+using standard::io::console,
+      standard::sockets,
+      standard::eventloop;
+
+global EVLOOP g_loop;
+global int g_srv;
+global int g_cli;
+global int g_ticks = 0;
+global int g_tick_id;
+global int g_accepted = 0;
+global int g_echoed = 0;
+global int g_closed_seen = 0;
+global int fails = 0;
+global byte[64] g_reply;
+global int g_reply_n = 0;
+
+def check(byte* name, bool ok) -> void
+{
+    if (ok) { print(name); print(" ok\n\0"); } else { print(name); print(" FAIL\n\0"); fails++; };
+    flush();
+};
+
+def on_client(int fd, int events, void* ctx) -> void
+{
+    byte[64] buf;
+    int n = tcp_recv(fd, @buf[0], 64);
+    if (n <= 0)
+    {
+        evloop_remove(@g_loop, fd);
+        tcp_close(fd);
+        g_closed_seen++;
+        return;
+    };
+    tcp_send_all(fd, @buf[0], n);
+    g_echoed = g_echoed + n;
+};
+
+def on_listener(int fd, int events, void* ctx) -> void
+{
+    sockaddr_in peer;
+    int c = tcp_server_accept(fd, @peer);
+    if (c >= 0)
+    {
+        g_accepted++;
+        evloop_add(@g_loop, c, EV_READ, @on_client, (void*)0);
+    };
+};
+
+def tick(void* ctx) -> void
+{
+    g_ticks++;
+    if (g_ticks == 5) { evloop_cancel_timer(@g_loop, g_tick_id); };
+};
+
+def start_client(void* ctx) -> void
+{
+    g_cli = tcp_client_connect("127.0.0.1\0", (u16)4455);
+    if (g_cli >= 0) { tcp_send_all(g_cli, "hello loop\0", 10); };
+};
+
+def read_client(void* ctx) -> void
+{
+    if (g_cli >= 0) { g_reply_n = tcp_recv(g_cli, @g_reply[0], 63); };
+    tcp_close(g_cli);
+};
+
+def finish(void* ctx) -> void
+{
+    evloop_stop(@g_loop);
+};
+
+def main() -> int
+{
+    init();
+    g_srv = 0 - 1;
+    g_cli = 0 - 1;
+    g_tick_id = 0 - 1;
+    evloop_init(@g_loop);
+    g_srv = tcp_server_create((u16)4455, 4);
+    check("listener created\0", g_srv >= 0);
+    check("add listener\0", evloop_add(@g_loop, g_srv, EV_READ, @on_listener, (void*)0) == 0);
+    check("duplicate fd refused\0", evloop_add(@g_loop, g_srv, EV_READ, @on_listener, (void*)0) == 1);
+
+    g_tick_id = evloop_timer(@g_loop, 20, 20, @tick, (void*)0);
+    evloop_timer(@g_loop, 100, 0, @start_client, (void*)0);
+    evloop_timer(@g_loop, 500, 0, @read_client, (void*)0);
+    evloop_timer(@g_loop, 800, 0, @finish, (void*)0);
+
+    evloop_run(@g_loop);
+
+    check("client accepted\0", g_accepted == 1);
+    check("data echoed\0", g_echoed == 10 & g_reply_n == 10 & g_reply[0] == (byte)104 & g_reply[9] == (byte)112);
+    check("peer close seen and fd removed\0", g_closed_seen == 1);
+    check("repeating timer ran 5 times then cancelled\0", g_ticks == 5);
+
+    // idle poll with nothing due returns after the wait
+    evloop_init(@g_loop);
+    check("empty poll returns 0\0", evloop_poll(@g_loop, 30) == 0);
+
+    tcp_close(g_srv);
+    if (fails == 0) { print("ALL PASS\n\0"); } else { print("FAILS\n\0"); };
+    flush();
+    return fails;
+};
