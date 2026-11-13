@@ -28,6 +28,10 @@
 #import <atomics.idk>;
 #endif;
 
+#ifdef IDEKA_SHADOW_STACK
+#import <shadowstack.idk>;
+#endif;
+
 #ifndef IDEKA_STANDARD_THREADING
 #def IDEKA_STANDARD_THREADING 1;
 
@@ -324,6 +328,42 @@ namespace standard
         //  Thread
         // ====================================================
 
+#ifdef IDEKA_SHADOW_STACK
+        // A thread runs on a shadow stack region of its own, so the entry point is a wrapper that makes the region,
+        // runs the real function and releases the region.
+        struct FSSThreadBundle
+        {
+            void* fn,
+                  arg;
+        };
+
+        def _fss_thread_entry(void* p) -> void*
+        {
+            FSSThreadBundle* b = (FSSThreadBundle*)p;
+            def{}* f(void*) -> void* = b.fn;
+            void* a = b.arg;
+            void* r = (void*)0;
+            ffree((byte*)b);
+            fss_init();
+            r = f(a);
+            fss_teardown();
+            return r;
+        };
+
+        def _fss_thread_fn() -> void*
+        {
+            return (void*)@_fss_thread_entry;
+        };
+
+        def _fss_thread_bundle(void* fn, void* arg) -> void*
+        {
+            FSSThreadBundle* b = (FSSThreadBundle*)fmalloc((u64)16);
+            b.fn = fn;
+            b.arg = arg;
+            return (void*)b;
+        };
+#endif;
+
         // Spawn a new thread.
         //   fn   - function pointer with signature: def fn(void*) -> void*
         //   arg  - opaque argument forwarded to fn
@@ -331,14 +371,21 @@ namespace standard
         // Returns THREAD_OK on success, THREAD_ERROR on failure.
         def thread_create(void* fn, void* arg, Thread* out) -> int
         {
+#ifdef IDEKA_SHADOW_STACK
+            void* tfn = _fss_thread_fn();
+            void* targ = _fss_thread_bundle(fn, arg);
+#else
+            void* tfn = fn;
+            void* targ = arg;
+#endif;
             store32(@out.alive, 1);
 
             #ifdef __WINDOWS__
             void* h = CreateThread(
                 (void*)0,       // default security
                 0,              // default stack size
-                (void*)fn,      // thread function
-                arg,            // argument
+                (void*)tfn,     // thread function
+                targ,           // argument
                 0,              // run immediately
                 (u32*)0         // don't need thread ID
             );
@@ -353,7 +400,7 @@ namespace standard
 
             #ifdef __LINUX__
             void* tid_storage = (void*)@out.handle[0];
-            int rc = pthread_create(tid_storage, (void*)0, (void*)fn, arg);
+            int rc = pthread_create(tid_storage, (void*)0, (void*)tfn, targ);
             if (rc != 0)
             {
                 store32(@out.alive, 0);
@@ -364,7 +411,7 @@ namespace standard
 
             #ifdef __MACOS__
             void* tid_storage = (void*)@out.handle[0];
-            int rc = pthread_create(tid_storage, (void*)0, (void*)fn, arg);
+            int rc = pthread_create(tid_storage, (void*)0, (void*)tfn, targ);
             if (rc != 0)
             {
                 store32(@out.alive, 0);
@@ -382,14 +429,21 @@ namespace standard
         // Returns THREAD_OK on success, THREAD_ERROR on failure.
         def thread_create_stack(void* fn, void* arg, Thread* out, size_t stack_size) -> int
         {
+#ifdef IDEKA_SHADOW_STACK
+            void* tfn = _fss_thread_fn();
+            void* targ = _fss_thread_bundle(fn, arg);
+#else
+            void* tfn = fn;
+            void* targ = arg;
+#endif;
             store32(@out.alive, 1);
 
             #ifdef __WINDOWS__
             void* h = CreateThread(
                 (void*)0,         // default security
                 stack_size,       // explicit stack size
-                (void*)fn,        // thread function
-                arg,              // argument
+                (void*)tfn,       // thread function
+                targ,             // argument
                 0,                // run immediately
                 (u32*)0           // don't need thread ID
             );
@@ -408,7 +462,7 @@ namespace standard
             pthread_attr_init(attr);
             pthread_attr_setstacksize(attr, stack_size);
             void* tid_storage = (void*)@out.handle[0];
-            int rc = pthread_create(tid_storage, attr, (void*)fn, arg);
+            int rc = pthread_create(tid_storage, attr, (void*)tfn, targ);
             pthread_attr_destroy(attr);
             if (rc != 0)
             {
@@ -424,7 +478,7 @@ namespace standard
             pthread_attr_init(attr);
             pthread_attr_setstacksize(attr, stack_size);
             void* tid_storage = (void*)@out.handle[0];
-            int rc = pthread_create(tid_storage, attr, (void*)fn, arg);
+            int rc = pthread_create(tid_storage, attr, (void*)tfn, targ);
             pthread_attr_destroy(attr);
             if (rc != 0)
             {

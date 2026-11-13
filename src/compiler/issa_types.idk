@@ -29,7 +29,7 @@
 #def SO_UNREACH 19;
 #def SO_SWITCH 20;
 #def SO_COPY 22;      // a destination ptr, b source ptr, c count: copies count elements of size sz forward, k 1 when the count is signed
-#def SO_RETADDR 23;   // res the address of the slot that holds the function's return address, no operands
+#def SO_RETADDR 23;   // res the address of the slot that holds the return address of the function, no operands
 #def SO_FILL 21;      // a ptr, b value, c count: stores the value over count elements of size sz from a, k 1 when the count is signed
 
 // Binary operation kinds

@@ -95,6 +95,24 @@ namespace IDEKA
             ->;
         };
 
+        // The program uses the shadow stack: the machine backends keep one register for it (r15 on x64, x28 on AArch64)
+        bool target_ssreg = false;
+
+        set_shadow_reg(bool on) -> void
+        {
+            target_ssreg = on;
+            ->;
+        };
+
+        // The program asks for pointer authentication of the saved link register on AArch64
+        bool target_pac = false;
+
+        set_pac(bool on) -> void
+        {
+            target_pac = on;
+            ->;
+        };
+
         object CodeBackend
         {
             int kind;
@@ -130,6 +148,7 @@ namespace IDEKA
                     this.xm = (X64Module*)fmalloc((u64)(((sizeof(X64Module) + 7) / 8) * 2));
                     this.xm.__init(name);
                     this.xm.abi = target_abi;
+                    this.xm.ssreg = target_ssreg;
                     this.funcs = this.xm.funcs;
                     this.globals = this.xm.globals;
                     this.named = this.xm.named;
@@ -141,6 +160,8 @@ namespace IDEKA
                 {
                     this.am = (A64Module*)fmalloc((u64)(((sizeof(A64Module) + 7) / 8) * 2));
                     this.am.__init(name);
+                    this.am.ssreg = target_ssreg;
+                    this.am.pac = target_pac;
                     this.funcs = this.am.funcs;
                     this.globals = this.am.globals;
                     this.named = this.am.named;

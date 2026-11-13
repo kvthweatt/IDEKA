@@ -1,20 +1,30 @@
 // Author: Karac V. Thweatt
 
 // IDEKA Shadow Stack
-// Provides a hardware-assisted shadow return-address stack to protect against
-// stack-smashing / return-address overwrite attacks.
+// Protects return addresses against stack-smashing and return-address overwrite.
 //
 // Activated by defining IDEKA_SHADOW_STACK before importing standard.idk:
 //
 //   #def IDEKA_SHADOW_STACK 1;
 //   #import "standard.idk";
 //
-// When active, a function marked with the FSS_Protect_Frame contract copies
-// its real return address, read through the @-> operator, into a separately
-// allocated shadow region. FSS_Cleanup_Frame reads the return address from the
-// stack again before the function returns and compares it with the copy.
+// A function marked with the FSS_Protect_Frame contract copies its real return
+// address, read through the @-> operator, into a shadow region. FSS_Cleanup_Frame
+// reads the return address from the stack again before the function returns and
+// compares it with the copy. A mismatch aborts the process.
 //
-// If tampering is detected the process is aborted immediately.
+// The shadow region itself is defended in two ways:
+//
+//   1. It is read-only. Only fss_push and fss_pop_to make it writable, and only
+//      for the length of the call. It sits between two inaccessible guard pages
+//      at an address picked by the kernel.
+//   2. Nothing writable points at it. Its address lives in a register that the
+//      compiler reserves while IDEKA_SHADOW_STACK is defined (r15 on x86-64,
+//      x28 on AArch64), so there is no global to redirect. Every thread owns a
+//      region of its own, made by fss_init and released by fss_teardown.
+//
+// A thread that was not started through thread_create has no region, and must
+// call fss_init before it runs a protected function.
 
 #ifndef IDEKA_SHADOW_STACK_IMPL
 #def IDEKA_SHADOW_STACK_IMPL 1;
@@ -28,44 +38,51 @@
 #endif;
 
 // ============================================================================
-// Shadow stack record - one per protected frame
+// Shadow region layout
+//
+//   [guard][ header | frame 0 | frame 1 | ... ][guard]
+//
+// The header and the frames share FSS_BODY_SIZE bytes, which change protection
+// together. The header holds the per-thread canary and the frame count.
 // ============================================================================
 struct FSSFrame
 {
-    u64 canary,       // Random canary value XOR'd with the saved return address
-        saved_ra,     // Return address read from the real stack at frame entry (XOR'd with canary)
-        saved_slot;   // Address of the stack slot that held it, unique to this live frame
+    u64 saved_ra,     // Return address read from the real stack, XOR'd with the canary
+        saved_slot;   // Address of the stack slot that held it, unique to a live frame
 };
 
-// ============================================================================
-// Shadow stack globals
-//
-// FSS_BASE   - pointer to the heap-allocated shadow page
-// FSS_TOP    - current push index (grows upward)
-// FSS_CAP    - maximum number of frames the page can hold
-// FSS_CANARY - process-lifetime random seed mixed into every frame
-// ============================================================================
-global FSSFrame* FSS_BASE      = (FSSFrame*)NULL;
-global u64       FSS_TOP       = 0;
-global u64       FSS_CAP       = 0;
-global u64       FSS_CANARY    = 0;
+struct FSSHeader
+{
+    u64 self,         // Address of this header XOR'd with the canary
+        canary,       // Random value mixed into every saved return address
+        top,          // Number of live frames
+        cap;          // Number of frames the region holds
+};
 
-// ============================================================================
-// Platform externs (Windows only for now)
-// ============================================================================
+// Size in bytes of one guard page
+#def FSS_GUARD_SIZE 4096;
+// Size in bytes of the header and the frames
+#def FSS_BODY_SIZE 65536;
+// Bytes of the header
+#def FSS_HEADER_SIZE 32;
+// Number of frames the body holds
+#def FSS_FRAME_CAPACITY 4094;
+// Whole mapping
+#def FSS_REGION_SIZE 73728;
+
+// Protection modes of fss_prot
+#def FSS_PROT_NONE 0;
+#def FSS_PROT_RO   1;
+#def FSS_PROT_RW   2;
+
 #ifdef __WINDOWS__
 extern
 {
-    // VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect) -> void*
-    stdcall !!
-        VirtualAlloc(void*, u64, u32, u32) -> void*,
-        VirtualFree(void*, u64, u32)       -> i32,
-        VirtualProtect(void*, u64, u32, u32*) -> i32;
+    // VirtualAlloc, VirtualFree and VirtualProtect come from memory.idk
 
-    // For generating the canary: use the timestamp counter as entropy source
-    // We also pull in QueryPerformanceCounter for additional entropy
     stdcall !!
-        QueryPerformanceCounter(u64*) -> i32;
+        QueryPerformanceCounter(u64*) -> i32,
+        AddVectoredExceptionHandler(u32, void*) -> void*;
 
     stdcall !!
         ExitProcess(u32 uExitCode) -> void;
@@ -73,17 +90,17 @@ extern
 
 // MEM_COMMIT | MEM_RESERVE
 #def FSS_MEM_COMMIT_RESERVE 0x3000;
-// PAGE_READWRITE
-#def FSS_PAGE_READWRITE 0x04;
-// PAGE_NOACCESS - applied after init so the page cannot be executed or written freely
-#def FSS_PAGE_NOACCESS  0x01;
 // MEM_RELEASE
 #def FSS_MEM_RELEASE    0x8000;
+#endif;
 
-// Number of frames the shadow region holds (64 KB / 24 bytes per frame)
-#def FSS_FRAME_CAPACITY 2730;
-// Size in bytes of the shadow allocation
-#def FSS_PAGE_SIZE 65536;
+#ifdef __LINUX__
+extern
+{
+    def !! abort() -> void,
+        sigaction(int, void*, void*) -> int;
+};
+#endif;
 
 namespace standard
 {
@@ -92,12 +109,54 @@ namespace standard
         namespace shadow_stack
         {
             // ----------------------------------------------------------------
-            // fss_rdtsc() - Read the hardware timestamp counter.
-            // Used as a cheap entropy source when seeding the canary.
+            // The register that holds the address of this thread's header.
+            // The compiler never allocates it while IDEKA_SHADOW_STACK is set.
+            // ----------------------------------------------------------------
+            def fss_get() -> u64
+            {
+                u64 result = 0;
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov $0, x28
+                } : "=r"(result) : : "memory";
+#else
+                volatile asm
+                {
+                    movq %r15, $0
+                } : : "m"(result) : "memory";
+#endif;
+                return result;
+            };
+
+            def fss_set(u64 value) -> void
+            {
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov x28, $0
+                } : : "r"(value) : "memory";
+#else
+                volatile asm
+                {
+                    movq $0, %r15
+                } : : "r"(value) : "memory";
+#endif;
+                return;
+            };
+
+            // ----------------------------------------------------------------
+            // fss_rdtsc() - Cheap entropy from the hardware counter.
             // ----------------------------------------------------------------
             def fss_rdtsc() -> u64
             {
                 u64 result = 0;
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mrs $0, cntvct_el0
+                } : "=r"(result) : : "memory";
+#else
                 volatile asm
                 {
                     rdtsc
@@ -105,43 +164,325 @@ namespace standard
                     orq %rdx, %rax
                     movq %rax, $0
                 } : : "m"(result) : "rax", "rdx";
+#endif;
                 return result;
             };
 
+#ifdef __WINDOWS__
             // ----------------------------------------------------------------
-            // fss_init() - Allocate and prepare the shadow stack page.
+            // Windows: VirtualAlloc, VirtualProtect and VirtualFree
+            // ----------------------------------------------------------------
+            def fss_map(u64 length) -> void*
+            {
+                return (void*)VirtualAlloc(ulong((void*)NULL), length, (u32)FSS_MEM_COMMIT_RESERVE, (u32)0x04);
+            };
+
+            def fss_prot(void* addr, u64 length, int mode) -> void
+            {
+                u32 old = 0;
+                u32 flags = 0x01;
+                if (mode == FSS_PROT_RO) { flags = 0x02; };
+                if (mode == FSS_PROT_RW) { flags = 0x04; };
+                VirtualProtect(ulong(addr), length, flags, @old);
+                return;
+            };
+
+            def fss_unmap(void* addr, u64 length) -> void
+            {
+                VirtualFree(ulong(addr), (u64)0, (u32)FSS_MEM_RELEASE);
+                return;
+            };
+
+            def fss_random() -> u64
+            {
+                u64 qpc = 0;
+                QueryPerformanceCounter(@qpc);
+                return qpc;
+            };
+
+            def fss_die() -> void
+            {
+                ExitProcess((u32)1);
+                noreturn;
+            };
+
+            // ----------------------------------------------------------------
+            // Access violations on the shadow region
             //
-            // Must be called before any frame is pushed.
-            // Returns true on success, false if allocation failed.
+            // The region is read-only, so a write to it faults. The handler
+            // finds the faulting thread's region through the saved r15 and, when
+            // the address lies inside it, reports the corruption attempt and
+            // ends the process. Every other fault goes on to the next handler.
+            // ep is EXCEPTION_POINTERS: the record, then the context.
+            // ----------------------------------------------------------------
+            def fss_fault(void* ep) -> i32
+            {
+                u64* e = (u64*)ep;
+                u64* rec = (u64*)e[0];
+                u64* ctx = (u64*)e[1];
+                u32* code = (u32*)rec;
+                // CONTEXT.R15 is at byte 0xF0, the fifteenth general register after Rax at 0x78
+                u64 h = ctx[30];
+                u64 addr = rec[5];
+                u64 lo = h - (u64)FSS_GUARD_SIZE;
+                if (*code != (u32)0xC0000005u) { return 0; };
+                if (h == (u64)0) { return 0; };
+                if ((addr >= lo) & (addr < lo + (u64)FSS_REGION_SIZE))
+                {
+                    standard::io::console::print("FATAL: shadow region corruption attempt detected - aborting\n\0");
+                    standard::io::console::flush();
+                    fss_die();
+                };
+                return 0;
+            };
+
+            def fss_install_handler() -> void
+            {
+                AddVectoredExceptionHandler((u32)1, (void*)@fss_fault);
+                return;
+            };
+#endif;
+
+#ifdef __LINUX__
+            // ----------------------------------------------------------------
+            // Linux: mmap, mprotect, munmap and getrandom as raw system calls
+            // ----------------------------------------------------------------
+            def fss_map(u64 length) -> void*
+            {
+                u64 result = 0;
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov x8, #222
+                    mov x0, #0
+                    mov x1, $1
+                    mov x2, #3
+                    mov x3, #0x22
+                    mov x4, #-1
+                    mov x5, #0
+                    svc #0
+                    mov $0, x0
+                } : "=r"(result) : "r"(length) : "x0", "x1", "x2", "x3", "x4", "x5", "x8", "memory";
+#else
+                volatile asm
+                {
+                    movq $$9,   %rax
+                    xorq %rdi,  %rdi
+                    movq $0,    %rsi
+                    movq $$3,   %rdx
+                    movq $$34,  %r10
+                    movq $$-1,  %r8
+                    xorq %r9,   %r9
+                    syscall
+                    movq %rax, $1
+                } : : "r"(length), "m"(result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "memory";
+#endif;
+                // The kernel reports an error as a small negative number
+                if (result > (u64)0xFFFFFFFFFFFFF000u) { return (void*)NULL; };
+                return (void*)result;
+            };
+
+            def fss_prot(void* addr, u64 length, int mode) -> void
+            {
+                u64 prot = 0;
+                if (mode == FSS_PROT_RO) { prot = 1; };
+                if (mode == FSS_PROT_RW) { prot = 3; };
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov x8, #226
+                    mov x0, $0
+                    mov x1, $1
+                    mov x2, $2
+                    svc #0
+                } : : "r"(addr), "r"(length), "r"(prot) : "x0", "x1", "x2", "x8", "memory";
+#else
+                volatile asm
+                {
+                    movq $$10,  %rax
+                    movq $0,    %rdi
+                    movq $1,    %rsi
+                    movq $2,    %rdx
+                    syscall
+                } : : "r"(addr), "r"(length), "r"(prot) : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory";
+#endif;
+                return;
+            };
+
+            def fss_unmap(void* addr, u64 length) -> void
+            {
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov x8, #215
+                    mov x0, $0
+                    mov x1, $1
+                    svc #0
+                } : : "r"(addr), "r"(length) : "x0", "x1", "x8", "memory";
+#else
+                volatile asm
+                {
+                    movq $$11,  %rax
+                    movq $0,    %rdi
+                    movq $1,    %rsi
+                    syscall
+                } : : "r"(addr), "r"(length) : "rax", "rdi", "rsi", "rcx", "r11", "memory";
+#endif;
+                return;
+            };
+
+            // getrandom(2) with a fall back to the hardware counter
+            def fss_random() -> u64
+            {
+                u64 buf = 0;
+                i64 ret = 0;
+                u64 bufp = (u64)@buf;
+#ifdef __ARCH_ARM64__
+                volatile asm
+                {
+                    mov x8, #278
+                    mov x0, $1
+                    mov x1, #8
+                    mov x2, #0
+                    svc #0
+                    mov $0, x0
+                } : "=r"(ret) : "r"(bufp) : "x0", "x1", "x2", "x8", "memory";
+#else
+                volatile asm
+                {
+                    movq $$318, %rax
+                    movq $0, %rdi
+                    movq $$8,   %rsi
+                    xorq %rdx,  %rdx
+                    syscall
+                    movq %rax, $1
+                } : : "r"(bufp), "m"(ret) : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory";
+#endif;
+                if (ret != 8) { return fss_rdtsc(); };
+                return buf;
+            };
+
+            def fss_die() -> void
+            {
+                abort();
+                noreturn;
+            };
+
+            // ----------------------------------------------------------------
+            // Faults on the shadow region
+            //
+            // The region is read-only, so a write to it raises SIGSEGV. The
+            // handler finds the faulting thread's region through its register,
+            // which the kernel leaves as it was, and when the address lies
+            // inside it, reports the corruption attempt and aborts. Any other
+            // fault gets its default action back and runs again.
+            // si_addr sits at offset 16 of siginfo_t.
+            // ----------------------------------------------------------------
+            def fss_fault(int sig, void* info, void* ctx) -> void
+            {
+                u64 h = fss_get();
+                u64* ip = (u64*)info;
+                u64 addr = ip[2];
+                u64 lo = h - (u64)FSS_GUARD_SIZE;
+                byte[152] sa;
+                int i = 0;
+
+                if (h != (u64)0)
+                {
+                    if ((addr >= lo) & (addr < lo + (u64)FSS_REGION_SIZE))
+                    {
+                        standard::io::console::print("FATAL: shadow region corruption attempt detected - aborting\n\0");
+                        standard::io::console::flush();
+                        fss_die();
+                    };
+                };
+
+                while (i < 152) { sa[i] = (byte)0; i++; };
+                sigaction(sig, (void*)@sa[0], (void*)NULL);
+                return;
+            };
+
+            // SIGSEGV and SIGBUS with SA_SIGINFO
+            def fss_install_handler() -> void
+            {
+                byte[152] sa;
+                int i = 0;
+                while (i < 152) { sa[i] = (byte)0; i++; };
+                u64* handler = (u64*)@sa[0];
+                i32* flags = (i32*)@sa[136];
+                *handler = (u64)@fss_fault;
+                *flags = 4;
+                sigaction(11, (void*)@sa[0], (void*)NULL);
+                sigaction(7, (void*)@sa[0], (void*)NULL);
+                return;
+            };
+#endif;
+
+            // ----------------------------------------------------------------
+            // fss_abort() - Called when tampering is detected.
+            //
+            // Prints a diagnostic then terminates the process immediately.
+            // ----------------------------------------------------------------
+            def fss_abort() -> void
+            {
+                standard::io::console::print("FATAL: shadow stack violation detected - aborting\n\0");
+                standard::io::console::flush();
+                fss_die();
+                noreturn;
+            };
+
+            // ----------------------------------------------------------------
+            // fss_active() - True when this thread owns a shadow region.
+            // ----------------------------------------------------------------
+            def fss_active() -> bool
+            {
+                return fss_get() != (u64)0;
+            };
+
+            // ----------------------------------------------------------------
+            // fss_header() - This thread's header, checked.
+            //
+            // The header is read-only, so a forged one needs a forged register.
+            // The self field ties the header to its own address and canary.
+            // ----------------------------------------------------------------
+            def fss_header() -> FSSHeader*
+            {
+                FSSHeader* h = (FSSHeader*)fss_get();
+                if (h == (FSSHeader*)NULL) { return h; };
+                if (h.self != ((u64)h ^| h.canary)) { fss_abort(); };
+                return h;
+            };
+
+            // ----------------------------------------------------------------
+            // fss_init() - Make this thread's shadow region.
+            //
+            // Returns true on success, false if the mapping failed. Called for
+            // the main thread by the runtime, for others by thread_create.
             // ----------------------------------------------------------------
             def fss_init() -> bool
             {
-                // Allocate one committed, read-write page for the shadow frames
-                void* page = VirtualAlloc(
-                    ulong((void*)NULL),
-                    (u64)FSS_PAGE_SIZE,
-                    (u32)FSS_MEM_COMMIT_RESERVE,
-                    (u32)FSS_PAGE_READWRITE
-                );
+                u64 base = (u64)fss_map((u64)FSS_REGION_SIZE);
+                if (base == (u64)0) { return false; };
 
-                if (page == (void*)NULL)
-                {
-                    return false;
-                };
+                FSSHeader* h = (FSSHeader*)(base + (u64)FSS_GUARD_SIZE);
 
-                FSS_BASE = (FSSFrame*)page;
-                FSS_TOP  = 0;
-                FSS_CAP  = (u64)FSS_FRAME_CAPACITY;
+                // Two kinds of entropy, so neither alone fixes the canary
+                u64 t0  = fss_rdtsc();
+                u64 rng = fss_random();
+                u64 canary = t0 ^| (rng << 17) ^| (rng >> 47) ^| 0xA3B4C5D6E7F80192u;
 
-                // Build the process-lifetime canary from two entropy sources:
-                // the hardware timestamp counter and QueryPerformanceCounter,
-                // then XOR them together and mix with a constant to avoid a
-                // zero canary.
-                u64 t0 = fss_rdtsc();
-                u64 qpc = 0;
-                QueryPerformanceCounter(@qpc);
-                FSS_CANARY = t0 ^| (qpc << 17) ^| (qpc >> 47) ^| 0xA3B4C5D6E7F80192u;
+                h.canary = canary;
+                h.top    = 0;
+                h.cap    = (u64)FSS_FRAME_CAPACITY;
+                h.self   = (u64)h ^| canary;
 
+                // The guards cannot be touched, the body can be read
+                fss_prot((void*)base, (u64)FSS_GUARD_SIZE, FSS_PROT_NONE);
+                fss_prot((void*)(base + (u64)FSS_GUARD_SIZE + (u64)FSS_BODY_SIZE), (u64)FSS_GUARD_SIZE, FSS_PROT_NONE);
+                fss_prot((void*)h, (u64)FSS_BODY_SIZE, FSS_PROT_RO);
+
+                fss_set((u64)h);
+                fss_install_handler();
                 return true;
             };
 
@@ -151,24 +492,26 @@ namespace standard
             // ra      - the return address to protect, read through @->
             // ra_slot - the address of the stack slot holding it (@->)
             //
-            // The saved_ra field is stored XOR'd with FSS_CANARY so a simple
-            // linear scan of the shadow page does not reveal the raw address.
+            // The saved_ra field is stored XOR'd with the canary so a scan of
+            // the region does not show the raw address.
             // Returns the frame index (slot) used, or U64MAXVAL on overflow.
             // ----------------------------------------------------------------
             def fss_push(u64 ra, u64 ra_slot) -> u64
             {
-                if (FSS_TOP >= FSS_CAP)
-                {
-                    return U64MAXVAL;
-                };
+                FSSHeader* h = fss_header();
+                if (h == (FSSHeader*)NULL) { return U64MAXVAL; };
+                if (h.top >= h.cap) { return U64MAXVAL; };
 
-                FSSFrame* frame = FSS_BASE + FSS_TOP;
-                frame.canary    = FSS_CANARY;
-                frame.saved_ra  = ra ^| FSS_CANARY;
+                u64 index = h.top;
+                FSSFrame* frame = (FSSFrame*)((u64)h + (u64)FSS_HEADER_SIZE) + index;
+
+                fss_prot((void*)h, (u64)FSS_BODY_SIZE, FSS_PROT_RW);
+                frame.saved_ra   = ra ^| h.canary;
                 frame.saved_slot = ra_slot;
+                h.top = index + 1;
+                fss_prot((void*)h, (u64)FSS_BODY_SIZE, FSS_PROT_RO);
 
-                FSS_TOP = FSS_TOP + 1;
-                return FSS_TOP - 1;
+                return index;
             };
 
             // ----------------------------------------------------------------
@@ -178,35 +521,21 @@ namespace standard
             // ra      - the return address currently in the real stack slot
             // ra_slot - the address of that slot, read through @->
             //
-            // Returns true if both the canary and return address are intact.
+            // Returns true if both the return address and its slot are intact.
             // ----------------------------------------------------------------
             def fss_verify(u64 slot, u64 ra, u64 ra_slot) -> bool
             {
-                if (slot >= FSS_TOP)
-                {
-                    return false;
-                };
+                FSSHeader* h = fss_header();
+                if (h == (FSSHeader*)NULL) { return false; };
+                if (slot >= h.top) { return false; };
 
-                FSSFrame* frame = FSS_BASE + slot;
+                FSSFrame* frame = (FSSFrame*)((u64)h + (u64)FSS_HEADER_SIZE) + slot;
 
-                // The canary field must be exactly FSS_CANARY
-                if (frame.canary != FSS_CANARY)
-                {
-                    return false;
-                };
-
-                // Decode and compare return address
-                u64 expected_ra = frame.saved_ra ^| FSS_CANARY;
-                if (expected_ra != ra)
-                {
-                    return false;
-                };
+                // Decode and compare the return address
+                if ((frame.saved_ra ^| h.canary) != ra) { return false; };
 
                 // The slot must be the one this frame owns
-                if (frame.saved_slot != ra_slot)
-                {
-                    return false;
-                };
+                if (frame.saved_slot != ra_slot) { return false; };
 
                 return true;
             };
@@ -220,53 +549,36 @@ namespace standard
             // ----------------------------------------------------------------
             def fss_pop_to(u64 slot) -> void
             {
+                FSSHeader* h = fss_header();
+                if (h == (FSSHeader*)NULL) { return; };
+                if (h.top <= slot) { return; };
+
                 FSSFrame* frame;
-                while (FSS_TOP > slot)
+                fss_prot((void*)h, (u64)FSS_BODY_SIZE, FSS_PROT_RW);
+                while (h.top > slot)
                 {
-                    FSS_TOP = FSS_TOP - 1;
-                    frame = FSS_BASE + FSS_TOP;
+                    h.top = h.top - 1;
+                    frame = (FSSFrame*)((u64)h + (u64)FSS_HEADER_SIZE) + h.top;
 
                     // Zero out the frame so it cannot be replayed
-                    frame.canary     = 0;
                     frame.saved_ra   = 0;
                     frame.saved_slot = 0;
                 };
+                fss_prot((void*)h, (u64)FSS_BODY_SIZE, FSS_PROT_RO);
 
                 return;
             };
 
             // ----------------------------------------------------------------
-            // fss_abort() - Called when tampering is detected.
-            //
-            // Prints a diagnostic then terminates the process immediately.
-            // Uses the low-level console printer to avoid any heap usage,
-            // since the stack may be in an untrusted state.
-            // ----------------------------------------------------------------
-            def fss_abort() -> void
-            {
-                standard::io::console::print("FATAL: shadow stack violation detected - aborting\n\0");
-                standard::io::console::flush();
-                ExitProcess((u32)1);
-                noreturn;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_teardown() - Free the shadow stack page.
-            //
-            // Called after successful verification, before normal process exit.
+            // fss_teardown() - Free this thread's shadow region.
             // ----------------------------------------------------------------
             def fss_teardown() -> void
             {
-                if (FSS_BASE == (FSSFrame*)NULL)
-                {
-                    return;
-                };
+                FSSHeader* h = fss_header();
+                if (h == (FSSHeader*)NULL) { return; };
 
-                VirtualFree(ulong((void*)FSS_BASE), (u64)0, (u32)FSS_MEM_RELEASE);
-                FSS_BASE   = (FSSFrame*)NULL;
-                FSS_TOP    = 0;
-                FSS_CAP    = 0;
-                FSS_CANARY = 0;
+                fss_set((u64)0);
+                fss_unmap((void*)((u64)h - (u64)FSS_GUARD_SIZE), (u64)FSS_REGION_SIZE);
                 return;
             };
         };
@@ -286,9 +598,10 @@ using standard::runtime::shadow_stack;
 //
 // FSS_Protect_Frame pushes a shadow frame on entry.
 // FSS_Cleanup_Frame verifies and pops it before every return.
-// If the canary is corrupted, fss_abort() is called immediately.
+// If the return address changed, fss_abort() is called immediately.
 // ============================================================================
 
+#ifdef __WINDOWS__
 contract FSS_Protect_Frame,
          FSS_Cleanup_Frame;
 
@@ -296,7 +609,7 @@ contract FSS_Protect_Frame
 {
     volatile u64 __fss_frame_slot;
     volatile bool __fss_frame_active;
-    if (FSS_BASE != (FSSFrame*)NULL)
+    if (fss_active())
     {
         // @-> is the stack slot holding this function's return address
         u64* __fss_ra_slot = @->;
@@ -322,290 +635,12 @@ contract FSS_Cleanup_Frame
         };
     };
 } # binding {FSS_Protect_Frame : this};
-
-#endif; // __WINDOWS__
-
-#ifdef __LINUX__
-
-extern
-{
-    def !! abort() -> void;
-};
-
-// PROT_READ | PROT_WRITE
-#def FSS_PROT_RW        0x03;
-// MAP_PRIVATE | MAP_ANONYMOUS
-#def FSS_MAP_PRIVATE_ANON 0x22;
-// MAP_FAILED sentinel (-1 cast to pointer)
-#def FSS_MAP_FAILED     0xFFFFFFFFFFFFFFFFu;
-
-// Number of frames the shadow region holds (64 KB / 24 bytes per frame)
-#def FSS_FRAME_CAPACITY 2730;
-// Size in bytes of the shadow allocation
-#def FSS_PAGE_SIZE 65536;
-
-namespace standard
-{
-    namespace runtime
-    {
-        namespace shadow_stack
-        {
-            // ----------------------------------------------------------------
-            // fss_mmap() - Allocate an anonymous private page via mmap(2).
-            // Returns MAP_FAILED (all-ones) on error, otherwise the page ptr.
-            // ----------------------------------------------------------------
-            def fss_mmap(u64 length) -> void*
-            {
-                void* result;
-                volatile asm
-                {
-                    movq $$9,   %rax
-                    xorq %rdi,  %rdi
-                    movq $0,    %rsi
-                    movq $$3,   %rdx
-                    movq $$34,  %r10
-                    movq $$-1,  %r8
-                    xorq %r9,   %r9
-                    syscall
-                    movq %rax, $1
-                } : : "r"(length), "m"(result) : "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "memory";
-                return result;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_munmap() - Release a previously mapped page via munmap(2).
-            // ----------------------------------------------------------------
-            def fss_munmap(void* addr, u64 length) -> void
-            {
-                volatile asm
-                {
-                    movq $$11,  %rax
-                    movq $0,    %rdi
-                    movq $1,    %rsi
-                    syscall
-                } : : "r"(addr), "r"(length) : "rax", "rdi", "rsi", "rcx", "r11", "memory";
-                return;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_rdtsc() - Read the hardware timestamp counter.
-            // Used as a cheap entropy source when seeding the canary.
-            // ----------------------------------------------------------------
-            def fss_rdtsc() -> u64
-            {
-                u64 result = 0;
-                volatile asm
-                {
-                    rdtsc
-                    shlq $$32, %rdx
-                    orq %rdx, %rax
-                    movq %rax, $0
-                } : : "m"(result) : "rax", "rdx";
-                return result;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_getrandom() - Fill a u64 with kernel entropy via getrandom(2).
-            // Falls back to rdtsc on syscall failure.
-            // ----------------------------------------------------------------
-            def fss_getrandom() -> u64
-            {
-                u64 buf = 0;
-                i64 ret = 0;
-                volatile asm
-                {
-                    movq $$318, %rax
-                    leaq $0, %rdi
-                    movq $$8,   %rsi
-                    xorq %rdx,  %rdx
-                    syscall
-                    movq %rax, $1
-                } : : "m"(buf), "m"(ret) : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory";
-                if (ret != 8)
-                {
-                    return fss_rdtsc();
-                };
-                return buf;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_init() - Allocate and prepare the shadow stack page.
-            //
-            // Must be called before any frame is pushed.
-            // Returns true on success, false if allocation failed.
-            // ----------------------------------------------------------------
-            def fss_init() -> bool
-            {
-                void* page = fss_mmap((u64)FSS_PAGE_SIZE);
-
-                if ((u64)page == (u64)FSS_MAP_FAILED)
-                {
-                    return false;
-                };
-
-                FSS_BASE = (FSSFrame*)page;
-                FSS_TOP  = 0;
-                FSS_CAP  = (u64)FSS_FRAME_CAPACITY;
-
-                // Build the process-lifetime canary from two entropy sources:
-                // the hardware timestamp counter and getrandom(2),
-                // then XOR them together and mix with a constant to avoid a
-                // zero canary.
-                u64 t0  = fss_rdtsc();
-                u64 rng = fss_getrandom();
-                FSS_CANARY = t0 ^| (rng << 17) ^| (rng >> 47) ^| 0xA3B4C5D6E7F80192u;
-
-                return true;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_push(ra, ra_slot) - Save a return address and where it lives.
-            //
-            // ra      - the return address to protect, read through @->
-            // ra_slot - the address of the stack slot holding it (@->)
-            //
-            // The saved_ra field is stored XOR'd with FSS_CANARY so a simple
-            // linear scan of the shadow page does not reveal the raw address.
-            // Returns the frame index (slot) used, or U64MAXVAL on overflow.
-            // ----------------------------------------------------------------
-            def fss_push(u64 ra, u64 ra_slot) -> u64
-            {
-                if (FSS_TOP >= FSS_CAP)
-                {
-                    return U64MAXVAL;
-                };
-
-                FSSFrame* frame = FSS_BASE + FSS_TOP;
-                frame.canary    = FSS_CANARY;
-                frame.saved_ra  = ra ^| FSS_CANARY;
-                frame.saved_slot = ra_slot;
-
-                FSS_TOP = FSS_TOP + 1;
-                return FSS_TOP - 1;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_verify(slot, ra, ra_slot) - Validate a previously pushed frame.
-            //
-            // slot    - the frame index returned by fss_push()
-            // ra      - the return address currently in the real stack slot
-            // ra_slot - the address of that slot, read through @->
-            //
-            // Returns true if both the canary and return address are intact.
-            // ----------------------------------------------------------------
-            def fss_verify(u64 slot, u64 ra, u64 ra_slot) -> bool
-            {
-                if (slot >= FSS_TOP)
-                {
-                    return false;
-                };
-
-                FSSFrame* frame = FSS_BASE + slot;
-
-                // The canary field must be exactly FSS_CANARY
-                if (frame.canary != FSS_CANARY)
-                {
-                    return false;
-                };
-
-                // Decode and compare return address
-                u64 expected_ra = frame.saved_ra ^| FSS_CANARY;
-                if (expected_ra != ra)
-                {
-                    return false;
-                };
-
-                // The slot must be the one this frame owns
-                if (frame.saved_slot != ra_slot)
-                {
-                    return false;
-                };
-
-                return true;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_pop_to(slot) - Pop and clear every frame from the top down to
-            // and including slot.
-            //
-            // Frames above slot belong to calls that never reached their
-            // cleanup (an unwound exception, a longjmp), so they go with it.
-            // ----------------------------------------------------------------
-            def fss_pop_to(u64 slot) -> void
-            {
-                while (FSS_TOP > slot)
-                {
-                    FSS_TOP = FSS_TOP - 1;
-                    FSSFrame* frame = FSS_BASE + FSS_TOP;
-
-                    // Zero out the frame so it cannot be replayed
-                    frame.canary     = 0;
-                    frame.saved_ra   = 0;
-                    frame.saved_slot = 0;
-                };
-
-                return;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_abort() - Called when tampering is detected.
-            //
-            // Prints a diagnostic then terminates the process immediately.
-            // Uses the low-level console printer to avoid any heap usage,
-            // since the stack may be in an untrusted state.
-            // ----------------------------------------------------------------
-            def fss_abort() -> void
-            {
-                standard::io::console::print("FATAL: shadow stack violation detected - aborting\n\0");
-                standard::io::console::flush();
-                abort();
-                noreturn;
-            };
-
-            // ----------------------------------------------------------------
-            // fss_teardown() - Free the shadow stack page.
-            //
-            // Called after successful verification, before normal process exit.
-            // ----------------------------------------------------------------
-            def fss_teardown() -> void
-            {
-                if (FSS_BASE == (FSSFrame*)NULL)
-                {
-                    return;
-                };
-
-                fss_munmap((void*)FSS_BASE, (u64)FSS_PAGE_SIZE);
-                FSS_BASE   = (FSSFrame*)NULL;
-                FSS_TOP    = 0;
-                FSS_CAP    = 0;
-                FSS_CANARY = 0;
-                return;
-            };
-        };
-    };
-};
-
-using standard::runtime::shadow_stack;
-
-// ============================================================================
-// Shadow Stack Contracts
-//
-// Usage:
-//   def vulnerable(byte* buf, int len) -> void : FSS_Protect_Frame
-//   {
-//       // ...
-//   } : FSS_Cleanup_Frame;
-//
-// FSS_Protect_Frame pushes a shadow frame on entry.
-// FSS_Cleanup_Frame verifies and pops it before every return.
-// If the canary is corrupted, fss_abort() is called immediately.
-// ============================================================================
-
+#else
 contract FSS_Protect_Frame
 {
     volatile u64 __fss_frame_slot;
     volatile bool __fss_frame_active;
-    if (FSS_BASE != (FSSFrame*)NULL)
+    if (fss_active())
     {
         // @-> is the stack slot holding this function's return address
         u64* __fss_ra_slot = @->;
@@ -631,6 +666,6 @@ contract FSS_Cleanup_Frame
         };
     };
 };
+#endif;
 
-#endif; // __LINUX__
 #endif; // IDEKA_SHADOW_STACK_IMPL

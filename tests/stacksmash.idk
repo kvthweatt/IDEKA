@@ -1,18 +1,39 @@
 #def IDEKA_SHADOW_STACK 1;
 #import <standard.idk>;
 using standard::io::console;
+using standard::runtime::shadow_stack;
 
-def test() -> void : FSS_Protect_Frame
+// Overwrites the return address, which is what a stack smash does
+def smash_return() -> void : FSS_Protect_Frame
 {
-    // @-> is the stack slot holding the return address, writing it is what a stack smash does
     u64* ra = @->;
     *ra = 0xDEADBEEFCAFEBABEu;
     return;
 } : FSS_Cleanup_Frame;
 
-def main() -> int
+// Overwrites the saved copy of the return address in the shadow region
+def smash_region() -> void : FSS_Protect_Frame
 {
-    test();
-    println("Post-test message.");
+    u64* h = (u64*)fss_get();
+    u64* saved = h + 4;
+    *saved = 0;
+    return;
+} : FSS_Cleanup_Frame;
+
+// stacksmash        overwrites the return address
+// stacksmash region overwrites the shadow region
+def main(int argc, byte** argv) -> int
+{
+    if (argc > 1)
+    {
+        println("Corrupting the shadow region ...\0");
+        smash_region();
+    }
+    else
+    {
+        println("Overwriting the return address ...\0");
+        smash_return();
+    };
+    println("Post-test message.\0");
     return 0;
 };

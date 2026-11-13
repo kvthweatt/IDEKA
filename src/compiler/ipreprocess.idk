@@ -1593,6 +1593,7 @@ namespace IDEKA
 
         // The target is an AArch64 processor whatever the host is: every preprocessor made afterwards defines it
         bool pp_arm64 = false;
+        bool pp_x64 = false;
 
         object Preprocessor
         {
@@ -1867,6 +1868,19 @@ namespace IDEKA
                 ->;
             };
 
+            // Makes the target an x86_64 processor, whatever the host is (cross compilation)
+            set_arch_x86_64() -> void
+            {
+                pp_x64 = true;
+                this.define(g"__ARCH_ARM64__\0", g"0\0");
+                this.define(g"__arm64__\0", g"0\0");
+                this.define(g"__aarch64__\0", g"0\0");
+                this.define(g"__ARCH_X86_64__\0", g"1\0");
+                this.define(g"__x86_64__\0", g"1\0");
+                this.define(g"__amd64__\0", g"1\0");
+                ->;
+            };
+
             // fmacros.build_compiler_macros with the host as target and the
             // IDEKA_config.cfg defaults (default_byte_width 8, debug and
             // optimization_level unset).
@@ -1935,6 +1949,7 @@ namespace IDEKA
                 this.define(g"__aarch64__\0", g"1\0");
                 #endif;
                 if (pp_arm64) { this.set_arch_arm64(); };
+                if (pp_x64) { this.set_arch_x86_64(); };
                 ->;
             };
 
@@ -4555,6 +4570,15 @@ namespace IDEKA
             // ===== DRIVER =====
 
             // FXPreprocessor.process. The combined source is text_ptr()/text_len().
+            // True when #def NAME defined the symbol to anything but 0 (the program asks for a feature the backends care about)
+            has_const(byte* name) -> bool
+            {
+                int e = this.consts.find(name, pp_cstrlen(name));
+                if (e < 0) { -> false; };
+                if (this.consts.val_len(e) == 1) { if (this.consts.val_ptr(e)[0] == '0') { -> false; }; };
+                -> true;
+            };
+
             process() -> bool
             {
                 int pl, iteration, ls, le;

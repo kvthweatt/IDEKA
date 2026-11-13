@@ -623,6 +623,16 @@ struct BMP : Header, InfoHeader
 } : ExtraData;
 ```
 
+## C Compatible Structs
+If you need a C-compatible struct, you can use `cstruct` which follows standard padding and alignment rules that you would expect when handling C code.
+```
+cstruct
+{
+    int x;
+    long z;
+};
+```
+
 ## Block assignment
 Below is an example snippet from the standard library in `runtime\allocators.idk` around line 415. If the object[at this index] is a struct, you can do block assignment instead of writing `new_tbl[rm_hole]` 4 times.
 ```

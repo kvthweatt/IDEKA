@@ -428,6 +428,7 @@ struct MI
             // state of the x86_64 backend
             bool a_handled;
             int abi;  // 0 System V, 1 Win64
+            bool ssreg;  // r15 belongs to the shadow stack runtime and is never allocated
             int feat;  // XF_ features the code may use
             byte** rtab;
             Buf ab;
@@ -2530,6 +2531,7 @@ struct MI
                     -> (i64)(16383 << 16);
                 };
                 // rax rcx rdx rbx rsi rdi r8 r9 r12 r13 r14 r15
+                if (this.ssreg) { -> (i64)(1 `| 2 `| 4 `| 8 `| 64 `| 128 `| 256 `| 512 `| 4096 `| 8192 `| 16384); };
                 -> (i64)(1 `| 2 `| 4 `| 8 `| 64 `| 128 `| 256 `| 512 `| 4096 `| 8192 `| 16384 `| 32768);
             };
 
@@ -2543,7 +2545,13 @@ struct MI
             // Registers a function must preserve
             s_csmask() -> int
             {
-                if (this.a_win()) { -> 8 `| 64 `| 128 `| 4096 `| 8192 `| 16384 `| 32768 `| (1023 << 22); };
+                // the shadow stack register is neither saved nor restored: a function that sets it sets it for its caller
+                if (this.a_win())
+                {
+                    if (this.ssreg) { -> 8 `| 64 `| 128 `| 4096 `| 8192 `| 16384 `| (1023 << 22); };
+                    -> 8 `| 64 `| 128 `| 4096 `| 8192 `| 16384 `| 32768 `| (1023 << 22);
+                };
+                if (this.ssreg) { -> 8 `| 4096 `| 8192 `| 16384; };
                 -> 8 `| 4096 `| 8192 `| 16384 `| 32768;
             };
 

@@ -1926,6 +1926,8 @@ namespace IDEKA
             i64 sr;
             int b;
             if (a6_eq(m, ml, "nop\0")) { w = 0xD503201F; }
+            elif (a6_eq(m, ml, "paciasp\0")) { w = 0xD503233F; }
+            elif (a6_eq(m, ml, "autiasp\0")) { w = 0xD50323BF; }
             elif (a6_eq(m, ml, "yield\0")) { w = 0xD503203F; }
             elif (a6_eq(m, ml, "wfe\0")) { w = 0xD503205F; }
             elif (a6_eq(m, ml, "wfi\0")) { w = 0xD503207F; }

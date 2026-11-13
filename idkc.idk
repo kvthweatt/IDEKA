@@ -79,6 +79,8 @@ module IDEKA_Compiler_Entrypoint
         println("  --warn-as-error   Treat all warnings as errors\0");
         println("  --asm-only        Emit only the AT&T assembly (llc -filetype=asm) instead of an object file\0");
         println("  --backend <name>  Code generator backend: x64 (native x86_64 assembly, iasm and ilink, the default) llvm (LLVM IR, llc and a system linker) or a64 (AArch64 assembly, system as and ld)\0");
+        println("  --arch <name>     Target processor: x86_64 or arm64, default is the host. Another processor than the host's also implies the portable baseline instruction set\0");
+        println("  --portable        Restrict the generated code to the baseline instruction set of the target instead of what this processor has\0");
         println("  --abi <name>      x64 backend calling convention and object format: sysv (ELF) or win64 (COFF), default is the host\0");
         print();
         println("Additional:\0");
@@ -88,15 +90,6 @@ module IDEKA_Compiler_Entrypoint
         println("  --borrowcheck-warn  Emit errors as warnings, permits compilation\0");
         ->;
     };
-
-    // Source -> build/<stem>/<stem>.ll -> (opt) -> llc -> object -> linked executable, as ic.py does
-    // Set once a module's '#[test] = { #[expect_build_fail] }' is known: a failing build is then the expected result
-    bool BUILD_EXPECT_FAIL;
-    // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
-    bool ASM_ONLY;
-    int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
-    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled with iasm and linked with ilink
-    bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
 
     // True when the null terminated argument a is exactly lit[0..n)
     arg_eq(byte* a, byte* lit, int n) -> bool
@@ -618,6 +611,9 @@ module IDEKA_Compiler_Entrypoint
         ->;
     };
 
+    bool X64_TARGET;       // --arch x86_64: preprocess for an x86_64 target even when the host is another processor
+    bool A64_BACKEND;      // --backend a64: AArch64 assembly (GNU syntax) assembled with iasm and linked with ilink
+
     // The debug block idkc.py prints before compiling
     print_debug_block(int argc, byte** argv) -> void
     {
@@ -914,6 +910,14 @@ module IDEKA_Compiler_Entrypoint
         ffree(txt);
         ->;
     };
+
+    // Source -> build/<stem>/<stem>.ll -> (opt) -> llc -> object -> linked executable, as ic.py does
+    // Set once a module's '#[test] = { #[expect_build_fail] }' is known: a failing build is then the expected result
+    bool BUILD_EXPECT_FAIL;
+    // --asm-only: llc writes AT&T assembly to the output path and the chain stops before linking
+    bool ASM_ONLY;
+    int X64_ABI;           // 0 System V and ELF, 1 Win64 and COFF
+    bool X64_BACKEND;      // --backend x64: x86_64 assembly through iasm instead of LLVM IR through llc
 
     // Assembles the x86_64 text the x64 backend emitted into an ELF or COFF object with iasm
     iasm_object(byte* text, int len, byte* dst) -> bool
@@ -1557,6 +1561,7 @@ module IDEKA_Compiler_Entrypoint
         X64_ABI = 1;
         #endif;
         bool lex_mode, pp_mode, parse_mode, check_mode, dump_mode, verbose, show_count, emit_mode, full_mode, borrow_mode, borrow_warn, effects_mode, effects_warn, warn_as_error;
+        bool want_x64, want_a64, host_x64;
         byte* entry_name = (byte*)0;
         byte* module_sel;
         byte* path = (byte*)0;
@@ -1587,6 +1592,63 @@ module IDEKA_Compiler_Entrypoint
                 println(argv[i]);
                 usage();
                 -> 1;
+            };
+            if (arg_eq(a, "--portable", 10))
+            {
+                #ifndef IDEKA_NO_X64
+                x64_set_march(1);
+                x64_set_level(0);
+                #endif;
+                i++;
+                continue;
+            };
+            if (arg_eq(a, "--arch", 6))
+            {
+                i++;
+                if (i >= argc) { println("--arch needs a name: x86_64 or arm64\0"); usage(); -> 1; };
+                want_x64 = arg_eq(argv[i], "x86_64", 6) | arg_eq(argv[i], "x64", 3) | arg_eq(argv[i], "amd64", 5);
+                want_a64 = arg_eq(argv[i], "arm64", 5) | arg_eq(argv[i], "aarch64", 7) | arg_eq(argv[i], "a64", 3);
+                if (!want_x64 & !want_a64)
+                {
+                    print("Unknown arch: \0");
+                    println(argv[i]);
+                    usage();
+                    -> 1;
+                };
+                host_x64 = false;
+                #ifdef __ARCH_X86_64__
+                host_x64 = true;
+                #endif;
+                if (want_a64)
+                {
+                    #ifdef IDEKA_NO_A64
+                    println("This compiler was built without the a64 backend\0");
+                    -> 1;
+                    #endif;
+                    X64_BACKEND = true;
+                    A64_BACKEND = true;
+                    X64_TARGET = false;
+                }
+                else
+                {
+                    #ifdef IDEKA_NO_X64
+                    println("This compiler was built without the x64 backend\0");
+                    -> 1;
+                    #endif;
+                    X64_BACKEND = true;
+                    A64_BACKEND = false;
+                    X64_TARGET = true;
+                };
+                // a processor other than the one the compiler runs on cannot be asked what it has: baseline only
+                if (want_x64 != host_x64)
+                {
+                    #ifndef IDEKA_NO_X64
+                    x64_set_march(1);
+                    x64_set_level(0);
+                    #endif;
+                };
+                i++;
+                continue;
             };
             if (arg_eq(a, "--abi", 5))
             {
@@ -1764,12 +1826,15 @@ module IDEKA_Compiler_Entrypoint
         if (srcdir != (byte*)0) { pp.set_srcdir(srcdir); };
         if (pp_mode | parse_mode) { pp.add_default_macros(); };
         if (A64_BACKEND) { pp.set_arch_arm64(); };
+        if (X64_TARGET) { pp.set_arch_x86_64(); };
 
         if (!pp.process())
         {
             log_failure3("Compilation failed: \0", pp.err_text(), "\0");
             -> 1;
         };
+        set_shadow_reg(pp.has_const("IDEKA_SHADOW_STACK\0"));
+        set_pac(pp.has_const("IDEKA_PAC\0"));
 
         if (pp_mode)
         {

@@ -340,6 +340,25 @@ def !!_start() -> void
 #ifdef __ARCH_X86_64__
     // Naked: no prologue, so rsp here is exactly what the kernel handed us.
     // argc is at (%rsp), the argv pointers follow it.
+#ifdef IDEKA_CET
+    // Hardware shadow stack: arch_prctl(ARCH_SHSTK_ENABLE, ARCH_SHSTK_SHSTK). It is switched on here, before the first
+    // call, because a frame entered earlier would return into an empty hardware stack. Kernels or CPUs without
+    // support answer with an error and the program runs as it did. Not compatible with exceptions.idk, which jumps
+    // between frames.
+    volatile asm
+    {
+        movq %rsp, FRT_ENTRY_SP(%rip)
+        movl $$158, %eax
+        movl $$0x5001, %edi
+        movl $$1, %esi
+        syscall
+        andq $$-16, %rsp
+        callq FRTStartup
+        movl %eax, %edi
+        callq exit
+        ud2
+    } : : : "memory", "cc", "rax", "rcx", "rdx", "rsi", "rdi", "r11";
+#else
     volatile asm
     {
         movq %rsp, FRT_ENTRY_SP(%rip)
@@ -349,6 +368,7 @@ def !!_start() -> void
         callq exit
         ud2
     } : : : "memory", "cc";
+#endif;
 #endif;
 #ifdef __ARCH_ARM64__
     // Naked: sp is what the kernel handed us, argc is at [sp] and the argv pointers follow it.

@@ -15,8 +15,9 @@
 // like the x86_64 backend does. The variable arguments of a call all go in stack slots and a va_list is a
 // pointer to the next one. Callee saved registers are x19..x28 and v8..v15.
 //
-// Frame: [0, 16) the saved x29 and x30, then the outgoing argument area, the saved registers and the frame
-// objects. x29 points to the bottom of the frame and sp equals it unless the function allocates dynamically.
+// Frame: the outgoing argument area at [sp, sp + out), then the saved x29 and x30 where x29 points, then the
+// saved registers and the frame objects above it. The outgoing area starts at sp because the callee reads
+// its stack arguments at the caller's sp. sp equals x29 - out unless the function allocates dynamically.
 //
 // Integers narrower than the register are kept with undefined upper bits; every user that needs them
 // extends first.
@@ -217,6 +218,8 @@ object A64Module
             SI* nxti;
             bool skipn;
             bool hasal;
+            bool pac;          // functions with a frame sign the saved link register (paciasp and autiasp)
+            bool ssreg;        // x28 belongs to the shadow stack runtime and is never allocated
             Buf eo;            // text of the function being written
             Buf jb;            // jump tables of the function
             int ad_b, ad_i, ad_sc, ad_fo, ad_ma;   // address under construction
@@ -271,6 +274,7 @@ object A64Module
             s_allocmask(int cls) -> i64
             {
                 if (cls == 1) { -> (i64)(2147483647) << (i64)32; };
+                if (this.ssreg) { -> (i64)(255 `| (127 << 9) `| (511 << 19)); };
                 -> (i64)(255 `| (127 << 9) `| (1023 << 19));
             };
 
@@ -297,6 +301,8 @@ object A64Module
             // Registers a function must preserve: x19..x28 and v8..v15
             s_csmask() -> i64
             {
+                // the shadow stack register is neither saved nor restored: a function that sets it sets it for its caller
+                if (this.ssreg) { -> (i64)(511 << 19) `| ((i64)255 << (i64)40); };
                 -> (i64)(1023 << 19) `| ((i64)255 << (i64)40);
             };
 
@@ -4085,7 +4091,7 @@ object A64Module
                 int off, i, n, al, nfo;
                 AFO* o;
                 int out16 = (t.outmax + 15) / 16 * 16;
-                off = 16 + out16;
+                off = 16;
                 t.csbase = off;
                 n = 0;
                 i = 0;
@@ -4111,7 +4117,7 @@ object A64Module
                     };
                     i++;
                 };
-                t.frame = (off + 15) / 16 * 16;
+                t.frame = (off + 15) / 16 * 16 + out16;
                 if (t.leaf & n == 0 & nfo == 0 & t.outmax == 0 & !t.dyn) { t.frame = 0; };
                 ->;
             };
@@ -4124,10 +4130,16 @@ object A64Module
                 if (m.fo >= 0)
                 {
                     o = (AFO*)t.fobj.items[m.fo];
-                    if (o.fix == 1) { -> (i64)(t.frame + o.off); };
+                    if (o.fix == 1) { -> (i64)(t.frame - this.e_out16() + o.off); };
                     -> (i64)o.off;
                 };
-                -> (i64)t.frame;
+                -> (i64)(t.frame - this.e_out16());
+            };
+
+            // Size of the outgoing argument area, rounded to 16
+            e_out16() -> int
+            {
+                -> (((AGF*)this.sf.tg).outmax + 15) / 16 * 16;
             };
 
             // Base register of the frame: x29, or sp when the function has no frame
@@ -4144,7 +4156,9 @@ object A64Module
                 int i, k;
                 if (t.frame == 0) { ->; };
                 this.e_addimm(o, 31, 31, (i64)0 - (i64)t.frame);
-                o.put_str(g"\tstp x29, x30, [sp]\n\tmov x29, sp\n\0");
+                if (this.pac) { o.put_str(g"\tpaciasp\n\0"); };
+                this.e_addimm(o, 16, 31, (i64)this.e_out16());
+                o.put_str(g"\tstp x29, x30, [x16]\n\tmov x29, x16\n\0");
                 k = 0;
                 i = 0;
                 while (i < 64)
@@ -4200,8 +4214,9 @@ object A64Module
                         };
                         i++;
                     };
-                    if (t.dyn) { o.put_str(g"\tmov sp, x29\n\0"); };
-                    o.put_str(g"\tldp x29, x30, [sp]\n\0");
+                    this.e_addimm(o, 31, 29, (i64)0 - (i64)this.e_out16());
+                    o.put_str(g"\tldp x29, x30, [x29]\n\0");
+                    if (this.pac) { o.put_str(g"\tautiasp\n\0"); };
                     this.e_addimm(o, 31, 31, (i64)t.frame);
                 };
                 o.put_str(g"\tret\n\0");
