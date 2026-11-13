@@ -154,6 +154,7 @@ using IDEKA::ir;
 // Switches of the backend optimizations, 1 on and 0 off
 #def A64_OPT_LAZY 1;       // an address or a compare used once by the next instructions is folded into it
 #def A64_OPT_CBZ 1;        // a compare with zero that feeds a branch is cbz or cbnz
+#def A64_OPT_CCMP 1;       // the and or the or of two compares that feeds a branch is a cmp and a ccmp
 #def A64_OPT_SPREAD 1;     // spill code reuses a value that was just loaded
 
 namespace IDEKA
@@ -214,6 +215,10 @@ object A64Module
             int gfn;
             AI* sm_st;         // set by s_stel: the store of the constant store found
             i64 sm_val;        // its value
+            bool ccm_on;       // the next integer compare is a ccmp of condition ccm_cc, nzcv ccm_nz
+            int ccm_cc, ccm_nz;
+            int eplab;         // label number of the first return sequence of the function, 0 before one is emitted
+            bool tco;          // no frame address escapes, so a call followed by a return may become a jump
             bool tbok;         // the function is small enough for tbz and tbnz to reach every label
             int bf_sh, bf_w;   // set by the address computation: bit shift and width of a bit packed member, 0 width when none
             byte* arp;         // arena of the machine instructions of one function
@@ -353,6 +358,7 @@ object A64Module
                 g.vslot = (int*)0;
                 g.vforb = (i64*)0;
                 g.vhint = (int*)0;
+                g.vlnk = (int*)0;
                 g.vdef = (int*)0;
                 g.vglob = (int*)0;
                 g.vuse = (int*)0;
@@ -1551,6 +1557,7 @@ object A64Module
                 i64 r, pw;
                 bool sgn;
                 AI* m;
+                if (x.flag) { ->; };
                 if (this.s_isfp(t))
                 {
                     sz = this.s_vsz(t);
@@ -1822,6 +1829,7 @@ object A64Module
                     m.a = ra;
                     m.imm = this.scv;
                     if (sgn) { m.imm = this.s_sx((u64)this.scv, w); };
+                    if (this.ccm_on) { m.k = 1; m.cc = this.ccm_cc; m.sc = this.ccm_nz; this.ccm_on = false; };
                     -> this.s_icc(p);
                 };
                 rb = this.s_vr(b);
@@ -1829,6 +1837,7 @@ object A64Module
                 m = this.s_mi(A_CMP, sz);
                 m.a = ra;
                 m.b = rb;
+                if (this.ccm_on) { m.k = 1; m.cc = this.ccm_cc; m.sc = this.ccm_nz; this.ccm_on = false; };
                 -> this.s_icc(p);
             };
 
@@ -1871,6 +1880,90 @@ object A64Module
                 ->;
             };
 
+            // Whether condition cc holds for the flags nzcv
+            s_ccval(int cc, int nzcv) -> bool
+            {
+                int n = (nzcv >> 3) `& 1;
+                int z = (nzcv >> 2) `& 1;
+                int c = (nzcv >> 1) `& 1;
+                int v = nzcv `& 1;
+                if (cc == CC_EQ) { -> z == 1; };
+                if (cc == CC_NE) { -> z == 0; };
+                if (cc == CC_HS) { -> c == 1; };
+                if (cc == CC_LO) { -> c == 0; };
+                if (cc == CC_MI) { -> n == 1; };
+                if (cc == CC_PL) { -> n == 0; };
+                if (cc == CC_VS) { -> v == 1; };
+                if (cc == CC_VC) { -> v == 0; };
+                if (cc == CC_HI) { -> c == 1 & z == 0; };
+                if (cc == CC_LS) { -> !(c == 1 & z == 0); };
+                if (cc == CC_GE) { -> n == v; };
+                if (cc == CC_LT) { -> n != v; };
+                if (cc == CC_GT) { -> z == 0 & n == v; };
+                -> z == 1 | n != v;
+            };
+
+            // Flags that make condition cc true (want) or false
+            s_ccforce(int cc, bool want) -> int
+            {
+                int f = 0;
+                while (f < 16)
+                {
+                    if (this.s_ccval(cc, f) == want) { -> f; };
+                    f++;
+                };
+                -> 0;
+            };
+
+            // An integer compare that can be the second of a ccmp: the constant must fit its 5 bit field
+            s_ccok(SI* c) -> bool
+            {
+                IRValue* a = this.s_res(c.a);
+                IRValue* b = this.s_res(c.b);
+                IRType* t = a.ty;
+                int w, p;
+                i64 v;
+                if (c.n != 0) { -> false; };
+                if (t.kind != LK.INT & t.kind != LK.PTR) { -> false; };
+                w = this.s_wid(t);
+                if (w > 64) { -> false; };
+                if (this.s_kint(b))
+                {
+                    p = c.k;
+                    v = this.scv;
+                    if (p == SP_SLT | p == SP_SLE | p == SP_SGT | p == SP_SGE) { v = this.s_sx((u64)this.scv, w); };
+                    if (w == 32 & !(p == SP_SLT | p == SP_SLE | p == SP_SGT | p == SP_SGE)) { v = (i64)((int)v); };
+                    if (v < (i64)0 | v > (i64)31) { -> false; };
+                };
+                -> true;
+            };
+
+            // Flags of the and or the or of two compares: the first compare, then a ccmp for the second. Returns the
+            // condition under which the result holds.
+            s_condpair(SI* x) -> int
+            {
+                SI* c1 = (SI*)this.s_res(x.a).di;
+                SI* c2 = (SI*)this.s_res(x.b).di;
+                int cc1, cc2;
+                cc1 = this.s_cmpflags(c1);
+                cc2 = this.s_icc(c2.k);
+                this.ccm_on = true;
+                if (x.k == SB_AND)
+                {
+                    this.ccm_cc = cc1;
+                    this.ccm_nz = this.s_ccforce(cc2, false);
+                }
+                else
+                {
+                    this.ccm_cc = cc1 `^| 1;
+                    this.ccm_nz = this.s_ccforce(cc2, true);
+                };
+                this.s_cmpflags(c2);
+                this.ccm_on = false;
+                this.fcc2 = 0 - 1;
+                -> cc2;
+            };
+
             // Condition under which the i1 value c holds, after emitting the instruction that sets the flags
             s_cond(IRValue* c) -> int
             {
@@ -1882,6 +1975,7 @@ object A64Module
                 {
                     d = (SI*)v.di;
                     if (d.flag & d.op == SO_CMP) { -> this.s_cmpflags(d); };
+                    if (d.flag & d.op == SO_BIN) { -> this.s_condpair(d); };
                 };
                 r = this.s_vr(v);
                 m = this.s_mi(A_TST, 4);
@@ -1932,6 +2026,28 @@ object A64Module
                             m.tgt = ff;
                             ->;
                         };
+                    };
+                };
+                // a value that is not a compare is tested by its low bit: tbnz or tbz
+                if (A64_OPT_CBZ == 1)
+                {
+                    b = this.s_res(c);
+                    cc = 1;
+                    if (b.di != (void*)0 & !b.kc)
+                    {
+                        d = (SI*)b.di;
+                        if (d.flag & (d.op == SO_CMP | d.op == SO_BIN)) { cc = 0; };
+                    };
+                    if (cc == 1)
+                    {
+                        r = this.s_vr(b);
+                        m = this.s_mi(A_CBNZ, 4);
+                        m.cc = 2;
+                        m.a = r;
+                        m.tgt = tt;
+                        m = this.s_mi(A_B, 0);
+                        m.tgt = ff;
+                        ->;
                     };
                 };
                 cc = this.s_cond(c);
@@ -3012,6 +3128,58 @@ object A64Module
                 ->;
             };
 
+            // An address with constant displacement used by a few loads and stores of its own block is folded into
+            // each of them: the displacement costs nothing there, and the add that made the address is not needed.
+            s_lazy_multi(GB* gb, int j, SI* x) -> void
+            {
+                int k, cnt, n;
+                SI* u;
+                IRValue* r = x.res;
+                n = 0;
+                while (n < x.n)
+                {
+                    if (!this.s_kint(this.s_res(x.args[n]))) { ->; };
+                    n++;
+                };
+                cnt = 0;
+                k = j + 1;
+                while (k < gb.ib.insts.len)
+                {
+                    u = (SI*)gb.ib.insts.items[k];
+                    k++;
+                    if (u.op == SO_LOAD & u.a == r) { cnt++; continue; };
+                    if (u.op == SO_STORE & u.b == r & u.a != r) { cnt++; continue; };
+                };
+                if (cnt == r.nu) { x.flag = true; };
+                ->;
+            };
+
+            // The and or the or of two integer compares used once, whose only user is the branch: one cmp and one ccmp
+            s_lazy_pair(SI* x) -> void
+            {
+                IRValue* ra = this.s_res(x.a);
+                IRValue* rb = this.s_res(x.b);
+                SI* c1;
+                SI* c2;
+                if (A64_OPT_CCMP != 1) { ->; };
+                if (x.ty.kind != LK.INT) { ->; };
+                if (x.ty.width != 1) { ->; };
+                if (ra.di == (void*)0 | rb.di == (void*)0 | ra.kc | rb.kc) { ->; };
+                if (ra.nu != 1 | rb.nu != 1) { ->; };
+                c1 = (SI*)ra.di;
+                c2 = (SI*)rb.di;
+                if (c1.op != SO_CMP | c2.op != SO_CMP) { ->; };
+                if (c1.bi != x.bi | c2.bi != x.bi) { ->; };
+                if (c1.flag | c2.flag) { ->; };
+                if (c1.n != 0) { ->; };
+                if (!this.s_ccok(c1)) { ->; };
+                if (!this.s_ccok(c2)) { ->; };
+                c1.flag = true;
+                c2.flag = true;
+                x.flag = true;
+                ->;
+            };
+
             // Marks the compares and addresses used once by the next instructions as folded into their user
             s_lazy() -> void
             {
@@ -3033,6 +3201,7 @@ object A64Module
                             x = (SI*)gb.ib.insts.items[j];
                             if (x.res != (IRValue*)0)
                             {
+                                if (x.op == SO_GEP & x.res.nu > 1 & x.res.nu <= 4) { this.s_lazy_multi(gb, j, x); };
                                 if (x.res.nu == 1 & x.res.ui != (void*)0)
                                 {
                                     u = (SI*)x.res.ui;
@@ -3044,6 +3213,10 @@ object A64Module
                                             {
                                                 if (this.s_csingle(x) | u.op == SO_CBR) { x.flag = true; };
                                             };
+                                        };
+                                        if (x.op == SO_BIN & u.op == SO_CBR & u.a == x.res & (x.k == SB_AND | x.k == SB_OR))
+                                        {
+                                            this.s_lazy_pair(x);
                                         };
                                         if (x.op == SO_GEP)
                                         {
@@ -3366,10 +3539,13 @@ object A64Module
                 this.ne = 0;
                 if (g.lpos != (int*)0) { this.s_ifree(g.lpos); };
                 g.lpos = this.s_iz(nv);
+                if (g.vlnk != (int*)0) { this.s_ifree(g.vlnk); };
+                g.vlnk = this.s_iz(nv);
                 i = 0;
                 while (i < nv)
                 {
                     g.lpos[i] = 0 - 1;
+                    g.vlnk[i] = 0 - 1;
                     g.vforb[i] = (i64)0;
                     g.vhint[i] = 0 - 1;
                     if (g.vwgt[i] < 1500000000) { g.vwgt[i] = 0; };
@@ -3467,6 +3643,8 @@ object A64Module
                             d = mi.d;
                             if (d >= AR_VBASE & src >= AR_VBASE)
                             {
+                                if (g.vlnk[d] == 0 - 1) { g.vlnk[d] = src; };
+                                if (g.vlnk[src] == 0 - 1) { g.vlnk[src] = d; };
                                 if (g.vhint[d] == 0 - 1) { g.vhint[d] = 0 - (src + 1); };
                                 if (g.vhint[src] == 0 - 1) { g.vhint[src] = 0 - (d + 1); };
                             };
@@ -4633,6 +4811,14 @@ object A64Module
 
             e_epilogue(Buf* o) -> void
             {
+                this.e_epilogue_to(o);
+                o.put_str(g"\tret\n\0");
+                ->;
+            };
+
+            // The frame teardown without the final return
+            e_epilogue_to(Buf* o) -> void
+            {
                 GF* g = this.sf;
                 AGF* t = (AGF*)g.tg;
                 int out16 = this.e_out16();
@@ -4654,7 +4840,6 @@ object A64Module
                     };
                     if (this.pac) { o.put_str(g"\tautiasp\n\0"); };
                 };
-                o.put_str(g"\tret\n\0");
                 ->;
             };
 
@@ -4744,6 +4929,7 @@ object A64Module
                 AI* s2;
                 int sz = m.sz;
                 int k, b, b2, d1, d2;
+                bool f1, f2;
                 i64 off1, off2, lo;
                 if (m.k != 0 | m.sym != (byte*)0 | m.b >= 0 | m.cc == 1 | m.ex != 0) { -> 0 - 1; };
                 if (sz != 4 & sz != 8) { -> 0 - 1; };
@@ -4751,16 +4937,22 @@ object A64Module
                 while (k < gb.mi.len)
                 {
                     n2 = (AI*)gb.mi.items[k];
+                    if (n2.op == A_MOV)
+                    {
+                        if (this.s_phys(n2.d) == this.s_phys(n2.a)) { k++; continue; };
+                    };
                     if (n2.op != A_NOP) { break; };
                     k++;
                 };
                 if (k >= gb.mi.len) { -> 0 - 1; };
                 n2 = (AI*)gb.mi.items[k];
                 if (n2.op != m.op | n2.sz != sz | n2.k != 0 | n2.sym != (byte*)0 | n2.b >= 0 | n2.cc == 1 | n2.ex != 0) { -> 0 - 1; };
-                if (n2.fo != m.fo | n2.ma != m.ma) { -> 0 - 1; };
+                f1 = m.fo >= 0 | m.ma == 1;
+                f2 = n2.fo >= 0 | n2.ma == 1;
+                if (f1 != f2) { -> 0 - 1; };
                 off1 = m.imm;
                 off2 = n2.imm;
-                if (m.fo >= 0 | m.ma == 1)
+                if (f1)
                 {
                     b = this.e_fbase();
                     off1 = off1 + this.e_fooff(m);
@@ -4776,7 +4968,7 @@ object A64Module
                 if ((d1 < 32) != (d2 < 32)) { -> 0 - 1; };
                 if (m.op == A_LD)
                 {
-                    if (d1 == d2 | d1 == b | d2 == b) { -> 0 - 1; };
+                    if (d1 == d2) { -> 0 - 1; };
                 };
                 f = m;
                 s2 = n2;
@@ -4804,15 +4996,21 @@ object A64Module
             e_cbr(Buf* o, AI* m, bool isz, int tgt) -> void
             {
                 int sz = m.sz;
-                if (m.cc == 1)
+                if (m.cc == 1 | m.cc == 2)
                 {
                     if (this.tbok)
                     {
                         if (isz) { o.put_str(g"\ttbz \0"); } else { o.put_str(g"\ttbnz \0"); };
                         this.e_pr(o, m.a, sz);
                         o.put_str(g", #\0");
-                        o.put_int(sz * 8 - 1);
+                        if (m.cc == 1) { o.put_int(sz * 8 - 1); } else { o.put(48); };
                         o.put_str(g", \0");
+                    }
+                    elif (m.cc == 2)
+                    {
+                        o.put_str(g"\ttst \0");
+                        this.e_pr(o, m.a, sz);
+                        if (isz) { o.put_str(g", #1\n\tb.eq \0"); } else { o.put_str(g", #1\n\tb.ne \0"); };
                     }
                     else
                     {
@@ -4976,6 +5174,25 @@ object A64Module
                 int a = this.s_phys(m.a);
                 i64 v = m.imm;
                 i64 av;
+                if (m.op == A_CMP & m.k == 1)
+                {
+                    o.put_str(g"\tccmp \0");
+                    this.e_r(o, a, sz);
+                    o.put_str(g", \0");
+                    if (m.b >= 0) { this.e_pr(o, m.b, sz); }
+                    else
+                    {
+                        o.put_str(g"#\0");
+                        if (sz == 4) { v = (i64)((int)v); };
+                        put_i64(o, v);
+                    };
+                    o.put_str(g", #\0");
+                    o.put_int(m.sc);
+                    o.put_str(g", \0");
+                    this.e_cc(o, m.cc);
+                    o.put(10);
+                    ->;
+                };
                 if (m.b >= 0)
                 {
                     if (m.op == A_TST) { o.put_str(g"\ttst \0"); } else { o.put_str(g"\tcmp \0"); };
@@ -5489,6 +5706,25 @@ object A64Module
                     this.e_cbr(o, m, op == A_CBZ, m.tgt);
                     -> 0;
                 };
+                if (op == A_BL | op == A_BLR)
+                {
+                    // a call whose result goes straight back to the caller becomes a jump after the epilogue
+                    k = j + 1;
+                    while (k < gb.mi.len & this.tco & t.frame != 0)
+                    {
+                        n2 = (AI*)gb.mi.items[k];
+                        if (n2.op == A_NOP) { k++; continue; };
+                        if (n2.op == A_RET & (op == A_BL | this.s_phys(m.a) < 16))
+                        {
+                            this.e_epilogue_to(o);
+                            if (op == A_BL) { o.put_str(g"\tb \0"); o.put_str(m.sym); }
+                            else { o.put_str(g"\tbr \0"); this.e_pr(o, m.a, 8); };
+                            o.put(10);
+                            -> k - j;
+                        };
+                        break;
+                    };
+                };
                 if (op == A_BL)
                 {
                     o.put_str(g"\tbl \0");
@@ -5503,7 +5739,27 @@ object A64Module
                     o.put(10);
                     -> 0;
                 };
-                if (op == A_RET) { this.e_epilogue(o); -> 0; };
+                if (op == A_RET)
+                {
+                    // later returns of a function with a frame jump to the first return sequence
+                    if (t.frame != 0)
+                    {
+                        if (this.eplab != 0)
+                        {
+                            o.put_str(g"\tb .LE\0");
+                            o.put_int(this.eplab);
+                            o.put(10);
+                            -> 0;
+                        };
+                        this.nlab++;
+                        this.eplab = this.nlab;
+                        o.put_str(g".LE\0");
+                        o.put_int(this.eplab);
+                        o.put_str(g":\n\0");
+                    };
+                    this.e_epilogue(o);
+                    -> 0;
+                };
                 if (op == A_BRK) { o.put_str(g"\tbrk #1\n\0"); -> 0; };
                 if (op == A_JT)
                 {
@@ -5740,6 +5996,7 @@ object A64Module
                 byte* nm = this.a_sym(f.self.text);
                 int i, j, nxid, skip;
                 GB* gb;
+                AI* n2;
                 this.jb.len = 0;
                 this.jb.mem[0] = 0;
                 this.e_layout();
@@ -5755,6 +6012,23 @@ object A64Module
                     i++;
                 };
                 if (j < 2000) { this.tbok = true; };
+                this.eplab = 0;
+                this.tco = this.e_out16() == 0 & !((AGF*)g.tg).dyn;
+                i = 0;
+                while (i < g.nb & this.tco)
+                {
+                    if (g.rpo[i].mi != (PtrVec*)0)
+                    {
+                        j = 0;
+                        while (j < g.rpo[i].mi.len)
+                        {
+                            n2 = (AI*)g.rpo[i].mi.items[j];
+                            if (n2.op == A_ADDFO | n2.op == A_DALLOC) { this.tco = false; };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
                 i = 0;
                 while (i < g.nb)
                 {

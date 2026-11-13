@@ -164,6 +164,7 @@ struct GF
     int* vcol;  // assigned register, -1 spilled, -2 unassigned
     int* vslot;  // frame offset of a spilled register
     i64* vforb;  // registers it must not take, one bit per register of the target (up to 64)
+    int* vlnk;   // copy partner of a virtual register (arm64 only, null elsewhere), or -1
     int* vhint;  // preferred register, or virtual register whose register is preferred (as -(v + 1))
     int* vdef;  // defining block id
     int* vglob;  // dense index among registers live across blocks, or -1

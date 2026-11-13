@@ -7095,7 +7095,7 @@
                 GF* g = this.sf;
                 int nv = g.nvr;
                 int i, j, k, v, u, c, h, nsp, cls, pick, best, bestw, cnt, e0, e1, npref;
-                i64 free, mask;
+                i64 free, mask, mask2;
                 int* tcnt = this.s_iz(64);
                 nsp = 0;
                 if (this.spl != (int*)0) { this.s_ifree(this.spl); };
@@ -7131,6 +7131,26 @@
                     if (h >= 0)
                     {
                         if ((free `& ((i64)1 << (i64)h)) != (i64)0) { pick = h; };
+                        // the register this one is copied to or from cannot take the hinted register: the copy
+                        // goes away when both take one that suits them both
+                        if (pick >= 0 & g.vlnk != (int*)0)
+                        {
+                            u = g.vlnk[v];
+                            if (u >= 0)
+                            {
+                                if (g.vcol[u] == 0 - 2 & (g.vforb[u] `& ((i64)1 << (i64)h)) != (i64)0)
+                                {
+                                    mask2 = free `& (`!g.vforb[u]);
+                                    j = 0;
+                                    while (j < npref)
+                                    {
+                                        c = this.s_pref(cls, j);
+                                        if ((mask2 `& ((i64)1 << (i64)c)) != (i64)0) { pick = c; break; };
+                                        j++;
+                                    };
+                                };
+                            };
+                        };
                     };
                     if (h < 0 & h != 0 - 1)
                     {
@@ -7139,6 +7159,18 @@
                         if (c >= 0)
                         {
                             if ((free `& ((i64)1 << (i64)c)) != (i64)0) { pick = c; };
+                        };
+                        if (c == 0 - 2)
+                        {
+                            // the register it is copied to or from is not coloured yet: take one that one can use as well
+                            mask2 = free `& (`!g.vforb[u]);
+                            j = 0;
+                            while (j < npref)
+                            {
+                                c = this.s_pref(cls, j);
+                                if ((mask2 `& ((i64)1 << (i64)c)) != (i64)0) { pick = c; break; };
+                                j++;
+                            };
                         };
                     };
                     if (pick < 0)
@@ -7208,7 +7240,65 @@
                     nsp++;
                 };
                 this.s_ifree(tcnt);
+                if (nsp == 0 & g.vlnk != (int*)0) { this.s_recolor(); };
                 -> nsp;
+            };
+
+            // A copy whose two registers ended in different hardware registers is removed by moving one of them to
+            // the register of the other when nothing it conflicts with holds that register.
+            s_recolor() -> void
+            {
+                GF* g = this.sf;
+                int nv = g.nvr;
+                int pass, v, u, w, c, j, e0, e1, cls, ca, cb, h;
+                i64 busy;
+                bool ok;
+                pass = 0;
+                while (pass < 2)
+                {
+                    v = 0;
+                    while (v < nv)
+                    {
+                        u = g.vlnk[v];
+                        if (g.vcol[v] >= 0 & u >= 0)
+                        {
+                            if (g.vcol[u] >= 0 & g.vcol[u] != g.vcol[v] & g.vcls[u] == g.vcls[v])
+                            {
+                                // try to move v to the register of u, then u to the register of v
+                                w = 0;
+                                while (w < 2)
+                                {
+                                    if (w == 0) { ca = v; cb = u; } else { ca = u; cb = v; };
+                                    c = g.vcol[cb];
+                                    h = g.vhint[ca];
+                                    ok = true;
+                                    if (h >= 0 & h == g.vcol[ca]) { ok = false; };
+                                    if ((this.s_allocmask(g.vcls[ca]) `& (`!g.vforb[ca]) `& ((i64)1 << (i64)c)) == (i64)0) { ok = false; };
+                                    if (ok)
+                                    {
+                                        e0 = this.adjo[ca];
+                                        e1 = this.adjo[ca + 1];
+                                        j = e0;
+                                        while (j < e1)
+                                        {
+                                            if (g.vcol[this.adj[j]] == c) { ok = false; break; };
+                                            j++;
+                                        };
+                                    };
+                                    if (ok)
+                                    {
+                                        g.vcol[ca] = c;
+                                        break;
+                                    };
+                                    w++;
+                                };
+                            };
+                        };
+                        v++;
+                    };
+                    pass++;
+                };
+                ->;
             };
 
 
@@ -8555,19 +8645,16 @@
                     g.capvr = nc;
                 };
                 i = g.nvr;
-                g
-                {
-                    .vcls[i] = cls;
-                    .vwgt[i] = 0;
-                    .vcol[i] = 0 - 2;
-                    .vslot[i] = 0;
-                    .vforb[i] = 0;
-                    .vhint[i] = 0 - 1;
-                    .vdef[i] = 0 - 1;
-                    .vglob[i] = 0 - 1;
-                    .vuse[i] = 0;
-                    .nvr = i + 1;
-                };
+                g.vcls[i] = cls;
+                g.vwgt[i] = 0;
+                g.vcol[i] = 0 - 2;
+                g.vslot[i] = 0;
+                g.vforb[i] = (i64)0;
+                g.vhint[i] = 0 - 1;
+                g.vdef[i] = 0 - 1;
+                g.vglob[i] = 0 - 1;
+                g.vuse[i] = 0;
+                g.nvr = i + 1;
                 -> i;
             };
 

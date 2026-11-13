@@ -13895,6 +13895,7 @@ struct MI
                 g.vslot = (int*)0;
                 g.vforb = (i64*)0;
                 g.vhint = (int*)0;
+                g.vlnk = (int*)0;
                 g.vdef = (int*)0;
                 g.vglob = (int*)0;
                 g.vuse = (int*)0;
