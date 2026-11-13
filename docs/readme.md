@@ -60,3 +60,6 @@ There are setup guides for [Windows](https://github.com/kvthweatt/IDEKA/blob/mai
 Every language needs a [style guide](https://github.com/kvthweatt/IDEKA/blob/main/docs/style_guide.md). This guide is a reflection of the standard library.
 
 Information on the [IDEKA Virtual Machine](https://github.com/kvthweatt/IDEKA/blob/main/docs/fvm.md) and [Borrow Checker](https://github.com/kvthweatt/IDEKA/blob/main/docs/fbc.md)
+
+## Want to make a Discord bot?
+Check out [this guide](https://github.com/kvthweatt/IDEKA/blob/main/docs/discord.idk.md)!

@@ -12,6 +12,12 @@
 //   discord_send_message(DISCORD_BOT*, channel_id, text) -> int     HTTP status, or -1
 //   discord_close(DISCORD_BOT*) -> void
 //
+// High level helpers (they load the token and the system roots and run the reconnect loop):
+//   discord_start(DISCORD_BOT*, token_path, intents) -> int    0 on success
+//   discord_next(DISCORD_BOT*, DISCORD_EVENT*) -> int          blocks, reconnects as needed, 1 per message
+//   discord_reply(DISCORD_BOT*, DISCORD_EVENT*, text) -> int   HTTP status, or -1
+//   discord_content_is(DISCORD_EVENT*, text) -> bool           exact match of the message text
+//
 // The caller supplies trusted root certificates (x509_load_pem_bundle) and the bot token.
 // To receive message text the bot needs the MESSAGE_CONTENT intent enabled in the
 // Discord developer portal and in the intents passed to discord_init.
@@ -20,6 +26,10 @@
 
 #ifndef IDEKA_STANDARD_TYPES
 #import <types.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_FFI_FIO
+#import <ffifio.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_WEBCLIENT
@@ -48,6 +58,18 @@ using standard::crypto::X509,
       standard::time,
       standard::memory::allocators::stdarena,
       json;
+
+// Diagnostics attached to the loaders below. They only print, the loaders still return
+// their count and discord_start turns a non positive count into a failure.
+contract TokenRead
+{
+    if (n <= 0) { standard::io::console::print("discord: token file missing or empty\n\0"); standard::io::console::flush(); };
+};
+
+contract RootsLoaded
+{
+    if (n <= 0) { standard::io::console::print("discord: no trusted roots, put cacert.pem (https://curl.se/ca/cacert.pem) in the working directory\n\0"); standard::io::console::flush(); };
+};
 
 namespace standard
 {
@@ -439,6 +461,90 @@ namespace standard
             web_close(@bot.rest);
             if (n < 0) { return 0 - 1; };
             return status;
+        };
+
+        // ---- high level helpers ----
+
+        global byte[400000] d_pem, d_der;
+        global X509_CERT[200] d_roots;
+
+        // Reads the token file into the bot, cut at the first line break. Returns the length.
+        def d_load_token(DISCORD_BOT* bot, byte* path) -> int
+        {
+            int n, i;
+            n = standard::io::file::read_file(path, bot.token, 127);
+            if (n <= 0) { return n; };
+            bot.token[n] = (byte)0;
+            for (i = 0; i < n; i++)
+            {
+                if (bot.token[i] == (byte)10 | bot.token[i] == (byte)13) { bot.token[i] = (byte)0; break; };
+            };
+            return n;
+        } : TokenRead;
+
+        // Loads trusted roots from the system bundle, else cacert.pem in the working directory.
+        // Returns the number of roots.
+        def d_load_roots() -> int
+        {
+            int n;
+            n = standard::io::file::read_file("/etc/ssl/certs/ca-certificates.crt\0", d_pem, 400000);
+            if (n <= 0) { n = standard::io::file::read_file("cacert.pem\0", d_pem, 400000); };
+            if (n <= 0) { return 0; };
+            n = X509::x509_load_pem_bundle(d_pem, n, d_der, 400000, d_roots, 200);
+            return n;
+        } : RootsLoaded;
+
+        // Loads the token and roots and prepares the bot. Returns 0 on success.
+        def discord_start(DISCORD_BOT* bot, byte* token_path, int intents) -> int
+        {
+            int nroots;
+            if (d_load_token(bot, token_path) <= 0) { return 1; };
+            nroots = d_load_roots();
+            if (nroots <= 0) { return 1; };
+            bot.intents = intents;
+            bot.roots = d_roots;
+            bot.nroots = nroots;
+            return 0;
+        };
+
+        // Waits for the next message. Connects when needed and reconnects after drops.
+        // Always returns 1 with an event stored.
+        def discord_next(DISCORD_BOT* bot, DISCORD_EVENT* ev) -> int
+        {
+            int rc, got;
+            while (true)
+            {
+                if (bot.gw_open == 0)
+                {
+                    rc = discord_connect(bot);
+                    if (rc != 0)
+                    {
+                        sleep_ms((u32)5000);
+                        continue;
+                    };
+                };
+                got = discord_poll(bot, ev, 30000);
+                if (got == 1) { return 1; };
+            };
+            return 0;
+        };
+
+        // Sends text to the channel the event came from.
+        def discord_reply(DISCORD_BOT* bot, DISCORD_EVENT* ev, byte* text) -> int
+        {
+            return discord_send_message(bot, @ev.channel_id[0], text);
+        };
+
+        // True when the message text equals text exactly.
+        def discord_content_is(DISCORD_EVENT* ev, byte* text) -> bool
+        {
+            int i = 0;
+            while (text[i] != (byte)0 | ev.content[i] != (byte)0)
+            {
+                if (text[i] != ev.content[i]) { return false; };
+                i++;
+            };
+            return true;
         };
 
     }; // discord
