@@ -49,6 +49,7 @@ namespace json
 		def __init() -> this
 		{
 			this.cap = 8;
+			this.len = 0;
 			this.buf = (@)fmalloc(this.cap * 8);
 			return this;
 		};
@@ -94,6 +95,7 @@ namespace json
 		def _init_arena(standard::memory::allocators::stdarena::Arena* a) -> void
 		{
 			this.cap = 8;
+			this.len = 0;
 			this.buf = (@)standard::memory::allocators::stdarena::alloc(a, this.cap * 8);
 			return;
 		};
@@ -183,6 +185,7 @@ namespace json
 		def __init() -> this
 		{
 			this.cap   = 8;
+			this.len   = 0;
 			this.keys  = (@)fmalloc(this.cap * 8);
 			this.vals  = (@)fmalloc(this.cap * 8);
 			this.klens = (@)fmalloc(this.cap * (sizeof(size_t) / 8));
@@ -192,7 +195,7 @@ namespace json
 		def __exit() -> void
 		{
 			byte** ks;
-			size_t i;
+			size_t i = 0;
 			switch ((u64)this.keys != 0)
 			{
 				case (1)
@@ -285,6 +288,7 @@ namespace json
 		def _init_arena(standard::memory::allocators::stdarena::Arena* a) -> void
 		{
 			this.cap   = 8;
+			this.len   = 0;
 			this.keys  = (@)standard::memory::allocators::stdarena::alloc(a, this.cap * 8);
 			this.vals  = (@)standard::memory::allocators::stdarena::alloc(a, this.cap * 8);
 			this.klens = (@)standard::memory::allocators::stdarena::alloc(a, this.cap * (sizeof(size_t) / 8));
@@ -333,7 +337,7 @@ namespace json
 			void**   vs;
 			size_t*  kl_slab;
 			byte*    kc;
-			size_t   i, kl;
+			size_t   i = 0, kl;
 			int      j;
 			bool     match;
 			ks      = (byte**)this.keys;
@@ -424,7 +428,7 @@ namespace json
 			void**  vs;
 			size_t* kl_slab;
 			byte*   kc;
-			size_t  i, kl;
+			size_t  i = 0, kl;
 			int     j;
 			bool    match;
 			ks      = (byte**)this.keys;
@@ -514,7 +518,7 @@ namespace json
 			byte**  ks;
 			void**  vs;
 			size_t* kl_slab;
-			size_t  i, kl;
+			size_t  i = 0, kl;
 			int     j;
 			bool    match;
 			ks      = (byte**)this.keys;
@@ -620,13 +624,20 @@ namespace json
 
 		def __init() -> this
 		{
+			this.type    = JSON_NULL;
+			this.b       = false;
+			this.s_owned = false;
+			this.i       = 0;
+			this.f       = 0.0;
+			this.s       = (byte*)0;
+			this.slen    = 0;
 			return this;
 		};
 
 		def __exit() -> void
 		{
 			void*  child;
-			size_t k, n;
+			size_t k = 0, n;
 			switch (this.type)
 			{
 				case (JSON_STRING)
@@ -1749,6 +1760,7 @@ namespace json
 	{
 		int  i;
 		char c;
+		byte* hex = "0123456789abcdef\0";
 		do
 		{
 			switch (src[i] != '\x00')
@@ -1756,19 +1768,6 @@ namespace json
 				case (1)
 				{
 					c = (char)src[i];
-					switch (c)
-					{
-						case (34) {}  // "
-						case (92) {}  // \
-						case (10) {}  // \n
-						case (13) {}  // \r
-						case (9) {}   // \t
-						default
-						{
-							pos = _wc(buf, pos, cap, c);
-							break;
-						};
-					};
 					switch (c)
 					{
 						case (34)  // "
@@ -1796,7 +1795,23 @@ namespace json
 							pos = _wc(buf, pos, cap, '\\');
 							pos = _wc(buf, pos, cap, 't');
 						}
-						default {};
+						default
+						{
+							// other control characters must be written as \u00XX
+							switch ((int)src[i] < 32)
+							{
+								case (1)
+								{
+									pos = _wc(buf, pos, cap, '\\');
+									pos = _wc(buf, pos, cap, 'u');
+									pos = _wc(buf, pos, cap, '0');
+									pos = _wc(buf, pos, cap, '0');
+									pos = _wc(buf, pos, cap, (char)hex[((int)src[i] >> 4) `& 15]);
+									pos = _wc(buf, pos, cap, (char)hex[(int)src[i] `& 15]);
+								}
+								default { pos = _wc(buf, pos, cap, c); };
+							};
+						};
 					};
 					i = i + 1;
 				}
@@ -1809,7 +1824,7 @@ namespace json
 	def serialize(JSONNode* node, byte* buf, int pos, int cap) -> int
 	{
 		byte[32]  num_buf;
-		size_t    k, n;
+		size_t    k = 0, n;
 		JSONNode* child;
 
 		switch ((u64)node == 0)
@@ -2063,7 +2078,7 @@ namespace json
 	def _serialize_arena_node(JSONNode* node, SerializeBuf* sb) -> bool
 	{
 		byte[32]  num_buf;
-		size_t    k, n;
+		size_t    k = 0, n;
 		JSONNode* child;
 
 		switch ((u64)node == 0)

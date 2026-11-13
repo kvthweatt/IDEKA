@@ -573,6 +573,77 @@ namespace standard
 
             }; // SHA384
 
+            namespace SHA1
+            {
+                // SHA-1 (RFC 3174). Needed for the WebSocket handshake. Not for signatures.
+                //   sha1(byte* msg, int len, byte* out20)
+
+                def sha1_rotl(u32 x, u32 n) -> u32
+                {
+                    return (x << n) `| (x >> (32u - n));
+                };
+
+                def sha1_block(u32* h, byte* blk) -> void
+                {
+                    u32[80] w;
+                    u32 a, b, c, d, e, f, k, t;
+                    int i;
+                    for (i = 0; i < 16; i++)
+                    {
+                        w[i] = ((u32)blk[i * 4] << 24) `| ((u32)blk[i * 4 + 1] << 16)
+                             `| ((u32)blk[i * 4 + 2] << 8) `| (u32)blk[i * 4 + 3];
+                    };
+                    for (i = 16; i < 80; i++)
+                    {
+                        w[i] = sha1_rotl(w[i - 3] ^| w[i - 8] ^| w[i - 14] ^| w[i - 16], 1u);
+                    };
+                    a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
+                    for (i = 0; i < 80; i++)
+                    {
+                        if (i < 20) { f = (b `& c) `| ((b ^| 0xFFFFFFFFu) `& d); k = 0x5A827999u; };
+                        if (i >= 20 & i < 40) { f = b ^| c ^| d; k = 0x6ED9EBA1u; };
+                        if (i >= 40 & i < 60) { f = (b `& c) `| (b `& d) `| (c `& d); k = 0x8F1BBCDCu; };
+                        if (i >= 60) { f = b ^| c ^| d; k = 0xCA62C1D6u; };
+                        t = sha1_rotl(a, 5u) + f + e + k + w[i];
+                        e = d; d = c; c = sha1_rotl(b, 30u); b = a; a = t;
+                    };
+                    h[0] = h[0] + a; h[1] = h[1] + b; h[2] = h[2] + c; h[3] = h[3] + d; h[4] = h[4] + e;
+                };
+
+                def sha1(byte* msg, int len, byte* out) -> void
+                {
+                    u32[5] h;
+                    byte[128] tail;
+                    int full, rem, i, tl;
+                    u64 bits;
+
+                    h[0] = 0x67452301u; h[1] = 0xEFCDAB89u; h[2] = 0x98BADCFEu;
+                    h[3] = 0x10325476u; h[4] = 0xC3D2E1F0u;
+                    full = len / 64;
+                    for (i = 0; i < full; i++) { sha1_block(@h[0], msg + i * 64); };
+                    rem = len - full * 64;
+                    for (i = 0; i < 128; i++) { tail[i] = (byte)0; };
+                    for (i = 0; i < rem; i++) { tail[i] = msg[full * 64 + i]; };
+                    tail[rem] = (byte)128;
+                    tl = 64;
+                    if (rem >= 56) { tl = 128; };
+                    bits = (u64)len * (u64)8;
+                    for (i = 0; i < 8; i++)
+                    {
+                        tail[tl - 1 - i] = (byte)((bits >> (u64)(8 * i)) `& (u64)255);
+                    };
+                    sha1_block(@h[0], @tail[0]);
+                    if (tl == 128) { sha1_block(@h[0], @tail[64]); };
+                    for (i = 0; i < 5; i++)
+                    {
+                        out[i * 4] = (byte)((h[i] >> 24u) `& 255u);
+                        out[i * 4 + 1] = (byte)((h[i] >> 16u) `& 255u);
+                        out[i * 4 + 2] = (byte)((h[i] >> 8u) `& 255u);
+                        out[i * 4 + 3] = (byte)(h[i] `& 255u);
+                    };
+                };
+            }; // SHA1
+
             namespace MD5
             {
                 struct MD5_CTX
@@ -4801,12 +4872,30 @@ namespace standard
                 {
                     if (!x509_match_host(@chain[0], host, host_len)) { return 6; };
                 };
+                // Walk up the chain. The first certificate that a trusted root vouches for (it is
+                // a trusted root itself, or a trusted root with its issuer name signed it) anchors
+                // the chain, and the certificates the server sent beyond it are ignored.
                 for (i = 0; i < n; i++)
                 {
                     if (!x509_valid_at(@chain[i], now)) { return 2; };
-                };
-                for (i = 0; i + 1 < n; i++)
-                {
+                    last = @chain[i];
+                    for (j = 0; j < nroots; j++)
+                    {
+                        if (x509_bytes_eq(last.der, last.der_len, roots[j].der, roots[j].der_len))
+                        {
+                            if (x509_valid_at(@roots[j], now)) { return 0; };
+                            break;
+                        };
+                    };
+                    for (j = 0; j < nroots; j++)
+                    {
+                        if (!x509_bytes_eq(last.issuer, last.issuer_len,
+                                           roots[j].subject, roots[j].subject_len)) { continue; };
+                        if (!x509_valid_at(@roots[j], now)) { continue; };
+                        if (x509_ca_ok(@roots[j]) != 0) { continue; };
+                        if (x509_check_sig(last, @roots[j]) == 0) { return 0; };
+                    };
+                    if (i + 1 >= n) { return 5; };
                     if (!x509_bytes_eq(chain[i].issuer, chain[i].issuer_len,
                                        chain[i + 1].subject, chain[i + 1].subject_len)) { return 5; };
                     rc = x509_ca_ok(@chain[i + 1]);
@@ -4818,33 +4907,55 @@ namespace standard
                     rc = x509_check_sig(@chain[i], @chain[i + 1]);
                     if (rc != 0) { return rc; };
                 };
-
-                last = @chain[n - 1];
-                anchored = 0;
-                for (j = 0; j < nroots; j++)
-                {
-                    if (x509_bytes_eq(last.der, last.der_len, roots[j].der, roots[j].der_len))
-                    {
-                        if (x509_valid_at(@roots[j], now)) { anchored = 1; };
-                        break;
-                    };
-                };
-                if (anchored == 0)
-                {
-                    for (j = 0; j < nroots; j++)
-                    {
-                        if (!x509_bytes_eq(last.issuer, last.issuer_len,
-                                           roots[j].subject, roots[j].subject_len)) { continue; };
-                        if (!x509_valid_at(@roots[j], now)) { continue; };
-                        if (x509_ca_ok(@roots[j]) != 0) { continue; };
-                        if (x509_check_sig(last, @roots[j]) == 0) { anchored = 1; break; };
-                    };
-                };
-                if (anchored == 0) { return 5; };
-                return 0;
+                return 5;
             };
 
         }; // X509
+
+        namespace CSPRNG
+        {
+            // =========================================================================
+            // Operating system cryptographic random bytes
+            //   Linux:   getrandom(2)
+            //   Windows: BCryptGenRandom with the system preferred RNG
+            //
+            //   random_bytes(byte* out, int n) -> bool
+            // =========================================================================
+
+#ifdef __LINUX__
+            extern
+            {
+                def !! getrandom(void*, u64, u32) -> i64;
+            };
+
+            def random_bytes(byte* out, int n) -> bool
+            {
+                int done = 0;
+                i64 r;
+                while (done < n)
+                {
+                    r = getrandom((void*)(out + done), (u64)(n - done), 0u);
+                    if (r <= (i64)0) { return false; };
+                    done = done + (int)r;
+                };
+                return true;
+            };
+#endif;
+
+#ifdef __WINDOWS__
+            extern
+            {
+                def !! BCryptGenRandom(void*, void*, u32, u32) -> i32;
+            };
+
+            def random_bytes(byte* out, int n) -> bool
+            {
+                // BCRYPT_USE_SYSTEM_PREFERRED_RNG = 2
+                return BCryptGenRandom((void*)0, (void*)out, (u32)n, 2u) == 0;
+            };
+#endif;
+
+        }; // CSPRNG
     };
 };
 

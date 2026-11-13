@@ -266,6 +266,56 @@ namespace standard
         {
             return inet_ntoa(ip);
         };
+
+        // Waits up to ms milliseconds for the socket to become readable.
+        // Returns 1 when readable, 0 on timeout, -1 on error.
+        def sock_wait_readable(int fd, int ms) -> int
+        {
+            byte[528] fds;
+            byte[8] tv;
+            u64 sk;
+            int i, sec, usec, rc;
+            for (i = 0; i < 528; i++) { fds[i] = (byte)0; };
+            fds[0] = (byte)1;               // fd_count = 1
+            sk = (u64)fd;
+            for (i = 0; i < 8; i++) { fds[8 + i] = (byte)((sk >> (u64)(8 * i)) `& (u64)255); };
+            sec = ms / 1000;
+            usec = (ms % 1000) * 1000;
+            for (i = 0; i < 4; i++)
+            {
+                tv[i] = (byte)((sec >> (8 * i)) `& 255);
+                tv[4 + i] = (byte)((usec >> (8 * i)) `& 255);
+            };
+            rc = select(0, (void*)@fds[0], (void*)0, (void*)0, (void*)@tv[0]);
+            if (rc > 0) { return 1; };
+            if (rc == 0) { return 0; };
+            return 0 - 1;
+        };
+
+        // Resolves a host name or dotted address to an IPv4 address in network byte order
+        def host_resolve_ipv4(byte* host, u32* ip) -> bool
+        {
+            byte[64] hints;
+            void* res = (void*)0;
+            byte* ai;
+            byte* sa;
+            void** pp;
+            int rc, i;
+
+            for (i = 0; i < 64; i++) { hints[i] = (byte)0; };
+            hints[4] = (byte)2;     // ai_family = AF_INET
+            hints[8] = (byte)1;     // ai_socktype = SOCK_STREAM
+            rc = getaddrinfo(host, (byte*)0, (void*)@hints[0], @res);
+            if (rc != 0) { return false; };
+            if (res == (void*)0) { return false; };
+            ai = (byte*)res;
+            pp = (void**)(ai + 32);
+            sa = (byte*)*pp;
+            if (sa == (byte*)0) { freeaddrinfo(res); return false; };
+            *ip = (u32)sa[4] `| ((u32)sa[5] << 8) `| ((u32)sa[6] << 16) `| ((u32)sa[7] << 24);
+            freeaddrinfo(res);
+            return true;
+        };
     };
 };
 

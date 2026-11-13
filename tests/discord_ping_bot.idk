@@ -1,0 +1,72 @@
+// Discord bot: replies "pong" to "!ping".
+// Put the bot token in discord_token.txt (single line) in the working directory.
+// Trust roots: /etc/ssl/certs/ca-certificates.crt on Linux, otherwise cacert.pem in the working directory.
+// The bot needs the Message Content intent enabled in the Discord developer portal.
+#import <standard.idk>, <socket_object_raw.idk>, <ffifio.idk>, <cryptography.idk>, <tls.idk>, <webclient.idk>, <json.idk>, <discord.idk>;
+
+using standard::io::console,
+      standard::sockets,
+      standard::crypto::X509,
+      standard::discord;
+
+global DISCORD_BOT g_bot;
+global DISCORD_EVENT g_ev;
+global byte[400000] g_pem, g_der;
+global X509_CERT[200] g_roots;
+global byte[256] g_token;
+
+def eq(byte* a, byte* b) -> bool
+{
+    int i = 0;
+    while (a[i] != (byte)0 | b[i] != (byte)0) { if (a[i] != b[i]) { return false; }; i++; };
+    return true;
+};
+
+def main() -> int
+{
+    int n, nroots, rc, got, i;
+
+    n = read_file("discord_token.txt\0", g_token, 255);
+    if (n <= 0) { print("missing discord_token.txt\n\0"); flush(); return 1; };
+    g_token[n] = (byte)0;
+    for (i = 0; i < n; i++)
+    {
+        if (g_token[i] == (byte)10 | g_token[i] == (byte)13) { g_token[i] = (byte)0; break; };
+    };
+
+    n = read_file("/etc/ssl/certs/ca-certificates.crt\0", g_pem, 400000);
+    if (n <= 0) { n = read_file("cacert.pem\0", g_pem, 400000); };
+    if (n <= 0) { print("no CA bundle: put cacert.pem (https://curl.se/ca/cacert.pem) in the working directory\n\0"); flush(); return 1; };
+    nroots = X509::x509_load_pem_bundle(g_pem, n, g_der, 400000, g_roots, 200);
+    if (nroots <= 0) { print("no trusted roots loaded\n\0"); flush(); return 1; };
+    init();
+
+    discord_init(@g_bot, g_token, INTENT_GUILD_MESSAGES + INTENT_DIRECT_MESSAGES + INTENT_MESSAGE_CONTENT, g_roots, nroots);
+
+    while (true)
+    {
+        rc = discord_connect(@g_bot);
+        if (rc != 0)
+        {
+            print("connect failed \0"); print(rc); print(" verify \0"); print(g_bot.gw_tls.vrc); print(" response: \0"); print(@g_bot.gw.hs_line[0]); print("\n\0"); flush();
+            standard::time::sleep_ms((u32)5000);
+            continue;
+        };
+        print("connected\n\0"); flush();
+
+        while (true)
+        {
+            got = discord_poll(@g_bot, @g_ev, 30000);
+            if (got < 0) { break; };
+            if (got == 1)
+            {
+                if (g_ev.author_bot == 0 & eq(@g_ev.content[0], "!ping\0"))
+                {
+                    discord_send_message(@g_bot, @g_ev.channel_id[0], "Pong. I was written in Ideka!\0");
+                };
+            };
+        };
+        print("disconnected, close code \0"); print(g_bot.close_code); print(", reconnecting\n\0"); flush();
+    };
+    return 0;
+};

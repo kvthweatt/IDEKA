@@ -1,0 +1,74 @@
+// Discord library test against tests/discord_mock.py (a local mock of the gateway and REST).
+// Run: python3 tests/discord_mock.py   then this test, both from the repository root.
+#import <standard.idk>, <socket_object_raw.idk>, <ffifio.idk>, <cryptography.idk>, <tls.idk>, <webclient.idk>, <json.idk>, <discord.idk>;
+
+using standard::io::console,
+      standard::sockets,
+      standard::crypto::X509,
+      standard::discord;
+
+global DISCORD_BOT g_bot;
+global DISCORD_EVENT g_ev;
+global byte[20000] g_pem, g_der;
+global X509_CERT[4] g_roots;
+global int fails = 0;
+
+def check(byte* name, bool ok) -> void
+{
+    if (ok) { print(name); print(" ok\n\0"); } else { print(name); print(" FAIL\n\0"); fails++; };
+    flush();
+};
+
+def eq(byte* a, byte* b) -> bool
+{
+    int i = 0;
+    while (a[i] != (byte)0 | b[i] != (byte)0) { if (a[i] != b[i]) { return false; }; i++; };
+    return true;
+};
+
+def main() -> int
+{
+    int n, nroots, rc, st, got;
+
+    n = read_file("tests/tls13_data/ec.crt\0", g_pem, 6000);
+    if (n <= 0) { print("run from the repository root\n\0"); flush(); return 1; };
+    nroots = X509::x509_load_pem_bundle(g_pem, n, g_der, 6000, g_roots, 4);
+    init();
+
+    discord_init(@g_bot, "test-token\0", INTENT_GUILD_MESSAGES + INTENT_MESSAGE_CONTENT, g_roots, nroots);
+    standard::discord::d_copy_str(@g_bot.gw_host[0], 96, "localhost\0");
+    standard::discord::d_copy_str(@g_bot.gw_path[0], 96, "/gateway\0");
+    standard::discord::d_copy_str(@g_bot.rest_host[0], 96, "localhost\0");
+    g_bot.gw_port = 4444;
+    g_bot.rest_port = 4444;
+
+    rc = discord_connect(@g_bot);
+    check("gateway connect, hello, identify\0", rc == 0);
+    if (rc != 0) { print(rc); print("\n\0"); flush(); return 1; };
+
+    // the mock sends a MESSAGE_CREATE after identify, with unicode and escapes in the text
+    got = discord_poll(@g_bot, @g_ev, 5000);
+    check("receives MESSAGE_CREATE\0", got == 1);
+    check("channel id\0", eq(@g_ev.channel_id[0], "424242\0"));
+    check("author\0", eq(@g_ev.username[0], "karac\0") & g_ev.author_bot == 0);
+    check("content with escapes\0", eq(@g_ev.content[0], "!ping \"quoted\" line\nnext\0"));
+
+    st = discord_send_message(@g_bot, @g_ev.channel_id[0], "pong \"quoted\"\0");
+    check("REST send message status 200\0", st == 200);
+
+    // heartbeats are sent by the library; the mock answers them and sends a message after the second one
+    got = discord_poll(@g_bot, @g_ev, 5000);
+    check("second event after heartbeat\0", got == 1 & eq(@g_ev.content[0], "heartbeat seen\0"));
+
+    // the mock then drops the session with op 9
+    got = discord_poll(@g_bot, @g_ev, 5000);
+    check("invalid session reported\0", got == 0 - 1);
+
+    rc = discord_connect(@g_bot);
+    check("reconnect\0", rc == 0);
+    discord_close(@g_bot);
+
+    if (fails == 0) { print("ALL PASS\n\0"); } else { print("FAILS\n\0"); };
+    flush();
+    return fails;
+};

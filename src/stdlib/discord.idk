@@ -1,0 +1,447 @@
+// Author: Karac V. Thweatt
+
+// discord.idk - Discord bot library: REST and Gateway (API v10) over native TLS 1.3.
+// Built on webclient.idk, tls.idk, cryptography.idk and json.idk.
+//
+//   discord_init(DISCORD_BOT*, token, intents, roots, nroots) -> void
+//   discord_connect(DISCORD_BOT*) -> int           gateway connect, hello and identify, 0 on success
+//   discord_poll(DISCORD_BOT*, DISCORD_EVENT*, timeout_ms) -> int
+//        1  a MESSAGE_CREATE event was stored in the event
+//        0  nothing happened within the timeout (heartbeats are sent automatically)
+//       -1  the connection ended or must be re-established, call discord_connect again
+//   discord_send_message(DISCORD_BOT*, channel_id, text) -> int     HTTP status, or -1
+//   discord_close(DISCORD_BOT*) -> void
+//
+// The caller supplies trusted root certificates (x509_load_pem_bundle) and the bot token.
+// To receive message text the bot needs the MESSAGE_CONTENT intent enabled in the
+// Discord developer portal and in the intents passed to discord_init.
+// Host names and ports can be changed through the bot fields before connecting
+// (used by tests against a local mock).
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_WEBCLIENT
+#import <webclient.idk>;
+#endif;
+
+#ifndef IDEKA_JSON
+#import <json.idk>;
+#endif;
+
+#ifndef IDEKA_DATETIME
+#import <datetime.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_TIME
+#import <runtime\timing.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_DISCORD
+#def IDEKA_STANDARD_DISCORD 1;
+
+using standard::crypto::X509,
+      standard::web,
+      standard::tls13,
+      standard::datetime,
+      standard::time,
+      standard::memory::allocators::stdarena,
+      json;
+
+namespace standard
+{
+    namespace discord
+    {
+        global const int INTENT_GUILDS = 1,
+                         INTENT_GUILD_MESSAGES = 512,
+                         INTENT_DIRECT_MESSAGES = 4096,
+                         INTENT_MESSAGE_CONTENT = 32768;
+
+        struct DISCORD_EVENT
+        {
+            byte[32] guild_id, channel_id, message_id, author_id;
+            byte[96] username;
+            int author_bot;
+            int content_len;
+            byte[4100] content;
+        };
+
+        struct DISCORD_BOT
+        {
+            byte[128] token;
+            int intents;
+            X509_CERT* roots;
+            int nroots;
+            byte[96] gw_host, rest_host, gw_path, rest_prefix;
+            int gw_port, rest_port, use_tls;
+            WEB_STREAM gw;
+            TLS13_CONN gw_tls;
+            int gw_open;
+            int close_code;     // last gateway close code, 0 none, -1 transport error
+            WEB_STREAM rest;
+            TLS13_CONN rest_tls;
+            byte[70000] msg;
+            i64 seq;
+            int have_seq;
+            i64 hb_interval_ms, next_hb_ms;
+        };
+
+        def d_len(byte* s) -> int
+        {
+            int n = 0;
+            while (s[n] != (byte)0) { n++; };
+            return n;
+        };
+
+        def d_copy_str(byte* dst, int cap, byte* src) -> void
+        {
+            int i = 0;
+            while (src[i] != (byte)0 & i < cap - 1) { dst[i] = src[i]; i++; };
+            dst[i] = (byte)0;
+        };
+
+        def d_now_ms() -> i64
+        {
+            return ns_to_ms(time_now());
+        };
+
+        def d_unix_now() -> i64
+        {
+            DateTime utc = dt_now_utc();
+            return dt_to_unix_sec(@utc);
+        };
+
+        // copies a JSON string node into out, returns its length
+        def d_get_str(JSONNode* n, byte* out, int cap) -> int
+        {
+            byte* p;
+            int len, i, take;
+            out[0] = (byte)0;
+            if ((u64)n == (u64)0) { return 0; };
+            if (!n.as_string_view(@p, @len)) { return 0; };
+            take = len;
+            if (take > cap - 1) { take = cap - 1; };
+            for (i = 0; i < take; i++) { out[i] = p[i]; };
+            out[take] = (byte)0;
+            return take;
+        };
+
+        def discord_init(DISCORD_BOT* bot, byte* token, int intents, X509_CERT* roots, int nroots) -> void
+        {
+            d_copy_str(@bot.token[0], 128, token);
+            bot.intents = intents;
+            bot.roots = roots;
+            bot.nroots = nroots;
+            d_copy_str(@bot.gw_host[0], 96, "gateway.discord.gg\0");
+            d_copy_str(@bot.gw_path[0], 96, "/?v=10&encoding=json\0");
+            d_copy_str(@bot.rest_host[0], 96, "discord.com\0");
+            d_copy_str(@bot.rest_prefix[0], 96, "/api/v10\0");
+            bot.gw_port = 443;
+            bot.rest_port = 443;
+            bot.use_tls = 1;
+            bot.gw_open = 0;
+            bot.have_seq = 0;
+            bot.seq = (i64)0;
+        };
+
+        // ---- sending JSON over the gateway ----
+
+        def d_send_json(DISCORD_BOT* bot, JSONNode* root) -> bool
+        {
+            byte[8192] buf;
+            int n = serialize(root, @buf[0], 0, 8192);
+            if (n <= 0) { return false; };
+            return ws_send(@bot.gw, 1, @buf[0], n);
+        };
+
+        def d_send_heartbeat(DISCORD_BOT* bot) -> bool
+        {
+            JSONNode root();
+            JSONNode* c;
+            bool ok;
+            root.set_object();
+            c = (JSONNode*)root.object_set_new("op\0");
+            c.set_int((i64)1);
+            c = (JSONNode*)root.object_set_new("d\0");
+            if (bot.have_seq != 0) { c.set_int(bot.seq); } else { c.set_null(); };
+            ok = d_send_json(bot, @root);
+            root.__exit();
+            root.set_null();
+            return ok;
+        };
+
+        def d_send_identify(DISCORD_BOT* bot) -> bool
+        {
+            JSONNode root();
+            JSONNode* c;
+            JSONNode* dnode;
+            JSONNode* props;
+            bool ok;
+            root.set_object();
+            c = (JSONNode*)root.object_set_new("op\0");
+            c.set_int((i64)2);
+            dnode = (JSONNode*)root.object_set_new("d\0");
+            dnode.set_object();
+            c = (JSONNode*)dnode.object_set_new("token\0");
+            c.set_string(@bot.token[0]);
+            c = (JSONNode*)dnode.object_set_new("intents\0");
+            c.set_int((i64)bot.intents);
+            props = (JSONNode*)dnode.object_set_new("properties\0");
+            props.set_object();
+            c = (JSONNode*)props.object_set_new("os\0");
+            c.set_string("ideka\0");
+            c = (JSONNode*)props.object_set_new("browser\0");
+            c.set_string("ideka\0");
+            c = (JSONNode*)props.object_set_new("device\0");
+            c.set_string("ideka\0");
+            ok = d_send_json(bot, @root);
+            root.__exit();
+            root.set_null();
+            return ok;
+        };
+
+        // ---- parsing one gateway message ----
+
+        // Releases an arena parsed tree. The node is cleared first so that its destructor
+        // does not try to free memory that belongs to the arena.
+        def d_release(JSONNode* root, Arena* arena) -> void
+        {
+            root.set_null();
+            arena_destroy(arena);
+        };
+
+        // Parses buf[0..len) and gives back op, sequence and the event name.
+        // The caller supplies the node and arena so the strings stay valid.
+        def d_parse(byte* buf, int len, JSONNode* root, Arena* arena) -> bool
+        {
+            size_t node_cap;
+            JSONParser p(buf, len, arena);
+            node_cap = (size_t)((len / 3 + 1) * (sizeof(JSONNode) / sizeof(byte)) * 2) + (size_t)len + 1;
+            arena_init_sized(arena, node_cap);
+            p.parse(root);
+            return p.ok();
+        };
+
+        // fills the event from a MESSAGE_CREATE payload d
+        def d_fill_event(JSONNode* dn, DISCORD_EVENT* ev) -> void
+        {
+            JSONNode* a;
+            JSONNode* b;
+            d_get_str((JSONNode*)dn.object_get("guild_id\0"), @ev.guild_id[0], 32);
+            d_get_str((JSONNode*)dn.object_get("channel_id\0"), @ev.channel_id[0], 32);
+            d_get_str((JSONNode*)dn.object_get("id\0"), @ev.message_id[0], 32);
+            ev.content_len = d_get_str((JSONNode*)dn.object_get("content\0"), @ev.content[0], 4100);
+            ev.author_bot = 0;
+            ev.author_id[0] = (byte)0;
+            ev.username[0] = (byte)0;
+            a = (JSONNode*)dn.object_get("author\0");
+            if ((u64)a != (u64)0)
+            {
+                d_get_str((JSONNode*)a.object_get("id\0"), @ev.author_id[0], 32);
+                d_get_str((JSONNode*)a.object_get("username\0"), @ev.username[0], 96);
+                b = (JSONNode*)a.object_get("bot\0");
+                if ((u64)b != (u64)0) { if (b.is_bool()) { if (b.as_bool()) { ev.author_bot = 1; }; }; };
+            };
+        };
+
+        // ---- connection ----
+
+        def discord_close(DISCORD_BOT* bot) -> void
+        {
+            if (bot.gw_open != 0)
+            {
+                ws_close(@bot.gw, 1000);
+                web_close(@bot.gw);
+                bot.gw_open = 0;
+            };
+        };
+
+        def discord_connect(DISCORD_BOT* bot) -> int
+        {
+            Arena arena;
+            JSONNode root();
+            JSONNode* dn;
+            JSONNode* c;
+            int rc, n, op;
+            i64 hb;
+
+            discord_close(bot);
+            bot.close_code = 0;
+            bot.have_seq = 0;
+            bot.seq = (i64)0;
+            rc = web_connect(@bot.gw, @bot.gw_tls, @bot.gw_host[0], (u16)bot.gw_port, bot.use_tls,
+                             bot.roots, bot.nroots, 1, d_unix_now());
+            if (rc != 0) { return rc; };
+            if (!ws_handshake(@bot.gw, @bot.gw_host[0], @bot.gw_path[0], (byte*)0))
+            {
+                web_close(@bot.gw);
+                return 200;
+            };
+            bot.gw_open = 1;
+
+            // Hello
+            n = ws_recv(@bot.gw, @bot.msg[0], 70000, @op);
+            if (n <= 0) { discord_close(bot); return 201; };
+            if (!d_parse(@bot.msg[0], n, @root, @arena)) { d_release(@root, @arena); discord_close(bot); return 202; };
+            c = (JSONNode*)root.object_get("op\0");
+            if ((u64)c == (u64)0) { d_release(@root, @arena); discord_close(bot); return 202; };
+            if (c.as_int() != (i64)10) { d_release(@root, @arena); discord_close(bot); return 202; };
+            dn = (JSONNode*)root.object_get("d\0");
+            hb = (i64)41250;
+            if ((u64)dn != (u64)0)
+            {
+                c = (JSONNode*)dn.object_get("heartbeat_interval\0");
+                if ((u64)c != (u64)0) { hb = c.as_int(); };
+            };
+            d_release(@root, @arena);
+            bot.hb_interval_ms = hb;
+            bot.next_hb_ms = d_now_ms() + hb;
+
+            if (!d_send_identify(bot)) { discord_close(bot); return 203; };
+            return 0;
+        };
+
+        // ---- event loop step ----
+
+        def discord_poll(DISCORD_BOT* bot, DISCORD_EVENT* ev, int timeout_ms) -> int
+        {
+            Arena arena;
+            JSONNode root();
+            JSONNode* c;
+            JSONNode* dn;
+            byte[40] tname;
+            i64 now, wait_ms, end_ms;
+            int n, op, w, opi;
+
+            if (bot.gw_open == 0) { return 0 - 1; };
+            end_ms = d_now_ms() + (i64)timeout_ms;
+
+            while (true)
+            {
+                now = d_now_ms();
+                if (now >= bot.next_hb_ms)
+                {
+                    if (!d_send_heartbeat(bot)) { return 0 - 1; };
+                    bot.next_hb_ms = now + bot.hb_interval_ms;
+                };
+                wait_ms = bot.next_hb_ms - now;
+                if (end_ms - now < wait_ms) { wait_ms = end_ms - now; };
+                if (wait_ms < (i64)0) { wait_ms = (i64)0; };
+
+                w = web_wait_readable(@bot.gw, (int)wait_ms);
+                if (w < 0) { return 0 - 1; };
+                if (w == 0)
+                {
+                    if (d_now_ms() >= end_ms) { return 0; };
+                    continue;
+                };
+
+                n = ws_recv(@bot.gw, @bot.msg[0], 70000, @opi);
+                if (n == 0 - 3) { continue; };
+                if (n < 0)
+                {
+                    bot.close_code = 0 - 1;
+                    if (n == 0 - 2) { bot.close_code = ((int)bot.msg[0] << 8) `| (int)bot.msg[1]; };
+                    discord_close(bot);
+                    return 0 - 1;
+                };
+                root.set_null();
+                if (!d_parse(@bot.msg[0], n, @root, @arena)) { d_release(@root, @arena); continue; };
+
+                c = (JSONNode*)root.object_get("op\0");
+                op = 0 - 1;
+                if ((u64)c != (u64)0) { op = (int)c.as_int(); };
+
+                if (op == 1)
+                {
+                    // server asked for a heartbeat now
+                    d_release(@root, @arena);
+                    d_send_heartbeat(bot);
+                    continue;
+                };
+                if (op == 7 | op == 9)
+                {
+                    // reconnect or invalid session: caller reconnects
+                    d_release(@root, @arena);
+                    discord_close(bot);
+                    return 0 - 1;
+                };
+                if (op == 0)
+                {
+                    c = (JSONNode*)root.object_get("s\0");
+                    if ((u64)c != (u64)0) { if (c.is_int()) { bot.seq = c.as_int(); bot.have_seq = 1; }; };
+                    c = (JSONNode*)root.object_get("t\0");
+                    d_get_str(c, @tname[0], 40);
+                    if (tname[0] == (byte)77 & tname[1] == (byte)69 & tname[2] == (byte)83 & tname[3] == (byte)83
+                        & tname[4] == (byte)65 & tname[5] == (byte)71 & tname[6] == (byte)69 & tname[7] == (byte)95
+                        & tname[8] == (byte)67 & tname[13] == (byte)69 & tname[14] == (byte)0)
+                    {
+                        // MESSAGE_CREATE
+                        dn = (JSONNode*)root.object_get("d\0");
+                        if ((u64)dn != (u64)0) { d_fill_event(dn, ev); };
+                        d_release(@root, @arena);
+                        return 1;
+                    };
+                };
+                d_release(@root, @arena);
+            };
+            return 0;
+        };
+
+        // ---- REST ----
+
+        // Sends a message with the bot token. Returns the HTTP status or -1.
+        def discord_send_message(DISCORD_BOT* bot, byte* channel_id, byte* text) -> int
+        {
+            JSONNode root();
+            JSONNode* c;
+            byte[16384] body;
+            byte[160] path;
+            byte[400] headers;
+            byte[2048] resp;
+            int n, rc, status, p, i, bl;
+            byte* tail = "/messages\0";
+            byte* ch = "/channels/\0";
+
+            root.set_object();
+            c = (JSONNode*)root.object_set_new("content\0");
+            c.set_string(text);
+            bl = serialize(@root, @body[0], 0, 16384);
+            root.__exit();
+            root.set_null();
+            if (bl <= 0) { return 0 - 1; };
+
+            // path = prefix + /channels/ + id + /messages
+            p = 0;
+            d_copy_str(@path[0], 160, @bot.rest_prefix[0]);
+            p = d_len(@path[0]);
+            for (i = 0; ch[i] != (byte)0; i++) { path[p] = ch[i]; p++; };
+            for (i = 0; channel_id[i] != (byte)0 & p < 140; i++) { path[p] = channel_id[i]; p++; };
+            for (i = 0; tail[i] != (byte)0; i++) { path[p] = tail[i]; p++; };
+            path[p] = (byte)0;
+
+            // headers
+            p = 0;
+            byte* h1 = "Authorization: Bot \0";
+            byte* h2 = "\r\nContent-Type: application/json\r\nUser-Agent: DiscordBot (https://github.com/kvthweatt/flux, 0.1)\r\nConnection: close\r\n\0";
+            for (i = 0; h1[i] != (byte)0; i++) { headers[p] = h1[i]; p++; };
+            for (i = 0; bot.token[i] != (byte)0 & p < 200; i++) { headers[p] = bot.token[i]; p++; };
+            for (i = 0; h2[i] != (byte)0; i++) { headers[p] = h2[i]; p++; };
+            headers[p] = (byte)0;
+
+            rc = web_connect(@bot.rest, @bot.rest_tls, @bot.rest_host[0], (u16)bot.rest_port, bot.use_tls,
+                             bot.roots, bot.nroots, 1, d_unix_now());
+            if (rc != 0) { return 0 - 1; };
+            status = 0;
+            n = http_request(@bot.rest, "POST\0", @bot.rest_host[0], @path[0], @headers[0],
+                             @body[0], bl, @resp[0], 2047, @status);
+            web_close(@bot.rest);
+            if (n < 0) { return 0 - 1; };
+            return status;
+        };
+
+    }; // discord
+}; // standard
+
+#endif; // IDEKA_STANDARD_DISCORD

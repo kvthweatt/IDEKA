@@ -23,8 +23,14 @@
 #import <builtins\socket_object_raw.idk>;
 #endif;
 
+#ifndef IDEKA_STANDARD_CRYPTO
+#import <cryptography.idk>;
+#endif;
+
 #ifndef IDEKA_STANDARD_TLS
 #def IDEKA_STANDARD_TLS 1;
+
+#ifdef __WINDOWS__
 
 // ============================================================
 // WINDOWS HANDLE / PLATFORM TYPES
@@ -2227,6 +2233,1106 @@ namespace standard
 
         }; // conn
     }; // tls
+}; // standard
+
+#endif; // __WINDOWS__ (Schannel wrappers)
+
+// ============================================================
+// NATIVE TLS 1.3 (RFC 8446)
+//
+// Cipher suite TLS_AES_128_GCM_SHA256, key exchange X25519.
+// Client and server, over a connected TCP socket descriptor from the neutral
+// socket layer. Built on standard::crypto only, no operating system TLS.
+//
+// Client: tls13_client_connect(conn, fd, host, host_len, roots, nroots, verify, now)
+// Server: tls13_server_accept(conn, fd, chain, chain_n, key)
+// Both:   tls13_send, tls13_recv, tls13_close
+//
+// Server credentials come from PEM: x509_load_pem_bundle for the chain and
+// tls13_load_key_pem for the private key.
+//
+// Not constant time. No session resumption, no client certificates, no
+// HelloRetryRequest. AES-256-GCM and ChaCha20-Poly1305 suites are not implemented.
+// ============================================================
+
+using standard::crypto::hashing,
+      standard::crypto::encryption,
+      standard::crypto::kdf::HKDF,
+      standard::crypto::X509,
+      standard::crypto::RSA,
+      standard::crypto::P384,
+      standard::crypto::ECDH,
+      standard::crypto::CSPRNG,
+      standard::sockets;
+
+namespace standard
+{
+    namespace tls13
+    {
+        global const int TLS13_OK = 0,
+                         TLS13_ERR_IO = 1,
+                         TLS13_ERR_PROTOCOL = 2,
+                         TLS13_ERR_UNSUPPORTED = 3,
+                         TLS13_ERR_CERT = 4,
+                         TLS13_ERR_SIGNATURE = 5,
+                         TLS13_ERR_FINISHED = 6,
+                         TLS13_ERR_ALERT = 7,
+                         TLS13_ERR_RANDOM = 8,
+                         TLS13_ERR_KEY = 9;
+
+        struct TLS13_KEY
+        {
+            int type;               // 1 = ECDSA, 2 = RSA
+            int ec_len;             // 32 = P-256, 48 = P-384
+            byte[48] ec_priv;
+            byte[512] n, e, p, q, dp, dq, qinv;
+            int n_len, e_len, p_len, q_len, dp_len, dq_len, qinv_len;
+        };
+
+        struct TLS13_CONN
+        {
+            int fd;
+            int is_server;
+            int err;
+            int vrc;
+            int closed;
+            int wenc, renc;
+            u64 wseq, rseq;
+            byte[16] wkey, rkey;
+            byte[12] wiv, riv;
+            byte[32] wsec, rsec;
+            GCM_CTX wgcm, rgcm;
+            byte[16640] rec;
+            byte[16640] plain;
+            byte[16700] outrec;
+            byte[40000] hs;
+            int hs_len;
+            byte[40000] tr;
+            int tr_len;
+            byte[16384] app;
+            int app_len, app_pos;
+            byte[32000] peer_der;
+            X509_CERT[8] peer;
+            int peer_n;
+        };
+
+        // ---- byte helpers ----
+
+        def t_p8(byte* b, int* p, int v) -> void
+        {
+            b[*p] = (byte)(v `& 255);
+            *p = *p + 1;
+        };
+
+        def t_p16(byte* b, int* p, int v) -> void
+        {
+            b[*p] = (byte)((v >> 8) `& 255);
+            b[*p + 1] = (byte)(v `& 255);
+            *p = *p + 2;
+        };
+
+        def t_p24(byte* b, int* p, int v) -> void
+        {
+            b[*p] = (byte)((v >> 16) `& 255);
+            b[*p + 1] = (byte)((v >> 8) `& 255);
+            b[*p + 2] = (byte)(v `& 255);
+            *p = *p + 3;
+        };
+
+        def t_pbytes(byte* b, int* p, byte* src, int n) -> void
+        {
+            int i;
+            for (i = 0; i < n; i++) { b[*p + i] = src[i]; };
+            *p = *p + n;
+        };
+
+        def t_g16(byte* b, int p) -> int
+        {
+            return ((int)b[p] << 8) `| (int)b[p + 1];
+        };
+
+        def t_g24(byte* b, int p) -> int
+        {
+            return ((int)b[p] << 16) `| ((int)b[p + 1] << 8) `| (int)b[p + 2];
+        };
+
+        def t_strlen(byte* s) -> int
+        {
+            int n = 0;
+            while (s[n] != (byte)0) { n++; };
+            return n;
+        };
+
+        def t_sha256(byte* d, int n, byte* out) -> void
+        {
+            SHA256_CTX c;
+            SHA256::sha256_init(@c);
+            SHA256::sha256_update(@c, d, (u64)n);
+            SHA256::sha256_final(@c, out);
+        };
+
+        // ---- key schedule ----
+
+        // HKDF-Expand-Label with SHA-256 (RFC 8446 section 7.1)
+        def t_expand_label(byte* secret, byte* lbl, byte* ctx, int ctxlen,
+                           byte* out, int outlen) -> void
+        {
+            byte[80] info;
+            int p = 0, ll, i;
+            ll = t_strlen(lbl);
+            t_p16(@info[0], @p, outlen);
+            t_p8(@info[0], @p, 6 + ll);
+            info[p] = (byte)116; info[p + 1] = (byte)108; info[p + 2] = (byte)115;
+            info[p + 3] = (byte)49; info[p + 4] = (byte)51; info[p + 5] = (byte)32;
+            p = p + 6;
+            for (i = 0; i < ll; i++) { info[p + i] = lbl[i]; };
+            p = p + ll;
+            t_p8(@info[0], @p, ctxlen);
+            for (i = 0; i < ctxlen; i++) { info[p + i] = ctx[i]; };
+            p = p + ctxlen;
+            HKDF::hkdf_expand(secret, @info[0], p, out, outlen);
+        };
+
+        // Derive-Secret(secret, lbl, transcript hash)
+        def t_derive(byte* secret, byte* lbl, byte* thash, byte* out) -> void
+        {
+            t_expand_label(secret, lbl, thash, 32, out, 32);
+        };
+
+        def t_set_write_keys(TLS13_CONN* c, byte* secret) -> void
+        {
+            int i;
+            for (i = 0; i < 32; i++) { c.wsec[i] = secret[i]; };
+            t_expand_label(secret, "key\0", (byte*)0, 0, @c.wkey[0], 16);
+            t_expand_label(secret, "iv\0", (byte*)0, 0, @c.wiv[0], 12);
+            AES::gcm_init(@c.wgcm, @c.wkey[0]);
+            c.wseq = (u64)0;
+            c.wenc = 1;
+        };
+
+        def t_set_read_keys(TLS13_CONN* c, byte* secret) -> void
+        {
+            int i;
+            for (i = 0; i < 32; i++) { c.rsec[i] = secret[i]; };
+            t_expand_label(secret, "key\0", (byte*)0, 0, @c.rkey[0], 16);
+            t_expand_label(secret, "iv\0", (byte*)0, 0, @c.riv[0], 12);
+            AES::gcm_init(@c.rgcm, @c.rkey[0]);
+            c.rseq = (u64)0;
+            c.renc = 1;
+        };
+
+        def t_nonce(byte* iv, u64 seq, byte* out) -> void
+        {
+            int i;
+            for (i = 0; i < 12; i++) { out[i] = iv[i]; };
+            for (i = 0; i < 8; i++)
+            {
+                out[4 + i] = out[4 + i] ^| (byte)((seq >> (u64)(56 - 8 * i)) `& (u64)255);
+            };
+        };
+
+        // ---- record layer ----
+
+        def t_fail(TLS13_CONN* c, int code) -> int
+        {
+            c.err = code;
+            return code;
+        };
+
+        def t_send_record(TLS13_CONN* c, int type, byte* dat, int len) -> int
+        {
+            byte[12] nonce;
+            byte[16] tag;
+            byte[5] aad;
+            int p = 0, i, clen;
+
+            if (c.wenc == 0)
+            {
+                t_p8(@c.outrec[0], @p, type);
+                t_p16(@c.outrec[0], @p, 771);
+                t_p16(@c.outrec[0], @p, len);
+                for (i = 0; i < len; i++) { c.outrec[5 + i] = dat[i]; };
+                if (tcp_send_all(c.fd, @c.outrec[0], 5 + len) < 0) { return t_fail(c, 1); };
+                return 0;
+            };
+
+            // inner plaintext = dat || content type
+            for (i = 0; i < len; i++) { c.plain[i] = dat[i]; };
+            c.plain[len] = (byte)type;
+            clen = len + 1 + 16;
+            aad[0] = (byte)23; aad[1] = (byte)3; aad[2] = (byte)3;
+            aad[3] = (byte)((clen >> 8) `& 255); aad[4] = (byte)(clen `& 255);
+            t_nonce(@c.wiv[0], c.wseq, @nonce[0]);
+            AES::gcm_encrypt(@c.wgcm, @nonce[0], @aad[0], 5, @c.plain[0], len + 1,
+                             @c.outrec[5], @tag[0]);
+            for (i = 0; i < 16; i++) { c.outrec[5 + len + 1 + i] = tag[i]; };
+            for (i = 0; i < 5; i++) { c.outrec[i] = aad[i]; };
+            c.wseq = c.wseq + (u64)1;
+            if (tcp_send_all(c.fd, @c.outrec[0], 5 + clen) < 0) { return t_fail(c, 1); };
+            return 0;
+        };
+
+        // Reads one record. Decrypts when keys are active. On success *type is the
+        // (inner) content type and the payload is in c.plain with length *len.
+        def t_read_record(TLS13_CONN* c, int* type, int* len) -> int
+        {
+            byte[12] nonce;
+            byte[5] aad;
+            int rlen, i, ok, ptype, plen;
+
+            if (tcp_recv_all(c.fd, @c.rec[0], 5) < 0) { return t_fail(c, 1); };
+            rlen = t_g16(@c.rec[0], 3);
+            if (rlen > 16640 - 5) { return t_fail(c, 2); };
+            if (tcp_recv_all(c.fd, @c.rec[5], rlen) < 0) { return t_fail(c, 1); };
+
+            if (c.rec[0] == (byte)23 & c.renc != 0)
+            {
+                if (rlen < 17) { return t_fail(c, 2); };
+                for (i = 0; i < 5; i++) { aad[i] = c.rec[i]; };
+                t_nonce(@c.riv[0], c.rseq, @nonce[0]);
+                ok = AES::gcm_decrypt(@c.rgcm, @nonce[0], @aad[0], 5, @c.rec[5], rlen - 16,
+                                      @c.plain[0], @c.rec[5 + rlen - 16]);
+                if (ok == 0) { return t_fail(c, 2); };
+                c.rseq = c.rseq + (u64)1;
+                plen = rlen - 16;
+                while (plen > 0 & c.plain[plen - 1] == (byte)0) { plen--; };
+                if (plen == 0) { return t_fail(c, 2); };
+                ptype = (int)c.plain[plen - 1];
+                *type = ptype;
+                *len = plen - 1;
+                return 0;
+            };
+
+            *type = (int)c.rec[0];
+            for (i = 0; i < rlen; i++) { c.plain[i] = c.rec[5 + i]; };
+            *len = rlen;
+            return 0;
+        };
+
+        // ---- handshake message plumbing ----
+
+        def t_tr_add(TLS13_CONN* c, byte* d, int n) -> void
+        {
+            int i;
+            for (i = 0; i < n; i++) { c.tr[c.tr_len + i] = d[i]; };
+            c.tr_len = c.tr_len + n;
+        };
+
+        def t_tr_hash(TLS13_CONN* c, byte* out) -> void
+        {
+            t_sha256(@c.tr[0], c.tr_len, out);
+        };
+
+        // Sends a handshake message (already framed with its 4 byte header)
+        def t_send_hs(TLS13_CONN* c, byte* msg, int len) -> int
+        {
+            t_tr_add(c, msg, len);
+            return t_send_record(c, 22, msg, len);
+        };
+
+        // Makes sure a whole handshake message sits at the start of c.hs.
+        // Returns its type, or -1 on failure. *mlen is the full length with header.
+        def t_next_hs(TLS13_CONN* c, int* mlen) -> int
+        {
+            int type, len, i, need;
+            while (true)
+            {
+                if (c.hs_len >= 4)
+                {
+                    need = 4 + t_g24(@c.hs[0], 1);
+                    if (need > 40000) { t_fail(c, 2); return 0 - 1; };
+                    if (c.hs_len >= need)
+                    {
+                        *mlen = need;
+                        return (int)c.hs[0];
+                    };
+                };
+                if (t_read_record(c, @type, @len) != 0) { return 0 - 1; };
+                if (type == 20) { continue; };
+                if (type == 21)
+                {
+                    c.err = 7;
+                    if (len >= 2) { if (c.plain[1] == (byte)0) { c.closed = 1; }; };
+                    return 0 - 1;
+                };
+                if (type != 22) { t_fail(c, 2); return 0 - 1; };
+                if (c.hs_len + len > 40000) { t_fail(c, 2); return 0 - 1; };
+                for (i = 0; i < len; i++) { c.hs[c.hs_len + i] = c.plain[i]; };
+                c.hs_len = c.hs_len + len;
+            };
+            return 0 - 1;
+        };
+
+        def t_consume_hs(TLS13_CONN* c, int n) -> void
+        {
+            int i;
+            for (i = 0; i < c.hs_len - n; i++) { c.hs[i] = c.hs[n + i]; };
+            c.hs_len = c.hs_len - n;
+        };
+
+        // ---- Finished ----
+
+        def t_finished_data(byte* base_secret, byte* thash, byte* out) -> void
+        {
+            byte[32] fk;
+            t_expand_label(base_secret, "finished\0", (byte*)0, 0, @fk[0], 32);
+            HKDF::hmac_sha256(@fk[0], 32, thash, 32, out);
+        };
+
+        def t_const_eq(byte* a, byte* b, int n) -> bool
+        {
+            int i;
+            byte d = (byte)0;
+            for (i = 0; i < n; i++) { d = d `| (a[i] ^| b[i]); };
+            return d == (byte)0;
+        };
+
+        // ---- CertificateVerify ----
+
+        // content signed by CertificateVerify, returns its length (130)
+        def t_cv_content(byte* out, int server, byte* thash) -> int
+        {
+            byte* sl = "TLS 1.3, server CertificateVerify\0";
+            byte* cl = "TLS 1.3, client CertificateVerify\0";
+            byte* lab;
+            int i, p = 0;
+            for (i = 0; i < 64; i++) { out[i] = (byte)32; };
+            p = 64;
+            if (server != 0) { lab = sl; } else { lab = cl; };
+            for (i = 0; i < 33; i++) { out[p + i] = lab[i]; };
+            p = p + 33;
+            out[p] = (byte)0;
+            p++;
+            for (i = 0; i < 32; i++) { out[p + i] = thash[i]; };
+            return p + 32;
+        };
+
+        def t_verify_cv(X509_CERT* leaf, int scheme, byte* content, int clen,
+                        byte* sig, int sig_len) -> bool
+        {
+            byte[64] digest;
+            byte[48] r, s;
+            int hash_id;
+
+            if (scheme == 1027)
+            {
+                if (leaf.key_type != 2) { return false; };
+                RSA::rsa_hash2(1, content, clen, (byte*)0, 0, @digest[0]);
+                if (!P384::ecdsa_der_decode_n(@r[0], @s[0], 32, sig, sig_len)) { return false; };
+                return P384::ecdsa_p256n_verify(@r[0], @s[0], leaf.ec_point + 1, leaf.ec_point + 33,
+                                                @digest[0], 32);
+            };
+            if (scheme == 1283)
+            {
+                if (leaf.key_type != 3) { return false; };
+                RSA::rsa_hash2(2, content, clen, (byte*)0, 0, @digest[0]);
+                if (!P384::ecdsa_der_decode_n(@r[0], @s[0], 48, sig, sig_len)) { return false; };
+                return P384::ecdsa_p384_verify(@r[0], @s[0], leaf.ec_point + 1, leaf.ec_point + 49,
+                                               @digest[0], 48);
+            };
+            if (scheme >= 2052 & scheme <= 2054)
+            {
+                if (leaf.key_type != 1) { return false; };
+                hash_id = scheme - 2051;
+                RSA::rsa_hash2(hash_id, content, clen, (byte*)0, 0, @digest[0]);
+                return RSA::rsa_pss_verify(leaf.rsa_n, leaf.rsa_n_len, leaf.rsa_e, leaf.rsa_e_len,
+                                           hash_id, @digest[0], sig, sig_len);
+            };
+            return false;
+        };
+
+        // ---- handshake keys shared by both roles ----
+
+        // Computes the handshake traffic secrets from the shared secret and the
+        // transcript through ServerHello. Fills hs_secret (for the master step),
+        // chs and shs (client/server handshake traffic secrets).
+        def t_hs_keys(TLS13_CONN* c, byte* shared, byte* hs_secret, byte* chs, byte* shs) -> void
+        {
+            byte[32] zero, early, derived, thash, empty_hash;
+            int i;
+            for (i = 0; i < 32; i++) { zero[i] = (byte)0; };
+            HKDF::hkdf_extract(@zero[0], 32, @zero[0], 32, @early[0]);
+            t_sha256((byte*)0, 0, @empty_hash[0]);
+            t_derive(@early[0], "derived\0", @empty_hash[0], @derived[0]);
+            HKDF::hkdf_extract(@derived[0], 32, shared, 32, hs_secret);
+            t_tr_hash(c, @thash[0]);
+            t_derive(hs_secret, "c hs traffic\0", @thash[0], chs);
+            t_derive(hs_secret, "s hs traffic\0", @thash[0], shs);
+        };
+
+        // Application traffic secrets from the handshake secret and the transcript
+        // through the server Finished.
+        def t_app_keys(TLS13_CONN* c, byte* hs_secret, byte* cap, byte* sap) -> void
+        {
+            byte[32] zero, derived, master, thash, empty_hash;
+            int i;
+            for (i = 0; i < 32; i++) { zero[i] = (byte)0; };
+            t_sha256((byte*)0, 0, @empty_hash[0]);
+            t_derive(hs_secret, "derived\0", @empty_hash[0], @derived[0]);
+            HKDF::hkdf_extract(@derived[0], 32, @zero[0], 32, @master[0]);
+            t_tr_hash(c, @thash[0]);
+            t_derive(@master[0], "c ap traffic\0", @thash[0], cap);
+            t_derive(@master[0], "s ap traffic\0", @thash[0], sap);
+        };
+
+        // ============================================================
+        // CLIENT
+        // ============================================================
+
+        // Parses the Certificate message body, filling c.peer. Returns false on error.
+        def t_parse_certificate(TLS13_CONN* c, byte* msg, int mlen) -> bool
+        {
+            int p, ctxlen, listlen, end, clen, elen, used;
+            p = 4;
+            ctxlen = (int)msg[p];
+            p = p + 1 + ctxlen;
+            if (p + 3 > mlen) { return false; };
+            listlen = t_g24(msg, p);
+            p = p + 3;
+            end = p + listlen;
+            if (end > mlen) { return false; };
+            used = 0;
+            c.peer_n = 0;
+            while (p < end & c.peer_n < 8)
+            {
+                if (p + 3 > end) { return false; };
+                clen = t_g24(msg, p);
+                p = p + 3;
+                if (p + clen > end | used + clen > 32000) { return false; };
+                {
+                    int i;
+                    for (i = 0; i < clen; i++) { c.peer_der[used + i] = msg[p + i]; };
+                };
+                if (!X509::x509_parse(@c.peer[c.peer_n], @c.peer_der[used], clen)) { return false; };
+                used = used + clen;
+                p = p + clen;
+                if (p + 2 > end) { return false; };
+                elen = t_g16(msg, p);
+                p = p + 2 + elen;
+                c.peer_n++;
+            };
+            return c.peer_n > 0;
+        };
+
+        def tls13_client_connect(TLS13_CONN* c, int fd, byte* host, int host_len,
+                                 X509_CERT* roots, int nroots, int verify, i64 now) -> int
+        {
+            byte[32] priv, pub, shared, random32, sid, hs_secret, chs, shs, cap, sap, thash, fin, expect;
+            byte[600] ch;
+            byte[130] content;
+            byte[36] ccs_dummy;
+            int p, extstart, mlen, type, i, sh_ver, sh_group, sh_suite, ep, extlen, etype, elen;
+            int have_ks, cv_scheme, cv_siglen, got_cert, got_cv, rc, body_len;
+            byte* mp;
+            byte[1] one;
+
+            c.fd = fd; c.is_server = 0; c.err = 0; c.closed = 0; c.wenc = 0; c.renc = 0;
+            c.hs_len = 0; c.tr_len = 0; c.app_len = 0; c.app_pos = 0; c.peer_n = 0;
+
+            c.vrc = 0;
+            if (!CSPRNG::random_bytes(@priv[0], 32)) { return t_fail(c, 8); };
+            if (!CSPRNG::random_bytes(@random32[0], 32)) { return t_fail(c, 8); };
+            if (!CSPRNG::random_bytes(@sid[0], 32)) { return t_fail(c, 8); };
+            X25519::x25519_pubkey(@pub[0], @priv[0]);
+
+            // ClientHello
+            p = 0;
+            t_p8(@ch[0], @p, 1);
+            t_p24(@ch[0], @p, 0);
+            t_p16(@ch[0], @p, 771);
+            t_pbytes(@ch[0], @p, @random32[0], 32);
+            t_p8(@ch[0], @p, 32);
+            t_pbytes(@ch[0], @p, @sid[0], 32);
+            t_p16(@ch[0], @p, 2);
+            t_p16(@ch[0], @p, 4865);
+            t_p8(@ch[0], @p, 1);
+            t_p8(@ch[0], @p, 0);
+            extstart = p;
+            t_p16(@ch[0], @p, 0);
+            if (host_len > 0)
+            {
+                t_p16(@ch[0], @p, 0);
+                t_p16(@ch[0], @p, host_len + 5);
+                t_p16(@ch[0], @p, host_len + 3);
+                t_p8(@ch[0], @p, 0);
+                t_p16(@ch[0], @p, host_len);
+                t_pbytes(@ch[0], @p, host, host_len);
+            };
+            t_p16(@ch[0], @p, 10); t_p16(@ch[0], @p, 4); t_p16(@ch[0], @p, 2); t_p16(@ch[0], @p, 29);
+            t_p16(@ch[0], @p, 13); t_p16(@ch[0], @p, 18); t_p16(@ch[0], @p, 16);
+            t_p16(@ch[0], @p, 1027); t_p16(@ch[0], @p, 1283); t_p16(@ch[0], @p, 2052);
+            t_p16(@ch[0], @p, 2053); t_p16(@ch[0], @p, 2054); t_p16(@ch[0], @p, 1025);
+            t_p16(@ch[0], @p, 1281); t_p16(@ch[0], @p, 1537);
+            t_p16(@ch[0], @p, 43); t_p16(@ch[0], @p, 3); t_p8(@ch[0], @p, 2); t_p16(@ch[0], @p, 772);
+            t_p16(@ch[0], @p, 51); t_p16(@ch[0], @p, 38); t_p16(@ch[0], @p, 36);
+            t_p16(@ch[0], @p, 29); t_p16(@ch[0], @p, 32);
+            t_pbytes(@ch[0], @p, @pub[0], 32);
+            // patch lengths
+            i = extstart;
+            t_p16(@ch[0], @i, p - extstart - 2);
+            i = 1;
+            t_p24(@ch[0], @i, p - 4);
+
+            if (t_send_hs(c, @ch[0], p) != 0) { return c.err; };
+
+            // ServerHello
+            type = t_next_hs(c, @mlen);
+            if (type < 0) { return c.err; };
+            if (type != 2) { return t_fail(c, 2); };
+            mp = @c.hs[0];
+            if (t_g16(mp, 4) != 771) { return t_fail(c, 2); };
+            if (mp[6] == (byte)207 & mp[7] == (byte)33 & mp[8] == (byte)173 & mp[9] == (byte)116)
+            {
+                return t_fail(c, 3);
+            };
+            ep = 4 + 2 + 32;
+            ep = ep + 1 + (int)mp[ep];
+            sh_suite = t_g16(mp, ep);
+            ep = ep + 2 + 1;
+            if (sh_suite != 4865) { return t_fail(c, 3); };
+            extlen = t_g16(mp, ep);
+            ep = ep + 2;
+            sh_ver = 0; have_ks = 0;
+            while (ep < 4 + (mlen - 4) & ep + 4 <= mlen)
+            {
+                etype = t_g16(mp, ep);
+                elen = t_g16(mp, ep + 2);
+                ep = ep + 4;
+                if (etype == 43) { sh_ver = t_g16(mp, ep); };
+                if (etype == 51)
+                {
+                    sh_group = t_g16(mp, ep);
+                    if (sh_group != 29 | t_g16(mp, ep + 2) != 32) { return t_fail(c, 3); };
+                    X25519::x25519(@shared[0], @priv[0], mp + ep + 4);
+                    have_ks = 1;
+                };
+                ep = ep + elen;
+            };
+            if (sh_ver != 772 | have_ks == 0) { return t_fail(c, 2); };
+            t_tr_add(c, mp, mlen);
+            t_consume_hs(c, mlen);
+
+            t_hs_keys(c, @shared[0], @hs_secret[0], @chs[0], @shs[0]);
+            t_set_read_keys(c, @shs[0]);
+
+            // middlebox compatibility change_cipher_spec
+            one[0] = (byte)1;
+            if (t_send_record(c, 20, @one[0], 1) != 0) { return c.err; };
+            t_set_write_keys(c, @chs[0]);
+
+            got_cert = 0; got_cv = 0;
+            while (true)
+            {
+                type = t_next_hs(c, @mlen);
+                if (type < 0) { return c.err; };
+                mp = @c.hs[0];
+
+                if (type == 8)
+                {
+                    t_tr_add(c, mp, mlen);
+                }
+                else if (type == 11)
+                {
+                    if (!t_parse_certificate(c, mp, mlen)) { c.vrc = 0 - 1; return t_fail(c, 4); };
+                    got_cert = 1;
+                    t_tr_add(c, mp, mlen);
+                }
+                else if (type == 15)
+                {
+                    if (got_cert == 0 | mlen < 8) { return t_fail(c, 2); };
+                    cv_scheme = t_g16(mp, 4);
+                    cv_siglen = t_g16(mp, 6);
+                    if (8 + cv_siglen > mlen) { return t_fail(c, 2); };
+                    t_tr_hash(c, @thash[0]);
+                    body_len = t_cv_content(@content[0], 1, @thash[0]);
+                    if (!t_verify_cv(@c.peer[0], cv_scheme, @content[0], body_len, mp + 8, cv_siglen))
+                    {
+                        return t_fail(c, 5);
+                    };
+                    got_cv = 1;
+                    t_tr_add(c, mp, mlen);
+                }
+                else if (type == 20)
+                {
+                    if (mlen != 36) { return t_fail(c, 2); };
+                    t_tr_hash(c, @thash[0]);
+                    t_finished_data(@shs[0], @thash[0], @expect[0]);
+                    if (!t_const_eq(@expect[0], mp + 4, 32)) { return t_fail(c, 6); };
+                    t_tr_add(c, mp, mlen);
+                    t_consume_hs(c, mlen);
+                    break;
+                }
+                else
+                {
+                    return t_fail(c, 3);
+                };
+                t_consume_hs(c, mlen);
+            };
+            if (got_cert == 0 | got_cv == 0) { return t_fail(c, 2); };
+
+            if (verify != 0)
+            {
+                rc = X509::x509_verify_chain(c.peer, c.peer_n, roots, nroots, now, host, host_len);
+                c.vrc = rc;
+                if (rc != 0) { return t_fail(c, 4); };
+            };
+
+            // application secrets use the transcript through the server Finished
+            t_app_keys(c, @hs_secret[0], @cap[0], @sap[0]);
+
+            // client Finished under the client handshake keys
+            t_tr_hash(c, @thash[0]);
+            t_finished_data(@chs[0], @thash[0], @fin[0]);
+            ch[0] = (byte)20; ch[1] = (byte)0; ch[2] = (byte)0; ch[3] = (byte)32;
+            for (i = 0; i < 32; i++) { ch[4 + i] = fin[i]; };
+            if (t_send_hs(c, @ch[0], 36) != 0) { return c.err; };
+
+            t_set_write_keys(c, @cap[0]);
+            t_set_read_keys(c, @sap[0]);
+            return 0;
+        };
+
+        // ============================================================
+        // KEY LOADING (server credentials)
+        // ============================================================
+
+        // copies the INTEGER at *pos into dst, advances pos. Returns its length.
+        def t_get_int(byte* d, int dlen, int* pos, byte* dst, int cap) -> int
+        {
+            int tag, cs, cl, i;
+            if (!X509::asn1_hdr(d, dlen, *pos, @tag, @cs, @cl)) { return 0 - 1; };
+            if (tag != 2 | cl > cap + 1) { return 0 - 1; };
+            if (cl > cap)
+            {
+                if (d[cs] != (byte)0) { return 0 - 1; };
+                cs++; cl--;
+            };
+            for (i = 0; i < cl; i++) { dst[i] = d[cs + i]; };
+            *pos = cs + cl;
+            return cl;
+        };
+
+        // RSAPrivateKey body at d[start..end)
+        def t_load_rsa(TLS13_KEY* k, byte* d, int dlen, int start) -> bool
+        {
+            int pos, tag, cs, cl, dummy;
+            byte[512] dd;
+            if (!X509::asn1_hdr(d, dlen, start, @tag, @cs, @cl) | tag != 48) { return false; };
+            pos = cs;
+            // version
+            if (!X509::asn1_hdr(d, dlen, pos, @tag, @cs, @cl) | tag != 2) { return false; };
+            pos = cs + cl;
+            k.n_len = t_get_int(d, dlen, @pos, @k.n[0], 512);
+            k.e_len = t_get_int(d, dlen, @pos, @k.e[0], 512);
+            dummy = t_get_int(d, dlen, @pos, @dd[0], 512);
+            k.p_len = t_get_int(d, dlen, @pos, @k.p[0], 512);
+            k.q_len = t_get_int(d, dlen, @pos, @k.q[0], 512);
+            k.dp_len = t_get_int(d, dlen, @pos, @k.dp[0], 512);
+            k.dq_len = t_get_int(d, dlen, @pos, @k.dq[0], 512);
+            k.qinv_len = t_get_int(d, dlen, @pos, @k.qinv[0], 512);
+            if (k.n_len < 0 | k.e_len < 0 | k.p_len < 0 | k.q_len < 0) { return false; };
+            if (k.dp_len < 0 | k.dq_len < 0 | k.qinv_len < 0 | dummy < 0) { return false; };
+            k.type = 2;
+            return true;
+        };
+
+        // ECPrivateKey body at d[start..)
+        def t_load_ec(TLS13_KEY* k, byte* d, int dlen, int start) -> bool
+        {
+            int pos, tag, cs, cl, i;
+            if (!X509::asn1_hdr(d, dlen, start, @tag, @cs, @cl) | tag != 48) { return false; };
+            pos = cs;
+            if (!X509::asn1_hdr(d, dlen, pos, @tag, @cs, @cl) | tag != 2) { return false; };
+            pos = cs + cl;
+            if (!X509::asn1_hdr(d, dlen, pos, @tag, @cs, @cl) | tag != 4) { return false; };
+            if (cl != 32 & cl != 48) { return false; };
+            for (i = 0; i < cl; i++) { k.ec_priv[i] = d[cs + i]; };
+            k.ec_len = cl;
+            k.type = 1;
+            return true;
+        };
+
+        // DER of a PKCS#8, SEC1 or PKCS#1 private key
+        def tls13_load_key_der(TLS13_KEY* k, byte* d, int dlen) -> bool
+        {
+            int tag, cs, cl, pos, t2, c2, l2;
+            if (!X509::asn1_hdr(d, dlen, 0, @tag, @cs, @cl) | tag != 48) { return false; };
+            pos = cs;
+            if (!X509::asn1_hdr(d, dlen, pos, @t2, @c2, @l2) | t2 != 2) { return false; };
+            pos = c2 + l2;
+            if (!X509::asn1_hdr(d, dlen, pos, @t2, @c2, @l2)) { return false; };
+            if (t2 == 4) { return t_load_ec(k, d, dlen, 0); };
+            if (t2 == 2) { return t_load_rsa(k, d, dlen, 0); };
+            if (t2 == 48)
+            {
+                // PKCS#8: AlgorithmIdentifier then OCTET STRING holding the key
+                pos = c2 + l2;
+                if (!X509::asn1_hdr(d, dlen, pos, @t2, @c2, @l2) | t2 != 4) { return false; };
+                // inner key: RSAPrivateKey or ECPrivateKey
+                {
+                    int it, ics, icl, p3, t3, c3, l3;
+                    if (!X509::asn1_hdr(d, dlen, c2, @it, @ics, @icl) | it != 48) { return false; };
+                    p3 = ics;
+                    if (!X509::asn1_hdr(d, dlen, p3, @t3, @c3, @l3) | t3 != 2) { return false; };
+                    p3 = c3 + l3;
+                    if (!X509::asn1_hdr(d, dlen, p3, @t3, @c3, @l3)) { return false; };
+                    if (t3 == 4) { return t_load_ec(k, d, dlen, c2); };
+                    if (t3 == 2) { return t_load_rsa(k, d, dlen, c2); };
+                };
+            };
+            return false;
+        };
+
+        // PEM private key ("PRIVATE KEY", "EC PRIVATE KEY" or "RSA PRIVATE KEY").
+        // scratch must hold the decoded DER (at least 4 KiB for RSA 4096).
+        def tls13_load_key_pem(TLS13_KEY* k, byte* pem, int pem_len, byte* scratch, int cap) -> bool
+        {
+            int pos = 0, out = 0, acc = 0, nbits = 0, v, dashes;
+            byte ch;
+            // skip the BEGIN line
+            while (pos < pem_len)
+            {
+                if (pem[pos] == (byte)10) { pos++; break; };
+                pos++;
+            };
+            while (pos < pem_len)
+            {
+                ch = pem[pos];
+                if (ch == (byte)45) { break; };
+                pos++;
+                v = X509::x509_b64val(ch);
+                if (v < 0) { continue; };
+                acc = (acc << 6) `| v;
+                nbits = nbits + 6;
+                if (nbits >= 8)
+                {
+                    nbits = nbits - 8;
+                    if (out >= cap) { return false; };
+                    scratch[out] = (byte)((acc >> nbits) `& 255);
+                    out++;
+                    acc = acc `& ((1 << nbits) - 1);
+                };
+            };
+            return tls13_load_key_der(k, scratch, out);
+        };
+
+        // ============================================================
+        // SERVER
+        // ============================================================
+
+        // Signs content for CertificateVerify. Returns signature length or -1.
+        def t_sign_cv(TLS13_KEY* k, byte* content, int clen, byte* out, int* scheme) -> int
+        {
+            byte[64] digest;
+            byte[48] r, s, nonce;
+            byte[32] salt;
+            int len, tries;
+            if (k.type == 1)
+            {
+                if (k.ec_len == 32)
+                {
+                    RSA::rsa_hash2(1, content, clen, (byte*)0, 0, @digest[0]);
+                    for (tries = 0; tries < 8; tries++)
+                    {
+                        if (!CSPRNG::random_bytes(@nonce[0], 32)) { return 0 - 1; };
+                        if (P384::ecdsa_p256n_sign(@r[0], @s[0], @k.ec_priv[0], @digest[0], 32, @nonce[0]))
+                        {
+                            P384::ecdsa_der_encode_n(out, @len, @r[0], @s[0], 32);
+                            *scheme = 1027;
+                            return len;
+                        };
+                    };
+                    return 0 - 1;
+                };
+                RSA::rsa_hash2(2, content, clen, (byte*)0, 0, @digest[0]);
+                for (tries = 0; tries < 8; tries++)
+                {
+                    if (!CSPRNG::random_bytes(@nonce[0], 48)) { return 0 - 1; };
+                    if (P384::ecdsa_p384_sign(@r[0], @s[0], @k.ec_priv[0], @digest[0], 48, @nonce[0]))
+                    {
+                        P384::ecdsa_der_encode_n(out, @len, @r[0], @s[0], 48);
+                        *scheme = 1283;
+                        return len;
+                    };
+                };
+                return 0 - 1;
+            };
+            RSA::rsa_hash2(1, content, clen, (byte*)0, 0, @digest[0]);
+            if (!CSPRNG::random_bytes(@salt[0], 32)) { return 0 - 1; };
+            len = RSA::rsa_byte_len(@k.n[0], k.n_len);
+            if (!RSA::rsa_pss_sign_crt(out, 1, @digest[0], @salt[0], @k.n[0], k.n_len,
+                                       @k.p[0], k.p_len, @k.q[0], k.q_len,
+                                       @k.dp[0], k.dp_len, @k.dq[0], k.dq_len,
+                                       @k.qinv[0], k.qinv_len)) { return 0 - 1; };
+            *scheme = 2052;
+            return len;
+        };
+
+        def tls13_server_accept(TLS13_CONN* c, int fd, X509_CERT* chain, int chain_n,
+                                TLS13_KEY* key) -> int
+        {
+            byte[32] priv, pub, shared, srandom, hs_secret, chs, shs, cap, sap, thash, fin, expect;
+            byte[32] cpub, sid;
+            byte[200] sh;
+            byte[130] content;
+            byte[600] sig;
+            byte[1] one;
+            byte[16000] big;
+            int mlen, type, p, i, ep, extlen, etype, elen, sid_len, cs_len, have_suite, have_ks;
+            int have_ver, ext_end, scheme, siglen, ccs_seen, certbody, cl;
+            byte* mp;
+
+            c.fd = fd; c.is_server = 1; c.err = 0; c.closed = 0; c.wenc = 0; c.renc = 0;
+            c.hs_len = 0; c.tr_len = 0; c.app_len = 0; c.app_pos = 0; c.peer_n = 0;
+
+            // ClientHello
+            type = t_next_hs(c, @mlen);
+            if (type < 0) { return c.err; };
+            if (type != 1) { return t_fail(c, 2); };
+            mp = @c.hs[0];
+            ep = 4 + 2 + 32;
+            sid_len = (int)mp[ep];
+            if (sid_len > 32) { return t_fail(c, 2); };
+            for (i = 0; i < sid_len; i++) { sid[i] = mp[ep + 1 + i]; };
+            ep = ep + 1 + sid_len;
+            cs_len = t_g16(mp, ep);
+            ep = ep + 2;
+            have_suite = 0;
+            for (i = 0; i + 1 < cs_len; i = i + 2)
+            {
+                if (t_g16(mp, ep + i) == 4865) { have_suite = 1; };
+            };
+            ep = ep + cs_len;
+            ep = ep + 1 + (int)mp[ep];
+            extlen = t_g16(mp, ep);
+            ep = ep + 2;
+            ext_end = ep + extlen;
+            have_ks = 0; have_ver = 0;
+            while (ep + 4 <= ext_end & ext_end <= mlen)
+            {
+                etype = t_g16(mp, ep);
+                elen = t_g16(mp, ep + 2);
+                ep = ep + 4;
+                if (etype == 43)
+                {
+                    for (i = 1; i + 1 < 1 + (int)mp[ep]; i = i + 2)
+                    {
+                        if (t_g16(mp, ep + i) == 772) { have_ver = 1; };
+                    };
+                };
+                if (etype == 51)
+                {
+                    // client_shares list
+                    int q = ep + 2;
+                    int qend = ep + 2 + t_g16(mp, ep);
+                    while (q + 4 <= qend)
+                    {
+                        if (t_g16(mp, q) == 29 & t_g16(mp, q + 2) == 32)
+                        {
+                            for (i = 0; i < 32; i++) { cpub[i] = mp[q + 4 + i]; };
+                            have_ks = 1;
+                        };
+                        q = q + 4 + t_g16(mp, q + 2);
+                    };
+                };
+                ep = ep + elen;
+            };
+            if (have_suite == 0 | have_ver == 0 | have_ks == 0) { return t_fail(c, 3); };
+            t_tr_add(c, mp, mlen);
+            t_consume_hs(c, mlen);
+
+            if (!CSPRNG::random_bytes(@priv[0], 32)) { return t_fail(c, 8); };
+            if (!CSPRNG::random_bytes(@srandom[0], 32)) { return t_fail(c, 8); };
+            X25519::x25519_pubkey(@pub[0], @priv[0]);
+            X25519::x25519(@shared[0], @priv[0], @cpub[0]);
+
+            // ServerHello
+            p = 0;
+            t_p8(@sh[0], @p, 2);
+            t_p24(@sh[0], @p, 0);
+            t_p16(@sh[0], @p, 771);
+            t_pbytes(@sh[0], @p, @srandom[0], 32);
+            t_p8(@sh[0], @p, sid_len);
+            t_pbytes(@sh[0], @p, @sid[0], sid_len);
+            t_p16(@sh[0], @p, 4865);
+            t_p8(@sh[0], @p, 0);
+            t_p16(@sh[0], @p, 46);
+            t_p16(@sh[0], @p, 43); t_p16(@sh[0], @p, 2); t_p16(@sh[0], @p, 772);
+            t_p16(@sh[0], @p, 51); t_p16(@sh[0], @p, 36); t_p16(@sh[0], @p, 29); t_p16(@sh[0], @p, 32);
+            t_pbytes(@sh[0], @p, @pub[0], 32);
+            i = 1;
+            t_p24(@sh[0], @i, p - 4);
+            if (t_send_hs(c, @sh[0], p) != 0) { return c.err; };
+
+            t_hs_keys(c, @shared[0], @hs_secret[0], @chs[0], @shs[0]);
+            one[0] = (byte)1;
+            if (t_send_record(c, 20, @one[0], 1) != 0) { return c.err; };
+            t_set_write_keys(c, @shs[0]);
+            t_set_read_keys(c, @chs[0]);
+
+            // EncryptedExtensions (no extensions)
+            sh[0] = (byte)8; sh[1] = (byte)0; sh[2] = (byte)0; sh[3] = (byte)2; sh[4] = (byte)0; sh[5] = (byte)0;
+            if (t_send_hs(c, @sh[0], 6) != 0) { return c.err; };
+
+            // Certificate
+            p = 0;
+            t_p8(@big[0], @p, 11);
+            t_p24(@big[0], @p, 0);
+            t_p8(@big[0], @p, 0);
+            certbody = p;
+            t_p24(@big[0], @p, 0);
+            for (i = 0; i < chain_n; i++)
+            {
+                cl = chain[i].der_len;
+                if (p + cl + 5 > 16000) { return t_fail(c, 9); };
+                t_p24(@big[0], @p, cl);
+                t_pbytes(@big[0], @p, chain[i].der, cl);
+                t_p16(@big[0], @p, 0);
+            };
+            i = certbody;
+            t_p24(@big[0], @i, p - certbody - 3);
+            i = 1;
+            t_p24(@big[0], @i, p - 4);
+            if (t_send_hs(c, @big[0], p) != 0) { return c.err; };
+
+            // CertificateVerify
+            t_tr_hash(c, @thash[0]);
+            cl = t_cv_content(@content[0], 1, @thash[0]);
+            siglen = t_sign_cv(key, @content[0], cl, @sig[0], @scheme);
+            if (siglen < 0) { return t_fail(c, 9); };
+            p = 0;
+            t_p8(@big[0], @p, 15);
+            t_p24(@big[0], @p, siglen + 4);
+            t_p16(@big[0], @p, scheme);
+            t_p16(@big[0], @p, siglen);
+            t_pbytes(@big[0], @p, @sig[0], siglen);
+            if (t_send_hs(c, @big[0], p) != 0) { return c.err; };
+
+            // Finished
+            t_tr_hash(c, @thash[0]);
+            t_finished_data(@shs[0], @thash[0], @fin[0]);
+            big[0] = (byte)20; big[1] = (byte)0; big[2] = (byte)0; big[3] = (byte)32;
+            for (i = 0; i < 32; i++) { big[4 + i] = fin[i]; };
+            if (t_send_hs(c, @big[0], 36) != 0) { return c.err; };
+
+            // application secrets use the transcript through the server Finished
+            t_app_keys(c, @hs_secret[0], @cap[0], @sap[0]);
+
+            // client Finished
+            type = t_next_hs(c, @mlen);
+            if (type < 0) { return c.err; };
+            if (type != 20 | mlen != 36) { return t_fail(c, 2); };
+            t_tr_hash(c, @thash[0]);
+            t_finished_data(@chs[0], @thash[0], @expect[0]);
+            if (!t_const_eq(@expect[0], @c.hs[4], 32)) { return t_fail(c, 6); };
+            t_consume_hs(c, mlen);
+
+            t_set_write_keys(c, @sap[0]);
+            t_set_read_keys(c, @cap[0]);
+            return 0;
+        };
+
+        // ============================================================
+        // APPLICATION DATA
+        // ============================================================
+
+        def t_key_update_write(TLS13_CONN* c) -> void
+        {
+            byte[32] next;
+            t_expand_label(@c.wsec[0], "traffic upd\0", (byte*)0, 0, @next[0], 32);
+            t_set_write_keys(c, @next[0]);
+        };
+
+        def t_key_update_read(TLS13_CONN* c) -> void
+        {
+            byte[32] next;
+            t_expand_label(@c.rsec[0], "traffic upd\0", (byte*)0, 0, @next[0], 32);
+            t_set_read_keys(c, @next[0]);
+        };
+
+        // Sends len bytes. Returns len, or a negative value on error.
+        def tls13_send(TLS13_CONN* c, byte* dat, int len) -> int
+        {
+            int sent = 0, n;
+            while (sent < len)
+            {
+                n = len - sent;
+                if (n > 16384) { n = 16384; };
+                if (t_send_record(c, 23, dat + sent, n) != 0) { return 0 - 1; };
+                sent = sent + n;
+            };
+            return len;
+        };
+
+        // Reads up to cap bytes. Returns the count, 0 when the peer closed cleanly,
+        // or a negative value on error.
+        def tls13_recv(TLS13_CONN* c, byte* buf, int cap) -> int
+        {
+            int type, len, i, n, mt, ml;
+            byte[5] ku;
+            while (c.app_pos >= c.app_len)
+            {
+                if (c.closed != 0) { return 0; };
+                if (t_read_record(c, @type, @len) != 0) { return 0 - 1; };
+                if (type == 23)
+                {
+                    for (i = 0; i < len; i++) { c.app[i] = c.plain[i]; };
+                    c.app_len = len;
+                    c.app_pos = 0;
+                }
+                else if (type == 21)
+                {
+                    if (len >= 2)
+                    {
+                        if (c.plain[1] == (byte)0) { c.closed = 1; return 0; };
+                    };
+                    c.err = 7;
+                    return 0 - 1;
+                }
+                else if (type == 22)
+                {
+                    // post handshake: NewSessionTicket is ignored, KeyUpdate is honoured
+                    mt = (int)c.plain[0];
+                    if (mt == 24)
+                    {
+                        t_key_update_read(c);
+                        if (len >= 5)
+                        {
+                            if (c.plain[4] == (byte)1)
+                            {
+                                ku[0] = (byte)24; ku[1] = (byte)0; ku[2] = (byte)0; ku[3] = (byte)1; ku[4] = (byte)0;
+                                if (t_send_record(c, 22, @ku[0], 5) != 0) { return 0 - 1; };
+                                t_key_update_write(c);
+                            };
+                        };
+                    };
+                }
+                else if (type == 20)
+                {
+                    ml = 0;
+                }
+                else
+                {
+                    c.err = 2;
+                    return 0 - 1;
+                };
+            };
+            n = c.app_len - c.app_pos;
+            if (n > cap) { n = cap; };
+            for (i = 0; i < n; i++) { buf[i] = c.app[c.app_pos + i]; };
+            c.app_pos = c.app_pos + n;
+            return n;
+        };
+
+        def tls13_close(TLS13_CONN* c) -> void
+        {
+            byte[2] alert;
+            alert[0] = (byte)1; alert[1] = (byte)0;
+            t_send_record(c, 21, @alert[0], 2);
+            c.closed = 1;
+        };
+
+    }; // tls13
 }; // standard
 
 #endif; // IDEKA_STANDARD_TLS

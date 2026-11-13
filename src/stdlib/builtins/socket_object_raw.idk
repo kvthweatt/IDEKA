@@ -126,7 +126,9 @@ namespace standard
             port_hton(u16) -> u16,
             port_ntoh(u16) -> u16,
             ip_from_string(byte*) -> u32,
-            ip_to_string(u32) -> byte*;
+            ip_to_string(u32) -> byte*,
+            host_resolve_ipv4(byte*, u32*) -> bool,
+            sock_wait_readable(int, int) -> int;
 
         object socket
         {
@@ -639,6 +641,25 @@ namespace standard
                 return -1;
             };
 
+            return sockfd;
+        };
+
+        // Connect to a host name or dotted address. Returns the socket, or -1 when the
+        // name does not resolve or the connection fails.
+        def tcp_connect_host(byte* host, u16 port) -> int
+        {
+            sockaddr_in addr;
+            u32 ip = 0;
+            int sockfd;
+            if (!host_resolve_ipv4(host, @ip)) { return -1; };
+            sockfd = tcp_socket();
+            if (sockfd < 0) { return -1; };
+            init_sockaddr(@addr, ip, port);
+            if (sock_connect(sockfd, @addr) < 0)
+            {
+                sock_close(sockfd);
+                return -1;
+            };
             return sockfd;
         };
 

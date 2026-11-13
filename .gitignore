@@ -183,4 +183,4 @@ uv.lock
 **/*.i64
 
 # Project-specific
-/prompts
+/promptstests/discord_token.txt

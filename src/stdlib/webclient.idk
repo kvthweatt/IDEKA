@@ -1,0 +1,579 @@
+// Author: Karac V. Thweatt
+
+// webclient.idk - HTTP/1.1 client and WebSocket client (RFC 6455) over plain TCP or
+// native TLS 1.3. Built on the neutral socket layer, tls.idk and cryptography.idk.
+//
+//   web_connect(WEB_STREAM*, TLS13_CONN*, host, port, use_tls, roots, nroots, verify, now) -> int
+//   web_send_all(WEB_STREAM*, byte*, int) -> bool
+//   web_recv(WEB_STREAM*, byte*, int) -> int
+//   web_close(WEB_STREAM*) -> void
+//
+//   http_request(WEB_STREAM*, method, host, path, headers, body, body_len, out, out_cap, int* status) -> int
+//       headers is zero or more "Name: value\r\n" lines (may be null). Returns the number of
+//       body bytes stored in out (extra bytes beyond out_cap are discarded), or -1 on error.
+//       Content-Length, chunked and read-until-close bodies are handled.
+//
+//   ws_handshake(WEB_STREAM*, host, path, headers) -> bool
+//   ws_send(WEB_STREAM*, int opcode, byte* payload, int len) -> bool
+//   ws_recv(WEB_STREAM*, byte* out, int cap, int* opcode) -> int
+//       Returns the message length, -1 on error, -2 when the peer sent a close frame
+//       (opcode 8 and the close code in out[0..1]), -3 when the message exceeded cap.
+//       Ping frames are answered automatically.
+//   ws_close(WEB_STREAM*, int code) -> void
+//
+// Opcodes: 1 text, 2 binary, 8 close, 9 ping, 10 pong.
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_SOCKETS
+#import <socket_object_raw.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_CRYPTO
+#import <cryptography.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_TLS
+#import <tls.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_WEBCLIENT
+#def IDEKA_STANDARD_WEBCLIENT 1;
+
+using standard::crypto::X509,
+      standard::crypto::CSPRNG,
+      standard::crypto::hashing,
+      standard::sockets,
+      standard::tls13;
+
+namespace standard
+{
+    namespace web
+    {
+        struct WEB_STREAM
+        {
+            int fd;
+            int use_tls;
+            TLS13_CONN* tls;
+            byte[4096] rbuf;
+            int rpos, rlen;
+            int eof;
+            byte[1024] hs_line; // last WebSocket handshake response lines, separated by |
+        };
+
+        def w_strlen(byte* s) -> int
+        {
+            int n = 0;
+            while (s[n] != (byte)0) { n++; };
+            return n;
+        };
+
+        def w_lower(byte c) -> byte
+        {
+            if (c >= (byte)65 & c <= (byte)90) { return c + (byte)32; };
+            return c;
+        };
+
+        // ---- transport ----
+
+        def web_send_all(WEB_STREAM* s, byte* buf, int len) -> bool
+        {
+            if (s.use_tls != 0) { return tls13_send(s.tls, buf, len) == len; };
+            return tcp_send_all(s.fd, buf, len) >= 0;
+        };
+
+        // raw read straight from the transport
+        def w_raw_recv(WEB_STREAM* s, byte* buf, int cap) -> int
+        {
+            if (s.use_tls != 0) { return tls13_recv(s.tls, buf, cap); };
+            return sock_recv(s.fd, buf, cap);
+        };
+
+        def web_recv(WEB_STREAM* s, byte* buf, int cap) -> int
+        {
+            int n, i;
+            if (s.rpos < s.rlen)
+            {
+                n = s.rlen - s.rpos;
+                if (n > cap) { n = cap; };
+                for (i = 0; i < n; i++) { buf[i] = s.rbuf[s.rpos + i]; };
+                s.rpos = s.rpos + n;
+                return n;
+            };
+            return w_raw_recv(s, buf, cap);
+        };
+
+        // next byte, -1 at end of stream or on error
+        def w_getc(WEB_STREAM* s) -> int
+        {
+            int n;
+            if (s.rpos >= s.rlen)
+            {
+                if (s.eof != 0) { return 0 - 1; };
+                n = w_raw_recv(s, @s.rbuf[0], 4096);
+                if (n <= 0) { s.eof = 1; return 0 - 1; };
+                s.rlen = n;
+                s.rpos = 0;
+            };
+            n = (int)s.rbuf[s.rpos];
+            s.rpos++;
+            return n;
+        };
+
+        def w_readn(WEB_STREAM* s, byte* out, int n) -> bool
+        {
+            int i, c;
+            for (i = 0; i < n; i++)
+            {
+                c = w_getc(s);
+                if (c < 0) { return false; };
+                out[i] = (byte)c;
+            };
+            return true;
+        };
+
+        // one line without the line ending, returns its length or -1
+        def w_readline(WEB_STREAM* s, byte* line, int cap) -> int
+        {
+            int n = 0, c;
+            while (true)
+            {
+                c = w_getc(s);
+                if (c < 0) { return 0 - 1; };
+                if (c == 10) { break; };
+                if (c != 13 & n < cap - 1) { line[n] = (byte)c; n++; };
+            };
+            line[n] = (byte)0;
+            return n;
+        };
+
+        // Waits up to ms milliseconds for data. Returns 1 when data can be read without
+        // blocking (buffered or on the socket), 0 on timeout, -1 on error.
+        def web_wait_readable(WEB_STREAM* s, int ms) -> int
+        {
+            if (s.rpos < s.rlen) { return 1; };
+            if (s.use_tls != 0)
+            {
+                if (s.tls.app_pos < s.tls.app_len) { return 1; };
+                if (s.tls.closed != 0) { return 1; };
+            };
+            return sock_wait_readable(s.fd, ms);
+        };
+
+        def web_connect(WEB_STREAM* s, TLS13_CONN* tls, byte* host, u16 port, int use_tls,
+                        X509_CERT* roots, int nroots, int verify, i64 now) -> int
+        {
+            int rc;
+            s.use_tls = use_tls;
+            s.tls = tls;
+            s.rpos = 0; s.rlen = 0; s.eof = 0;
+            s.fd = tcp_connect_host(host, port);
+            if (s.fd < 0) { return 1; };
+            if (use_tls != 0)
+            {
+                rc = tls13_client_connect(tls, s.fd, host, w_strlen(host), roots, nroots, verify, now);
+                if (rc != 0)
+                {
+                    sock_close(s.fd);
+                    return rc + 100;
+                };
+            };
+            return 0;
+        };
+
+        def web_close(WEB_STREAM* s) -> void
+        {
+            if (s.use_tls != 0) { tls13_close(s.tls); };
+            sock_close(s.fd);
+        };
+
+        // ---- text helpers ----
+
+        // appends zero terminated src to buf[*p], bounded by cap
+        def w_cat(byte* buf, int* p, int cap, byte* src) -> void
+        {
+            int i = 0;
+            while (src[i] != (byte)0 & *p < cap - 1)
+            {
+                buf[*p] = src[i];
+                *p = *p + 1;
+                i++;
+            };
+            buf[*p] = (byte)0;
+        };
+
+        // case insensitive prefix test: does line start with the zero terminated name?
+        def w_starts(byte* line, byte* name) -> bool
+        {
+            int i = 0;
+            while (name[i] != (byte)0)
+            {
+                if (w_lower(line[i]) != w_lower(name[i])) { return false; };
+                i++;
+            };
+            return true;
+        };
+
+        def w_atoi(byte* s) -> int
+        {
+            int v = 0, i = 0;
+            while (s[i] == (byte)32) { i++; };
+            while (s[i] >= (byte)48 & s[i] <= (byte)57) { v = v * 10 + ((int)s[i] - 48); i++; };
+            return v;
+        };
+
+        def w_hexval(byte* s) -> int
+        {
+            int v = 0, i = 0, d;
+            while (true)
+            {
+                d = 0 - 1;
+                if (s[i] >= (byte)48 & s[i] <= (byte)57) { d = (int)s[i] - 48; };
+                if (s[i] >= (byte)97 & s[i] <= (byte)102) { d = (int)s[i] - 87; };
+                if (s[i] >= (byte)65 & s[i] <= (byte)70) { d = (int)s[i] - 55; };
+                if (d < 0) { break; };
+                v = v * 16 + d;
+                i++;
+            };
+            return v;
+        };
+
+        // true when the header value contains the zero terminated word (case insensitive)
+        def w_contains(byte* line, byte* word) -> bool
+        {
+            int i = 0;
+            while (line[i] != (byte)0)
+            {
+                if (w_starts(line + i, word)) { return true; };
+                i++;
+            };
+            return false;
+        };
+
+        // ---- HTTP ----
+
+        def http_request(WEB_STREAM* s, byte* method, byte* host, byte* path, byte* headers,
+                         byte* body, int body_len, byte* out, int out_cap, int* status) -> int
+        {
+            byte[6144] req;
+            byte[1024] line;
+            byte[16] num;
+            int p = 0, n, content_len, chunked, got, take, i, size, c, hdr_close;
+
+            w_cat(@req[0], @p, 6144, method);
+            w_cat(@req[0], @p, 6144, " \0");
+            w_cat(@req[0], @p, 6144, path);
+            w_cat(@req[0], @p, 6144, " HTTP/1.1\r\nHost: \0");
+            w_cat(@req[0], @p, 6144, host);
+            w_cat(@req[0], @p, 6144, "\r\nAccept: */*\r\n\0");
+            if (headers == (byte*)0) { w_cat(@req[0], @p, 6144, "User-Agent: IDEKA\r\n\0"); }
+            else if (!w_contains(headers, "user-agent:\0")) { w_cat(@req[0], @p, 6144, "User-Agent: IDEKA\r\n\0"); };
+            if (headers != (byte*)0) { w_cat(@req[0], @p, 6144, headers); };
+            if (body_len > 0 | w_starts(method, "POST\0") | w_starts(method, "PUT\0") | w_starts(method, "PATCH\0"))
+            {
+                // Content-Length: decimal
+                w_cat(@req[0], @p, 6144, "Content-Length: \0");
+                n = body_len;
+                i = 0;
+                if (n == 0) { num[0] = (byte)48; i = 1; };
+                while (n > 0) { num[i] = (byte)(48 + n % 10); n = n / 10; i++; };
+                while (i > 0) { i--; req[p] = num[i]; p++; };
+                req[p] = (byte)0;
+                w_cat(@req[0], @p, 6144, "\r\n\0");
+            };
+            w_cat(@req[0], @p, 6144, "\r\n\0");
+            if (!web_send_all(s, @req[0], p)) { return 0 - 1; };
+            if (body_len > 0)
+            {
+                if (!web_send_all(s, body, body_len)) { return 0 - 1; };
+            };
+
+            // status line
+            if (w_readline(s, @line[0], 1024) < 12) { return 0 - 1; };
+            *status = w_atoi(@line[9]);
+
+            content_len = 0 - 1;
+            chunked = 0;
+            hdr_close = 0;
+            while (true)
+            {
+                n = w_readline(s, @line[0], 1024);
+                if (n < 0) { return 0 - 1; };
+                if (n == 0) { break; };
+                if (w_starts(@line[0], "content-length:\0")) { content_len = w_atoi(@line[15]); };
+                if (w_starts(@line[0], "transfer-encoding:\0"))
+                {
+                    if (w_contains(@line[0], "chunked\0")) { chunked = 1; };
+                };
+            };
+
+            got = 0;
+            if (chunked != 0)
+            {
+                while (true)
+                {
+                    n = w_readline(s, @line[0], 1024);
+                    if (n < 0) { return 0 - 1; };
+                    size = w_hexval(@line[0]);
+                    if (size == 0)
+                    {
+                        // trailer lines up to the empty line
+                        while (true)
+                        {
+                            n = w_readline(s, @line[0], 1024);
+                            if (n <= 0) { break; };
+                        };
+                        break;
+                    };
+                    for (i = 0; i < size; i++)
+                    {
+                        c = w_getc(s);
+                        if (c < 0) { return 0 - 1; };
+                        if (got < out_cap) { out[got] = (byte)c; got++; };
+                    };
+                    w_readline(s, @line[0], 1024);
+                };
+                return got;
+            };
+
+            if (content_len >= 0)
+            {
+                for (i = 0; i < content_len; i++)
+                {
+                    c = w_getc(s);
+                    if (c < 0) { return 0 - 1; };
+                    if (got < out_cap) { out[got] = (byte)c; got++; };
+                };
+                return got;
+            };
+
+            // read until the server closes
+            while (true)
+            {
+                c = w_getc(s);
+                if (c < 0) { break; };
+                if (got < out_cap) { out[got] = (byte)c; got++; };
+            };
+            return got;
+        };
+
+        // ---- WebSocket ----
+
+        global byte[64] WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11\0";
+
+        def w_b64(byte* src, int n, byte* dst) -> int
+        {
+            byte* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0";
+            int i = 0, o = 0, v;
+            while (i + 2 < n)
+            {
+                v = ((int)src[i] << 16) `| ((int)src[i + 1] << 8) `| (int)src[i + 2];
+                dst[o] = tbl[(v >> 18) `& 63]; dst[o + 1] = tbl[(v >> 12) `& 63];
+                dst[o + 2] = tbl[(v >> 6) `& 63]; dst[o + 3] = tbl[v `& 63];
+                i = i + 3; o = o + 4;
+            };
+            if (n - i == 1)
+            {
+                v = (int)src[i] << 16;
+                dst[o] = tbl[(v >> 18) `& 63]; dst[o + 1] = tbl[(v >> 12) `& 63];
+                dst[o + 2] = (byte)61; dst[o + 3] = (byte)61;
+                o = o + 4;
+            };
+            if (n - i == 2)
+            {
+                v = ((int)src[i] << 16) `| ((int)src[i + 1] << 8);
+                dst[o] = tbl[(v >> 18) `& 63]; dst[o + 1] = tbl[(v >> 12) `& 63];
+                dst[o + 2] = tbl[(v >> 6) `& 63]; dst[o + 3] = (byte)61;
+                o = o + 4;
+            };
+            dst[o] = (byte)0;
+            return o;
+        };
+
+        def ws_handshake(WEB_STREAM* s, byte* host, byte* path, byte* headers) -> bool
+        {
+            byte[6144] req;
+            byte[1024] line;
+            byte[16] keyraw;
+            byte[40] key, accept_expect;
+            byte[80] cat_buf;
+            byte[20] digest;
+            int p = 0, n, klen, i, status, upgrade_ok, accept_ok, hp;
+
+            if (!CSPRNG::random_bytes(@keyraw[0], 16)) { return false; };
+            klen = w_b64(@keyraw[0], 16, @key[0]);
+
+            w_cat(@req[0], @p, 6144, "GET \0");
+            w_cat(@req[0], @p, 6144, path);
+            w_cat(@req[0], @p, 6144, " HTTP/1.1\r\nHost: \0");
+            w_cat(@req[0], @p, 6144, host);
+            w_cat(@req[0], @p, 6144, "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: \0");
+            w_cat(@req[0], @p, 6144, @key[0]);
+            w_cat(@req[0], @p, 6144, "\r\n\0");
+            if (headers != (byte*)0) { w_cat(@req[0], @p, 6144, headers); };
+            w_cat(@req[0], @p, 6144, "\r\n\0");
+            if (!web_send_all(s, @req[0], p)) { return false; };
+
+            // expected accept value = base64(sha1(key || GUID))
+            for (i = 0; i < klen; i++) { cat_buf[i] = key[i]; };
+            for (i = 0; i < 36; i++) { cat_buf[klen + i] = WS_GUID[i]; };
+            SHA1::sha1(@cat_buf[0], klen + 36, @digest[0]);
+            w_b64(@digest[0], 20, @accept_expect[0]);
+
+            hp = 0;
+            s.hs_line[0] = (byte)0;
+            n = w_readline(s, @line[0], 1024);
+            w_cat(@s.hs_line[0], @hp, 1000, @line[0]);
+            if (n < 12) { return false; };
+            status = w_atoi(@line[9]);
+            if (status != 101) { return false; };
+            upgrade_ok = 0; accept_ok = 0;
+            while (true)
+            {
+                n = w_readline(s, @line[0], 1024);
+                if (n < 0) { return false; };
+                if (n == 0) { break; };
+                if (w_starts(@line[0], "upgrade:\0") | w_starts(@line[0], "sec-websocket\0"))
+                {
+                    w_cat(@s.hs_line[0], @hp, 1000, "|\0");
+                    w_cat(@s.hs_line[0], @hp, 1000, @line[0]);
+                };
+                if (w_starts(@line[0], "upgrade:\0")) { if (w_contains(@line[0], "websocket\0")) { upgrade_ok = 1; }; };
+                if (w_starts(@line[0], "sec-websocket-accept:\0"))
+                {
+                    i = 21;
+                    while (line[i] == (byte)32) { i++; };
+                    if (w_starts(@line[i], @accept_expect[0])) { accept_ok = 1; };
+                };
+            };
+            w_cat(@s.hs_line[0], @hp, 1000, "|key \0");
+            w_cat(@s.hs_line[0], @hp, 1000, @key[0]);
+            w_cat(@s.hs_line[0], @hp, 1000, "|expected \0");
+            w_cat(@s.hs_line[0], @hp, 1000, @accept_expect[0]);
+            return upgrade_ok == 1 & accept_ok == 1;
+        };
+
+        def ws_send(WEB_STREAM* s, int opcode, byte* payload, int len) -> bool
+        {
+            byte[14] hdr;
+            byte[1024] chunk;
+            byte[4] mask;
+            int p = 0, i, off, take;
+
+            if (!CSPRNG::random_bytes(@mask[0], 4)) { return false; };
+            hdr[0] = (byte)(128 `| opcode);
+            if (len < 126)
+            {
+                hdr[1] = (byte)(128 `| len);
+                p = 2;
+            }
+            else if (len < 65536)
+            {
+                hdr[1] = (byte)(128 `| 126);
+                hdr[2] = (byte)((len >> 8) `& 255);
+                hdr[3] = (byte)(len `& 255);
+                p = 4;
+            }
+            else
+            {
+                hdr[1] = (byte)(128 `| 127);
+                for (i = 0; i < 8; i++) { hdr[2 + i] = (byte)(((u64)len >> (u64)(56 - 8 * i)) `& (u64)255); };
+                p = 10;
+            };
+            for (i = 0; i < 4; i++) { hdr[p + i] = mask[i]; };
+            p = p + 4;
+            if (!web_send_all(s, @hdr[0], p)) { return false; };
+
+            off = 0;
+            while (off < len)
+            {
+                take = len - off;
+                if (take > 1024) { take = 1024; };
+                for (i = 0; i < take; i++) { chunk[i] = payload[off + i] ^| mask[(off + i) `& 3]; };
+                if (!web_send_all(s, @chunk[0], take)) { return false; };
+                off = off + take;
+            };
+            return true;
+        };
+
+        def ws_recv(WEB_STREAM* s, byte* out, int cap, int* opcode) -> int
+        {
+            byte[8] h8;
+            byte[4] mask;
+            byte[128] ctl;
+            int total = 0, first = 1, fin, op, masked, i, c;
+            u64 plen;
+            int too_big = 0, rc;
+
+            while (true)
+            {
+                if (!w_readn(s, @h8[0], 2)) { return 0 - 1; };
+                fin = ((int)h8[0] >> 7) `& 1;
+                op = (int)h8[0] `& 15;
+                masked = ((int)h8[1] >> 7) `& 1;
+                plen = (u64)((int)h8[1] `& 127);
+                if (plen == (u64)126)
+                {
+                    if (!w_readn(s, @h8[0], 2)) { return 0 - 1; };
+                    plen = (u64)(((int)h8[0] << 8) `| (int)h8[1]);
+                };
+                if (plen == (u64)127)
+                {
+                    if (!w_readn(s, @h8[0], 8)) { return 0 - 1; };
+                    plen = (u64)0;
+                    for (i = 0; i < 8; i++) { plen = (plen << (u64)8) `| (u64)h8[i]; };
+                };
+                if (masked != 0)
+                {
+                    if (!w_readn(s, @mask[0], 4)) { return 0 - 1; };
+                };
+
+                if (op >= 8)
+                {
+                    // control frame, at most 125 bytes
+                    if (plen > (u64)125) { return 0 - 1; };
+                    if (!w_readn(s, @ctl[0], (int)plen)) { return 0 - 1; };
+                    if (masked != 0) { for (i = 0; i < (int)plen; i++) { ctl[i] = ctl[i] ^| mask[i `& 3]; }; };
+                    if (op == 9) { ws_send(s, 10, @ctl[0], (int)plen); continue; };
+                    if (op == 10) { continue; };
+                    if (op == 8)
+                    {
+                        *opcode = 8;
+                        out[0] = (byte)0; out[1] = (byte)0;
+                        if (plen >= (u64)2 & cap >= 2) { out[0] = ctl[0]; out[1] = ctl[1]; };
+                        return 0 - 2;
+                    };
+                    return 0 - 1;
+                };
+
+                if (first != 0) { *opcode = op; first = 0; };
+                for (i = 0; i < (int)plen; i++)
+                {
+                    c = w_getc(s);
+                    if (c < 0) { return 0 - 1; };
+                    if (masked != 0) { c = c ^| (int)mask[i `& 3]; };
+                    if (total < cap) { out[total] = (byte)c; total++; } else { too_big = 1; };
+                };
+                if (fin != 0)
+                {
+                    if (too_big != 0) { return 0 - 3; };
+                    return total;
+                };
+            };
+            return 0 - 1;
+        };
+
+        def ws_close(WEB_STREAM* s, int code) -> void
+        {
+            byte[2] body;
+            body[0] = (byte)((code >> 8) `& 255);
+            body[1] = (byte)(code `& 255);
+            ws_send(s, 8, @body[0], 2);
+        };
+
+    }; // web
+}; // standard
+
+#endif; // IDEKA_STANDARD_WEBCLIENT

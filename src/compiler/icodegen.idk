@@ -21444,7 +21444,16 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     fp = this.mod.gep_field(inst, idx, true, this.sc.mem);
                                     switch (fp.ty.elem.kind == LK.ARRAY | this.sty(fp.ty.elem))
                                     {
-                                        case (true) { -> fp; }
+                                        case (true) {
+                                        // An array field keeps its element type spec, so indexing it
+                                        // stays unsigned for byte elements (matches the other member path)
+                                        switch (fp.ty.elem.kind == LK.ARRAY & si.specs[idx] != (TypeSpec*)0)
+                                        {
+                                            case (true) { fp.espec = si.specs[idx].array_elem; }
+                                            default {};
+                                        };
+                                        -> fp;
+                                    }
                                         default {};
                                     };
                                     IRValue* sfld = this.mod.load(fp, field);

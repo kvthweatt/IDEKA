@@ -1,0 +1,86 @@
+// Chain diagnostic: connects without verification and reports how each peer certificate
+// relates to the roots in the CA bundle. Usage: chain_diag <host> (defaults gateway.discord.gg)
+// Reads /etc/ssl/certs/ca-certificates.crt, else cacert.pem, from the working directory.
+#import <standard.idk>, <socket_object_raw.idk>, <ffifio.idk>, <datetime.idk>, <cryptography.idk>, <tls.idk>;
+
+using standard::io::console,
+      standard::sockets,
+      standard::crypto::X509,
+      standard::datetime,
+      standard::tls13;
+
+global TLS13_CONN g_conn;
+global byte[400000] g_pem, g_der;
+global X509_CERT[200] g_roots;
+
+def show_name(byte* p, int len) -> void
+{
+    int i;
+    byte c;
+    byte[2] one;
+    one[1] = (byte)0;
+    for (i = 0; i < len; i++)
+    {
+        c = p[i];
+        if (c >= (byte)32 & c < (byte)127) { one[0] = c; print(@one[0]); };
+    };
+};
+
+def same(byte* a, int al, byte* b, int bl) -> bool
+{
+    int i;
+    if (al != bl) { return false; };
+    for (i = 0; i < al; i++) { if (a[i] != b[i]) { return false; }; };
+    return true;
+};
+
+def main() -> int
+{
+    int fd, rc, n, nroots, i, j, found;
+    byte* host = "gateway.discord.gg\0";
+    DateTime utc;
+    i64 now;
+
+    n = read_file("/etc/ssl/certs/ca-certificates.crt\0", g_pem, 400000);
+    if (n <= 0) { n = read_file("cacert.pem\0", g_pem, 400000); };
+    if (n <= 0) { print("no bundle\n\0"); flush(); return 1; };
+    nroots = X509::x509_load_pem_bundle(g_pem, n, g_der, 400000, g_roots, 200);
+    print("roots \0"); print(nroots); print("\n\0");
+    utc = dt_now_utc();
+    init();
+    fd = tcp_connect_host(host, (u16)443);
+    if (fd < 0) { print("connect failed\n\0"); flush(); return 1; };
+    rc = tls13_client_connect(@g_conn, fd, host, 18, g_roots, nroots, 0, (i64)0);
+    print("handshake rc \0"); print(rc); print("\n\0");
+    print("peer certs \0"); print(g_conn.peer_n); print("\n\0");
+    for (i = 0; i < g_conn.peer_n; i++)
+    {
+        print("cert \0"); print(i);
+        print(" sig_alg \0"); print(g_conn.peer[i].sig_alg);
+        print(" key_type \0"); print(g_conn.peer[i].key_type);
+        print("\n  subject: \0"); show_name(g_conn.peer[i].subject, g_conn.peer[i].subject_len);
+        print("\n  issuer:  \0"); show_name(g_conn.peer[i].issuer, g_conn.peer[i].issuer_len);
+        print("\n\0");
+        if (i + 1 < g_conn.peer_n)
+        {
+            print("  issuer == next subject: \0");
+            if (same(g_conn.peer[i].issuer, g_conn.peer[i].issuer_len, g_conn.peer[i + 1].subject, g_conn.peer[i + 1].subject_len)) { print("yes\n\0"); } else { print("NO\n\0"); };
+        };
+        found = 0;
+        for (j = 0; j < nroots; j++)
+        {
+            if (same(g_conn.peer[i].issuer, g_conn.peer[i].issuer_len, g_roots[j].subject, g_roots[j].subject_len))
+            {
+                found++;
+                print("  root with issuer name: \0"); show_name(g_roots[j].subject, g_roots[j].subject_len);
+                print(" ca_ok \0"); print(X509::x509_ca_ok(@g_roots[j]));
+                print(" sig_check \0"); print(X509::x509_check_sig(@g_conn.peer[i], @g_roots[j]));
+                print(" root_sig_alg \0"); print(g_roots[j].sig_alg);
+                print("\n\0");
+            };
+        };
+        if (found == 0) { print("  no root has this issuer name\n\0"); };
+    };
+    flush();
+    return 0;
+};
