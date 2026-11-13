@@ -59,8 +59,8 @@
 #def SSA_OPT_CNTB 1;       // a loop that counts the bytes equal to a constant consumes whole blocks with one vector search
 #def SSA_OPT_STRLEN 1;     // a loop that scans for a zero byte becomes an SSE2 search
 #def SSA_OPT_AUTOINL 1;    // small functions without loops are expanded at their calls
-#def SSA_INL_MAX 14;
-#def SSA_INL_BLKS 3;
+#def SSA_INL_MAX 4;
+#def SSA_INL_BLKS 2;
 #def SSA_OPT_SELFST 1;     // a store of a value just loaded from the same address is dropped
 #def SSA_OPT_NARROWCMP 1;  // a compare of an extended value with a constant is done at the narrow width
 #def SSA_OPT_SHLD 1;       // (a << n) | (b >> (w - n)) is shld

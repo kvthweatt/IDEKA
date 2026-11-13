@@ -217,6 +217,15 @@ object A64Module
             i64 sm_val;        // its value
             bool ccm_on;       // the next integer compare is a ccmp of condition ccm_cc, nzcv ccm_nz
             int ccm_cc, ccm_nz;
+            SI* sel_nx;        // the instruction after the one being selected
+            IRValue* lz_val;   // an aggregate loaded for the store right after it, not copied yet
+            AM* lz_src;        // where that aggregate is
+            bool x16ok;        // x16 holds the frame address x16b + x16o from the last access
+            int x16b;
+            i64 x16o;
+            i64* kpv;          // 64 bit constants of the pool, by hash
+            int* kpl;          // their label numbers
+            int kpn;
             int eplab;         // label number of the first return sequence of the function, 0 before one is emitted
             bool tco;          // no frame address escapes, so a call followed by a return may become a jump
             bool tbok;         // the function is small enough for tbz and tbnz to reach every label
@@ -432,6 +441,7 @@ object A64Module
                     -> this.gwhy == 0;
                 };
                 this.sf = this.s_gf_new(f);
+                this.lz_val = (IRValue*)0;
                 ok = this.s_cfg();
                 if (ok)
                 {
@@ -493,6 +503,9 @@ object A64Module
                 out.put_str(g"\t.file \0");
                 put_quoted(out, this.mod_name);
                 out.put(10);
+                this.kpv = (i64*)0;
+                this.kpl = (int*)0;
+                this.kpn = 0;
                 this.s_inline_all();
                 while (i < this.funcs.len)
                 {
@@ -1108,7 +1121,8 @@ object A64Module
             s_copy(AM* d, AM* s, int n) -> void
             {
                 int off = 0;
-                int t, sz, ra, rb;
+                int t, sz, ra, rb, k;
+                int[4] ts;
                 AI* m;
                 if (n <= 0) { ->; };
                 if (n > 128)
@@ -1124,6 +1138,26 @@ object A64Module
                     m.id = (i64)15;
                     m.clob = (i64)15;
                     ->;
+                };
+                while (n - off >= 16)
+                {
+                    // neighbouring words are loaded together and stored together so that they become pairs
+                    sz = 2;
+                    if (n - off >= 32) { sz = 4; };
+                    k = 0;
+                    while (k < sz)
+                    {
+                        ts[k] = this.s_nv(0);
+                        this.s_memop(A_LD, ts[k], 8, this.s_amoff(s, (i64)(off + 8 * k)));
+                        k++;
+                    };
+                    k = 0;
+                    while (k < sz)
+                    {
+                        this.s_memop(A_ST, ts[k], 8, this.s_amoff(d, (i64)(off + 8 * k)));
+                        k++;
+                    };
+                    off = off + 8 * sz;
                 };
                 while (off < n)
                 {
@@ -1184,7 +1218,8 @@ object A64Module
                         ->;
                     };
                 };
-                s = this.s_agg_addr(v);
+                if (v == this.lz_val) { s = this.lz_src; this.lz_val = (IRValue*)0; }
+                else { s = this.s_agg_addr(v); };
                 if (this.gwhy != 0) { ->; };
                 this.s_copy(d, s, this.a_size(v.ty));
                 ->;
@@ -1303,10 +1338,22 @@ object A64Module
             {
                 IRType* t = x.ty;
                 AM* m;
+                SI* nx;
                 int sz, d, rs;
                 if (this.s_isagg(t))
                 {
                     sz = this.a_size(t);
+                    // an aggregate that is only stored by the next instruction goes straight from its source
+                    nx = this.sel_nx;
+                    if (nx != (SI*)0 & !x.vol)
+                    {
+                        if (nx.op == SO_STORE & !nx.vol & nx.a == x.res & x.res.nu == 1 & x.res.ui == (void*)nx)
+                        {
+                            this.lz_val = x.res;
+                            this.lz_src = this.s_addr(x.a);
+                            ->;
+                        };
+                    };
                     rs = this.s_newfo(sz, this.a_align(t));
                     m = this.s_addr(x.a);
                     this.s_copy(this.s_fomem(rs - 1), m, sz);
@@ -2137,6 +2184,7 @@ object A64Module
                 IRType* to = x.ty;
                 int k = x.k;
                 int wf, wt, r, d, sz;
+                i64 val;
                 AI* m;
                 if (k == SK_BITCAST | k == SK_PTRTOINT | k == SK_INTTOPTR | k == SK_TRUNC | k == SK_ZEXT | k == SK_SEXT)
                 {
@@ -2167,6 +2215,16 @@ object A64Module
                     wf = this.s_wid(fty);
                     wt = this.s_wid(to);
                     if (wf > 64 | wt > 64) { this.s_fail(g"wide cast\0"); ->; };
+                    // a cast of a constant is a constant, so its users take it as an immediate or the zero register
+                    if (this.s_kint(v))
+                    {
+                        val = this.scv;
+                        if (k == SK_SEXT) { val = this.s_sx((u64)val, wf); };
+                        if (wt < 64) { val = (i64)this.a_mask((u64)val, wt); };
+                        x.res.kv = val;
+                        x.res.kc = true;
+                        ->;
+                    };
                     r = this.s_vr(v);
                     if (k == SK_ZEXT | k == SK_SEXT | k == SK_INTTOPTR)
                     {
@@ -3132,7 +3190,8 @@ object A64Module
             // each of them: the displacement costs nothing there, and the add that made the address is not needed.
             s_lazy_multi(GB* gb, int j, SI* x) -> void
             {
-                int k, cnt, n;
+                int k, cnt, n, bi;
+                GB* gb2;
                 SI* u;
                 IRValue* r = x.res;
                 n = 0;
@@ -3142,13 +3201,22 @@ object A64Module
                     n++;
                 };
                 cnt = 0;
-                k = j + 1;
-                while (k < gb.ib.insts.len)
+                // the base register of the address is the same value wherever it is read, so the users may be in other blocks
+                bi = 0;
+                while (bi < this.sf.nb & cnt < r.nu)
                 {
-                    u = (SI*)gb.ib.insts.items[k];
-                    k++;
-                    if (u.op == SO_LOAD & u.a == r) { cnt++; continue; };
-                    if (u.op == SO_STORE & u.b == r & u.a != r) { cnt++; continue; };
+                    gb2 = (GB*)this.sf.bl.items[bi];
+                    bi++;
+                    if (gb2.ib.insts == (PtrVec*)0) { continue; };
+                    k = 0;
+                    while (k < gb2.ib.insts.len)
+                    {
+                        u = (SI*)gb2.ib.insts.items[k];
+                        k++;
+                        if (u.op == SO_LOAD & u.a == r) { cnt++; continue; };
+                        if (u.op == SO_STORE & u.b == r & u.a != r) { cnt++; continue; };
+                        if (u.op == SO_GEP & u.a == r) { cnt++; continue; };
+                    };
                 };
                 if (cnt == r.nu) { x.flag = true; };
                 ->;
@@ -3308,6 +3376,8 @@ object A64Module
                         while (j < gb.ib.insts.len)
                         {
                             x = (SI*)gb.ib.insts.items[j];
+                            this.sel_nx = (SI*)0;
+                            if (j + 1 < gb.ib.insts.len) { this.sel_nx = (SI*)gb.ib.insts.items[j + 1]; };
                             this.s_isel_inst(x);
                             if (this.gwhy != 0) { -> false; };
                             j++;
@@ -3760,6 +3830,95 @@ object A64Module
             // Spilling
             // ----------------------------------------------------------
 
+            // Spilled registers that one copy joins and that never live at the same time share a frame slot. sp marks
+            // the spilled registers; the interference lists are those of the colouring that spilled them.
+            s_slotshare(int* sp) -> void
+            {
+                GF* g = this.sf;
+                int nv = g.nvr;
+                int* gid = this.s_iz(nv + 1);
+                int* nxt = this.s_iz(nv + 1);
+                int* tl = this.s_iz(nv + 1);
+                int i, j, k, u, v, ru, rv, x, y;
+                bool bad;
+                GB* gb;
+                AI* m;
+                i = 0;
+                while (i < this.nspl)
+                {
+                    u = this.spl[i];
+                    gid[u] = u;
+                    tl[u] = u;
+                    i++;
+                };
+                i = 0;
+                while (i < g.nb)
+                {
+                    gb = g.rpo[i];
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        j++;
+                        if (m.op != A_MOV | m.d < AR_VBASE | m.a < AR_VBASE) { continue; };
+                        u = m.d;
+                        v = m.a;
+                        if (sp[u] != 1 | sp[v] != 1 | g.vcls[u] != g.vcls[v]) { continue; };
+                        ru = gid[u];
+                        rv = gid[v];
+                        if (ru == rv) { continue; };
+                        // the groups must not have a register of one interfering with a register of the other
+                        bad = false;
+                        x = ru;
+                        while (x != 0 & !bad)
+                        {
+                            k = this.adjo[x];
+                            while (k < this.adjo[x + 1])
+                            {
+                                y = this.adj[k];
+                                if (sp[y] == 1)
+                                {
+                                    if (gid[y] == rv) { bad = true; break; };
+                                };
+                                k++;
+                            };
+                            x = nxt[x];
+                        };
+                        if (bad) { continue; };
+                        x = ru;
+                        while (x != 0)
+                        {
+                            gid[x] = rv;
+                            x = nxt[x];
+                        };
+                        nxt[tl[rv]] = ru;
+                        tl[rv] = tl[ru];
+                    };
+                    i++;
+                };
+                // one slot for each group
+                i = 0;
+                while (i < this.nspl)
+                {
+                    u = this.spl[i];
+                    g.vslot[u] = 0;
+                    i++;
+                };
+                i = 0;
+                while (i < this.nspl)
+                {
+                    u = this.spl[i];
+                    rv = gid[u];
+                    if (g.vslot[rv] == 0) { g.vslot[rv] = this.s_newfo(8, 8); };
+                    g.vslot[u] = g.vslot[rv];
+                    i++;
+                };
+                this.s_ifree(gid);
+                this.s_ifree(nxt);
+                this.s_ifree(tl);
+                ->;
+            };
+
             // The registers s_color gave up on (spl) live in frame slots: every use is preceded by a load into a new
             // register and every definition is followed by a store from one
             s_spill() -> void
@@ -3778,9 +3937,9 @@ object A64Module
                 while (i < this.nspl)
                 {
                     sp[this.spl[i]] = 1;
-                    g.vslot[this.spl[i]] = this.s_newfo(8, 8);
                     i++;
                 };
+                this.s_slotshare(sp);
                 i = 0;
                 while (i < g.nb)
                 {
@@ -3792,6 +3951,14 @@ object A64Module
                     while (j < old.len)
                     {
                         m = (AI*)old.items[j];
+                        // a copy between two registers that share one slot has nothing left to do
+                        if (m.op == A_MOV & m.sz == 8 & m.d >= AR_VBASE & m.a >= AR_VBASE)
+                        {
+                            if (sp[m.d] == 1 & sp[m.a] == 1)
+                            {
+                                if (g.vslot[m.d] == g.vslot[m.a]) { j++; continue; };
+                            };
+                        };
                         nt = 0;
                         slot = 0;
                         while (slot < 4)
@@ -4091,11 +4258,29 @@ object A64Module
             {
                 GF* g = this.sf;
                 int* uc = this.s_ucount();
+                int* dc = this.s_iz(g.nvr + 1);
                 int bi, j, c;
                 GB* gb;
                 AI* m;
                 AI* e;
+                AI* e2;
+                AI** ldef;
                 i64 v;
+                // registers with more than one definition (the variables of phis) are not constants
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        j++;
+                        if (this.s_arole(m.op, 0) == 2 & m.d >= AR_VBASE) { dc[m.d]++; };
+                    };
+                };
                 bi = 0;
                 while (bi < g.nb)
                 {
@@ -4108,6 +4293,53 @@ object A64Module
                         m = (AI*)gb.mi.items[j];
                         e = (AI*)gb.mi.items[j + 1];
                         j++;
+                        // a constant or a copy that nothing reads is dropped
+                        if ((m.op == A_MOV | m.op == A_MOVI) & m.d >= AR_VBASE)
+                        {
+                            if (uc[m.d] == 0) { m.op = A_NOP; };
+                        };
+                        // an address made by adding a constant, used once by the access right after it, goes into the access
+                        if (m.op == A_ALU & m.k == L_ADD & m.sz == 8 & m.b < 0 & m.cc == 0 & m.d >= AR_VBASE & (e.op == A_LD | e.op == A_ST))
+                        {
+                            if (e.a == m.d & e.b < 0 & e.sym == (byte*)0 & e.fo < 0 & e.ma == 0 & e.d != m.d & uc[m.d] == 1 & dc[m.d] == 1)
+                            {
+                                v = e.imm + m.imm;
+                                if ((v >= (i64)0 & v % (i64)e.sz == (i64)0 & v / (i64)e.sz < (i64)4096) | (v >= (i64)-256 & v <= (i64)255))
+                                {
+                                    e.a = m.a;
+                                    e.imm = v;
+                                    m.op = A_NOP;
+                                    continue;
+                                };
+                            };
+                        };
+                        // a zero made only to be stored is stored from the zero register
+                        if (e.op == A_ST & m.d >= AR_VBASE & e.d == m.d & e.a != m.d & e.b != m.d)
+                        {
+                            if (uc[m.d] == 1 & dc[m.d] == 1 & g.vcls[m.d] == 0 & ((m.op == A_MOV & m.a == AR_ZR) | (m.op == A_MOVI & m.imm == (i64)0)))
+                            {
+                                e.d = AR_ZR;
+                                m.op = A_NOP;
+                                continue;
+                            };
+                        };
+                        // a zero compared once is the zero register
+                        if (m.d >= AR_VBASE & uc[m.d] == 1 & dc[m.d] == 1 & g.vcls[m.d] == 0 & ((m.op == A_MOV & m.a == AR_ZR) | (m.op == A_MOVI & m.imm == (i64)0)))
+                        {
+                            c = j;
+                            while (c < gb.mi.len & c < j + 16)
+                            {
+                                e2 = (AI*)gb.mi.items[c];
+                                if ((e2.op == A_CMP | e2.op == A_TST) & e2.b >= 0 & (e2.a == m.d | e2.b == m.d))
+                                {
+                                    if (e2.a == m.d) { e2.a = AR_ZR; } else { e2.b = AR_ZR; };
+                                    m.op = A_NOP;
+                                    break;
+                                };
+                                c++;
+                            };
+                            if (m.op == A_NOP) { continue; };
+                        };
                         if (e.op != A_EXT | m.d < AR_VBASE | e.a != m.d) { continue; };
                         if (uc[m.d] != 1) { continue; };
                         c = (int)e.imm;
@@ -4134,7 +4366,55 @@ object A64Module
                         };
                     };
                 };
+                // the zero extension of a value an unsigned load of that width made is not needed, wherever it comes
+                ldef = (AI**)fmalloc((u64)(8 * (g.nvr + 1)));
+                bi = 0;
+                while (bi <= g.nvr)
+                {
+                    ldef[bi] = (AI*)0;
+                    bi++;
+                };
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        m = (AI*)gb.mi.items[j];
+                        j++;
+                        if (m.op == A_LD & m.k == 0 & m.d >= AR_VBASE & dc[m.d] == 1 & g.vcls[m.d] == 0) { ldef[m.d] = m; };
+                    };
+                };
+                bi = 0;
+                while (bi < g.nb)
+                {
+                    gb = (GB*)g.bl.items[bi];
+                    bi++;
+                    if (gb.mi == (PtrVec*)0) { continue; };
+                    j = 0;
+                    while (j < gb.mi.len)
+                    {
+                        e = (AI*)gb.mi.items[j];
+                        j++;
+                        if (e.op != A_EXT | e.k != 0 | e.a < AR_VBASE | e.d < AR_VBASE) { continue; };
+                        m = ldef[e.a];
+                        if (m == (AI*)0) { continue; };
+                        c = (int)e.imm;
+                        if (m.sz * 8 != c | m.ma != 0) { continue; };
+                        if (uc[e.a] == 1 & dc[e.d] == 1)
+                        {
+                            m.d = e.d;
+                            e.op = A_NOP;
+                        }
+                        else { e.op = A_MOV; };
+                    };
+                };
+                ffree((byte*)ldef);
                 this.s_ifree(uc);
+                this.s_ifree(dc);
                 ->;
             };
 
@@ -4503,6 +4783,48 @@ object A64Module
             };
 
             // Loads the constant v into register r (a hardware register number)
+            // Label number of the pool entry holding the 64 bit constant u, made when it is new
+            e_kpool(u64 u) -> int
+            {
+                int h, n;
+                if (this.kpv == (i64*)0)
+                {
+                    this.kpv = this.s_lz(8192);
+                    this.kpl = this.s_iz(8192);
+                    this.kpn = 0;
+                };
+                h = (int)(((u `^| (u >> (u64)29)) * (u64)40503) `& (u64)8191);
+                while (this.kpl[h] != 0)
+                {
+                    if ((u64)this.kpv[h] == u) { -> this.kpl[h]; };
+                    h = (h + 1) `& 8191;
+                };
+                if (this.kpn >= 4000)
+                {
+                    // the table is full: a new entry for every use
+                    this.kpn++;
+                    n = this.kpn;
+                    this.cdata.put_str(this.a_rodata());
+                    this.cdata.put_str(g"\t.p2align 3\n.LK\0");
+                    this.cdata.put_int(n);
+                    this.cdata.put_str(g":\n\t.quad \0");
+                    put_u64(@this.cdata, u);
+                    this.cdata.put(10);
+                    -> n;
+                };
+                this.kpn++;
+                n = this.kpn;
+                this.kpv[h] = (i64)u;
+                this.kpl[h] = n;
+                this.cdata.put_str(this.a_rodata());
+                this.cdata.put_str(g"\t.p2align 3\n.LK\0");
+                this.cdata.put_int(n);
+                this.cdata.put_str(g":\n\t.quad \0");
+                put_u64(@this.cdata, u);
+                this.cdata.put(10);
+                -> n;
+            };
+
             e_movi(Buf* o, int r, i64 v, int sz) -> void
             {
                 u64 u = (u64)v;
@@ -4544,6 +4866,26 @@ object A64Module
                     ->;
                 };
                 neg = ones > zeros;
+                // a 64 bit constant of three or four pieces is read from a pool of constants in two instructions
+                if (sz == 8 & r < 31)
+                {
+                    if ((!neg & nh - zeros >= 3) | (neg & nh - ones >= 3))
+                    {
+                        i = this.e_kpool(u);
+                        o.put_str(g"\tadrp \0");
+                        this.e_r(o, r, 8);
+                        o.put_str(g", .LK\0");
+                        o.put_int(i);
+                        o.put_str(g"\n\tldr \0");
+                        this.e_r(o, r, 8);
+                        o.put_str(g", [\0");
+                        this.e_r(o, r, 8);
+                        o.put_str(g", :lo12:.LK\0");
+                        o.put_int(i);
+                        o.put_str(g"]\n\0");
+                        ->;
+                    };
+                };
                 first = 1;
                 i = 0;
                 while (i < nh)
@@ -4853,7 +5195,8 @@ object A64Module
                 int b = 0 - 1;
                 int ix, sc;
                 i64 off = m.imm;
-                bool legal;
+                i64 d16;
+                bool legal, keep;
                 this.tb.clear();
                 if (m.sym != (byte*)0)
                 {
@@ -4906,6 +5249,30 @@ object A64Module
                 legal = false;
                 if (off >= (i64)0 & off % (i64)sz == (i64)0 & off / (i64)sz < (i64)4096) { legal = true; };
                 if (off >= (i64)-256 & off <= (i64)255) { legal = true; };
+                // x16 can hold an address in the frame that the next accesses nearby are made from
+                keep = this.x16ok;
+                this.x16ok = false;
+                if (!legal & (b == 29 | b == 31))
+                {
+                    d16 = off - this.x16o;
+                    if (keep & this.x16b == b & d16 >= (i64)-256 & d16 <= (i64)255)
+                    {
+                        this.tb.put_str(g"[x16\0");
+                        if (d16 != (i64)0) { this.tb.put_str(g", #\0"); put_i64(@this.tb, d16); };
+                        this.tb.put(93);
+                        this.x16ok = true;
+                        ->;
+                    };
+                    if (off >= (i64)0 & off <= (i64)4095)
+                    {
+                        this.e_addimm(o, 16, b, off);
+                        this.tb.put_str(g"[x16]\0");
+                        this.x16ok = true;
+                        this.x16b = b;
+                        this.x16o = off;
+                        ->;
+                    };
+                };
                 this.tb.put_str(g"[\0");
                 this.eb_name(b);
                 if (legal)
@@ -5460,6 +5827,7 @@ object A64Module
                 AGF* t = (AGF*)this.sf.tg;
                 byte* mn;
                 if (op == A_NOP) { -> 0; };
+                if (op != A_MOV & op != A_MOVI & op != A_LD & op != A_ST) { this.x16ok = false; };
                 if (op == A_MOV)
                 {
                     d = this.s_phys(m.d);
@@ -5990,6 +6358,177 @@ object A64Module
                 ->;
             };
 
+            // Index in the block order of the block with number id, or -1
+            s_bidx(int id) -> int
+            {
+                GF* g = this.sf;
+                int i = 0;
+                while (i < g.nb)
+                {
+                    if (g.rpo[i].id == id) { -> i; };
+                    i++;
+                };
+                -> 0 - 1;
+            };
+
+            // Jump threading: branches to a block that only jumps on go to where it jumps, and such blocks nobody
+            // reaches any more leave the layout
+            s_jthread() -> void
+            {
+                GF* g = this.sf;
+                int nb = g.nb;
+                int* fw = this.s_iz(nb + 1);
+                int* rc = this.s_iz(nb + 1);
+                int i, j, k, n, ti, cnt, last;
+                AI* m;
+                AI* t;
+                GB* gb;
+                PtrVec* fm = pv_new();
+                PtrVec* fb = pv_new();
+                i = 1;
+                while (i < nb)
+                {
+                    gb = g.rpo[i];
+                    cnt = 0;
+                    t = (AI*)0;
+                    if (gb.mi != (PtrVec*)0)
+                    {
+                        j = 0;
+                        while (j < gb.mi.len)
+                        {
+                            m = (AI*)gb.mi.items[j];
+                            if (m.op != A_NOP) { cnt++; t = m; };
+                            j++;
+                        };
+                    };
+                    if (cnt == 1)
+                    {
+                        if (t.op == A_B & t.tgt != gb.id)
+                        {
+                            ti = this.s_bidx(t.tgt);
+                            if (ti >= 0) { fw[i] = ti + 1; };
+                        };
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < nb)
+                {
+                    gb = g.rpo[i];
+                    if (gb.mi != (PtrVec*)0)
+                    {
+                        j = 0;
+                        while (j < gb.mi.len)
+                        {
+                            m = (AI*)gb.mi.items[j];
+                            if (m.op == A_B | m.op == A_BC | m.op == A_CBZ | m.op == A_CBNZ)
+                            {
+                                ti = this.s_bidx(m.tgt);
+                                n = 0;
+                                while (ti >= 0 & fw[ti] != 0 & n < nb)
+                                {
+                                    ti = fw[ti] - 1;
+                                    n++;
+                                };
+                                if (ti >= 0 & n < nb & g.rpo[ti].id != m.tgt)
+                                {
+                                    // a jump to the next block costs nothing, remember it in case that block stays
+                                    if (i + 1 < nb)
+                                    {
+                                        if (g.rpo[i + 1].id == m.tgt) { pv_push(fm, (void*)m); pv_push(fb, (void*)gb); };
+                                    };
+                                    m.tgt = g.rpo[ti].id;
+                                };
+                            };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
+                i = 0;
+                while (i < nb)
+                {
+                    gb = g.rpo[i];
+                    if (gb.mi != (PtrVec*)0)
+                    {
+                        j = 0;
+                        while (j < gb.mi.len)
+                        {
+                            m = (AI*)gb.mi.items[j];
+                            if (m.op == A_B | m.op == A_BC | m.op == A_CBZ | m.op == A_CBNZ | m.op == A_JT | m.op == A_SWBIN)
+                            {
+                                ti = this.s_bidx(m.tgt);
+                                if (ti >= 0) { rc[ti]++; };
+                            };
+                            if (m.op == A_JT)
+                            {
+                                n = 0;
+                                while (n < m.k)
+                                {
+                                    ti = this.s_bidx(((int*)m.text)[n]);
+                                    if (ti >= 0) { rc[ti]++; };
+                                    n++;
+                                };
+                            };
+                            if (m.op == A_SWBIN)
+                            {
+                                n = 0;
+                                while (n < m.k)
+                                {
+                                    ti = this.s_bidx(((int*)m.text)[2 * m.k + n]);
+                                    if (ti >= 0) { rc[ti]++; };
+                                    n++;
+                                };
+                            };
+                            j++;
+                        };
+                    };
+                    i++;
+                };
+                j = 0;
+                while (j < fm.len)
+                {
+                    m = (AI*)fm.items[j];
+                    gb = (GB*)fb.items[j];
+                    if (rc[gb.rpo + 1] > 0) { m.tgt = g.rpo[gb.rpo + 1].id; };
+                    j++;
+                };
+                pv_free(fm);
+                pv_free(fb);
+                // a removed block must not be entered by falling out of the block before it
+                k = 0;
+                i = 0;
+                while (i < nb)
+                {
+                    gb = g.rpo[i];
+                    if (i > 0 & fw[i] != 0 & rc[i] == 0)
+                    {
+                        last = 0 - 1;
+                        t = (AI*)0;
+                        j = g.rpo[i - 1].mi.len - 1;
+                        while (j >= 0)
+                        {
+                            m = (AI*)g.rpo[i - 1].mi.items[j];
+                            if (m.op != A_NOP) { t = m; break; };
+                            j--;
+                        };
+                        if (t != (AI*)0)
+                        {
+                            if (t.op == A_B | t.op == A_RET | t.op == A_BRK | t.op == A_JT | t.op == A_SWBIN) { last = 1; };
+                        };
+                        if (last == 1) { i++; continue; };
+                    };
+                    g.rpo[k] = gb;
+                    gb.rpo = k;
+                    k++;
+                    i++;
+                };
+                g.nb = k;
+                this.s_ifree(fw);
+                this.s_ifree(rc);
+                ->;
+            };
+
             s_emit(IRFunc* f, Buf* out) -> void
             {
                 GF* g = this.sf;
@@ -6013,6 +6552,7 @@ object A64Module
                 };
                 if (j < 2000) { this.tbok = true; };
                 this.eplab = 0;
+                this.s_jthread();
                 this.tco = this.e_out16() == 0 & !((AGF*)g.tg).dyn;
                 i = 0;
                 while (i < g.nb & this.tco)
@@ -6038,6 +6578,7 @@ object A64Module
                     out.put_str(g".LB\0");
                     out.put_int(gb.id);
                     out.put_str(g":\n\0");
+                    this.x16ok = false;
                     j = 0;
                     while (j < gb.mi.len)
                     {
