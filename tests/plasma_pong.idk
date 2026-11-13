@@ -1,7 +1,7 @@
 ///
  plasma_pong.idk
  Plasma Pong by Steve Taylor (Partial Clone) - click and hold to emit jets of plasma!
- OpenGL texture pipeline, fmalloc/ffree, double-precision Navier-Stokes
+ idkgui software framebuffer (Windows and Linux), fmalloc/ffree, double-precision Navier-Stokes
  Optimizations:
    - Persistent thread pool with semaphore dispatch + memory fences
    - Red-black Gauss-Seidel (fully parallel per color pass)
@@ -13,14 +13,21 @@
    - set_bnd deferred to end of lin_solve iteration loop
 ///
 
-#import <standard.idk>, <opengl.idk>, <vectors.idk>, <threading.idk>;
+#import <standard.idk>, <idkgui.idk>, <vectors.idk>, <threading.idk>;
 
-using standard::math,
+using standard::io::console,
+      standard::math,
       standard::vectors,
-      standard::system::windows,
+      standard::system::idkgui,
       standard::threading,
-      standard::atomic,
-      OpenGL;
+      standard::atomic;
+
+#ifdef __LINUX__
+extern
+{
+    def !! sysconf(int) -> i64;
+};
+#endif;
 
 // ============================================================================
 // SIMULATION CONSTANTS
@@ -84,7 +91,9 @@ const int PHASE_LINSOLVE_RED   = 0,
           PHASE_PROJECT_DIV    = 3,
           PHASE_PROJECT_GRAD   = 4,
           PHASE_DECAY          = 5,
-          PHASE_EXIT           = 6;
+          PHASE_SHADE          = 6,
+          PHASE_UPSCALE        = 7,
+          PHASE_EXIT           = 8;
 
 // Hot fields written every dispatch - kept together for cache locality
 // Cold fields (row_start/row_end) set once at startup, never change
@@ -112,11 +121,16 @@ struct WorkSlice
             proj_hy_inv;
     // decay - passed as param to avoid global pointer reload
     double* dp_dens;
+    // render bands: window rows [rr0, rr1) of a rw x rh framebuffer
+    int     rr0, rr1, rw, rh;
+    u32*    rpx;
+    // per-slice wake semaphore so each worker only takes its own token
+    Semaphore wake;
 };
 
 WorkSlice[64]  g_slices, g_slices2;
 Thread[64]     g_threads, g_threads2;
-Semaphore      g_work_sem, g_done_sem, g_work_sem2, g_done_sem2;
+Semaphore      g_done_sem, g_done_sem2;
 int g_num_threads    = 1,
     g_rows_per_thread = 1;
 
@@ -130,6 +144,7 @@ global int  mouse_x    = 0,
             mouse_px   = 0,
             mouse_py   = 0;
 
+global bool g_gl = false;
 global int  cur_w      = WIN_W,
             cur_h      = WIN_H;
 
@@ -181,9 +196,9 @@ global int g_level = 1;
 
 def btn_hit_test(int mx, int my, int cx, int cy) -> bool # effect {Pure},
     btn_hit_test_ex(int, int, int, int, int, int) -> bool # effect {Pure},
-    draw_parallelogram_btn(int, int, int, int, int, float, float) -> void # effect {*IO.GPU},
+    draw_parallelogram_btn(int, int, int, int, int) -> void # effect {*IO.GPU},
     text_width(byte*, int) -> int # effect {Pure},
-    draw_text(byte*, int, int, int, float, float) -> void # effect {*IO.GPU},
+    draw_text(byte*, int, int, int) -> void # effect {*IO.GPU},
     draw_quit_dialog(int, int) -> void # effect {*IO.GPU},
     paddle_update() -> void # effect {*Mem.Write},
     cpu_paddle_update() -> void # effect {*Mem.Write},
@@ -196,31 +211,32 @@ def btn_hit_test(int mx, int my, int cx, int cy) -> bool # effect {Pure},
     vorticity_confinement(double*, double*) -> void # effect {*Mem.Write};
 
 // ============================================================================
-// WINDOW PROCEDURE
+// INPUT - polled from the idkgui window once per frame
 // ============================================================================
 
-def FluidWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT # effect {*IO & *Mem.Write};
-def FluidWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT
+global bool g_quit = false;
+
+def handle_input(GuiWindow* win) -> void # effect {*Mem.Write};
+def handle_input(GuiWindow* win) -> void
 {
-    int nx, ny,
-        click_x, click_y;
+    int  click_x, click_y, k;
+    bool handled;
 
-    if (msg == WM_CLOSE)      { DestroyWindow(hwnd); return 0; };
-    if (msg == WM_DESTROY)    { PostQuitMessage(0);  return 0; };
-    if (msg == WM_ERASEBKGND) { return 1; };
-
-    if (msg == WM_PAINT)
+    // Mouse move
+    if (win.mouse_x != mouse_x | win.mouse_y != mouse_y)
     {
-        PAINTSTRUCT ps;
-        BeginPaint(hwnd, @ps);
-        EndPaint(hwnd, @ps);
-        return 0;
+        mouse_px = mouse_x;
+        mouse_py = mouse_y;
+        mouse_x  = win.mouse_x;
+        mouse_y  = win.mouse_y;
     };
 
-    if (msg == WM_LBUTTONDOWN)
+    // Left button down
+    if (win.button_pressed((u32)IdkGuiButton.GUI_BUTTON_LEFT))
     {
-        click_x = (int)(lParam & 0xFFFF);
-        click_y = (int)((lParam >> 16) & 0xFFFF);
+        click_x = win.mouse_x;
+        click_y = win.mouse_y;
+        handled = false;
 
         if (g_game_state == 0)
         {
@@ -232,41 +248,44 @@ def FluidWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESUL
                 g_ball_x     = -1.0;
                 g_game_state = 1;
             };
-            return 0;
+            handled = true;
         };
 
-        if (g_game_state == 2)
+        if (!handled & g_game_state == 2)
         {
             // Quit dialog: Yes button at center-left, No button at center-right
             // Draw btn cy-50 (bottom-origin) = lower on screen = click cy+50 (top-origin)
             if (btn_hit_test_ex(click_x, click_y, cur_w / 2 - 80, cur_h / 2 + 50, BTN_W / 4, BTN_H / 2))
             {
-                PostQuitMessage(0);
+                g_quit = true;
             };
             if (btn_hit_test_ex(click_x, click_y, cur_w / 2 + 80, cur_h / 2 + 50, BTN_W / 4, BTN_H / 2))
             {
                 g_game_state = g_prev_state;
             };
-            return 0;
+            handled = true;
         };
 
-        mouse_down = true;
-        if (g_game_state == 1) { g_jetting = true; };
-        mouse_px   = click_x;
-        mouse_py   = click_y;
-        mouse_x    = mouse_px;
-        mouse_y    = mouse_py;
-        return 0;
+        if (!handled)
+        {
+            mouse_down = true;
+            if (g_game_state == 1) { g_jetting = true; };
+            mouse_px   = click_x;
+            mouse_py   = click_y;
+            mouse_x    = mouse_px;
+            mouse_y    = mouse_py;
+        };
     };
 
-    if (msg == WM_LBUTTONUP)
+    // Left button up
+    if (win.button_released((u32)IdkGuiButton.GUI_BUTTON_LEFT))
     {
         mouse_down = false;
         g_jetting  = false;
-        return 0;
     };
 
-    if (msg == WM_RBUTTONDOWN)
+    // Right button
+    if (win.button_pressed((u32)IdkGuiButton.GUI_BUTTON_RIGHT))
     {
         if (g_game_state == 1)
         {
@@ -274,54 +293,33 @@ def FluidWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESUL
             g_jetting     = false;
             g_suck_charge = 0.0;
         };
-        return 0;
     };
-
-    if (msg == WM_RBUTTONUP)
+    if (win.button_released((u32)IdkGuiButton.GUI_BUTTON_RIGHT))
     {
         g_sucking = false;
-        return 0;
     };
 
-    if (msg == WM_MOUSEMOVE)
+    // Escape opens the quit dialog
+    if (win.key_pressed((int)IdkGuiKey.GUI_KEY_ESCAPE))
     {
-        nx       = (int)(lParam & 0xFFFF);
-        ny       = (int)((lParam >> 16) & 0xFFFF);
-        mouse_px = mouse_x;
-        mouse_py = mouse_y;
-        mouse_x  = nx;
-        mouse_y  = ny;
-        return 0;
-    };
-
-    if (msg == WM_KEYDOWN)
-    {
-        if (wParam == 0x1B)  // VK_ESCAPE
+        if (g_game_state != 2)
         {
-            if (g_game_state != 2)
-            {
-                g_prev_state  = g_game_state;
-                g_game_state  = 2;
-                g_jetting     = false;
-                g_sucking     = false;
-                g_suck_charge = 0.0;
-            };
-            return 0;
+            g_prev_state  = g_game_state;
+            g_game_state  = 2;
+            g_jetting     = false;
+            g_sucking     = false;
+            g_suck_charge = 0.0;
         };
-        if (wParam == 0x31) { g_palette = 0; return 0; };
-        if (wParam == 0x32) { g_palette = 1; return 0; };
-        if (wParam == 0x33) { g_palette = 2; return 0; };
-        if (wParam == 0x34) { g_palette = 3; return 0; };
-        if (wParam == 0x35) { g_palette = 4; return 0; };
-        if (wParam == 0x36) { g_palette = 5; return 0; };
-        if (wParam == 0x37) { g_palette = 6; return 0; };
-        if (wParam == 0x38) { g_palette = 7; return 0; };
-        if (wParam == 0x39) { g_palette = 8; return 0; };
-        if (wParam == 0x30) { g_palette = 9; return 0; };
-        return 0;
     };
 
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    // 1 to 9 then 0 select the palette
+    for (k = 49; k <= 57; k++)
+    {
+        if (win.key_pressed(k)) { g_palette = k - 49; };
+    };
+    if (win.key_pressed(48)) { g_palette = 9; };
+
+    return;
 };
 
 // ============================================================================
@@ -630,6 +628,9 @@ def particles_update() -> void
 // ============================================================================
 // PERSISTENT WORKER
 // ============================================================================
+def shade_band(int j0, int j1) -> void;
+def upscale_band(int r0, int r1, int w, int h, u32* px) -> void;
+
 
 def worker(void* arg) -> void* # effect {*Sync.Wait & *Sync.Signal & *Mem.Write};
 def worker(void* arg) -> void*
@@ -639,7 +640,7 @@ def worker(void* arg) -> void*
 
     while (true)
     {
-        semaphore_wait(@g_work_sem);
+        semaphore_wait(@sl.wake);
         load_fence();
 
         if (sl.phase == PHASE_EXIT) { return (void*)0; };
@@ -669,6 +670,14 @@ def worker(void* arg) -> void*
         elif (sl.phase == PHASE_DECAY)
         {
             decay_band(sl.row_start, sl.row_end, sl.dp_dens);
+        }
+        elif (sl.phase == PHASE_SHADE)
+        {
+            shade_band(sl.row_start, sl.row_end);
+        }
+        elif (sl.phase == PHASE_UPSCALE)
+        {
+            upscale_band(sl.rr0, sl.rr1, sl.rw, sl.rh, sl.rpx);
         };
 
         semaphore_post(@g_done_sem);
@@ -685,7 +694,7 @@ def worker2(void* arg) -> void*
 
     while (true)
     {
-        semaphore_wait(@g_work_sem2);
+        semaphore_wait(@sl.wake);
         load_fence();
 
         if (sl.phase == PHASE_EXIT) { return (void*)0; };
@@ -738,7 +747,7 @@ def dispatch_linsolve2(int color, double* x, double* x0, double a, double c_inv)
         g_slices2[t].ls_color = color;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem2); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices2[t].wake); };
     return;
 };
 
@@ -765,7 +774,7 @@ def dispatch_linsolve_post(int color, double* x, double* x0, double a, double c_
         g_slices[t].ls_color = color;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     return;
 };
 
@@ -792,7 +801,7 @@ def dispatch_linsolve(int color, double* x, double* x0, double a, double c_inv) 
         g_slices[t].ls_color = color;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
     return;
 };
@@ -811,7 +820,7 @@ def dispatch_advect(double* dst, double* src, double* u, double* v) -> void
         g_slices[t].adv_v   = v;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
     return;
 };
@@ -834,7 +843,7 @@ def dispatch_project_div(double* u, double* v, double* p, double* div,
         g_slices[t].proj_hy  = hy;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
     return;
 };
@@ -859,7 +868,7 @@ def dispatch_project_grad(double* u, double* v, double* p,
         };
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
     return;
 };
@@ -875,7 +884,7 @@ def dispatch_decay() -> void
         g_slices[t].dp_dens = g_dens;
     };
     store_fence();
-    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_work_sem); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
     for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
     return;
 };
@@ -1262,6 +1271,189 @@ def add_source() -> void
 };
 
 // ============================================================================
+// SOFTWARE DRAWING - y-up pixel coordinates over the idkgui framebuffer
+// ============================================================================
+
+global GuiWindow* g_gw = (GuiWindow*)0;
+global float g_cr = 1.0,
+             g_cg = 1.0,
+             g_cb = 1.0,
+             g_ca = 1.0;
+global bool  g_additive = false;
+
+def sw_color(float r, float g, float b, float a) -> void # effect {*Mem.Write};
+def sw_color(float r, float g, float b, float a) -> void
+{
+    g_cr = r;
+    g_cg = g;
+    g_cb = b;
+    g_ca = a;
+    return;
+};
+
+def sw_byte(float v) -> int # effect {Pure};
+def sw_byte(float v) -> int
+{
+    int i = (int)(v * 255.0 + 0.5);
+    if (i < 0)   { i = 0;   };
+    if (i > 255) { i = 255; };
+    return i;
+};
+
+// One pixel at (x, yup) with explicit color and alpha, using the current blend mode
+def sw_plot(int x, int yup, float r, float g, float b, float a) -> void # effect {*IO.GPU};
+def sw_plot(int x, int yup, float r, float g, float b, float a) -> void
+{
+    GuiWindow* gw = g_gw;
+    int row = gw.height - 1 - yup;
+    u32 c   = ((u32)sw_byte(r) << 16) `| ((u32)sw_byte(g) << 8) `| (u32)sw_byte(b);
+    if (g_additive)
+    {
+        gw.add(x, row, c, sw_byte(a));
+    }
+    else
+    {
+        gw.blend(x, row, c, sw_byte(a));
+    };
+    return;
+};
+
+// Filled rectangle covering [x0, x1) x [y0, y1) in y-up pixels, current color
+def sw_fill_up(int x0, int y0, int x1, int y1) -> void # effect {*IO.GPU};
+def sw_fill_up(int x0, int y0, int x1, int y1) -> void
+{
+    int x, y;
+    for (y = y0; y < y1; y++)
+    {
+        for (x = x0; x < x1; x++)
+        {
+            sw_plot(x, y, g_cr, g_cg, g_cb, g_ca);
+        };
+    };
+    return;
+};
+
+// Radial gradient disc: color c0 at the center fading to c1 at the rim
+def sw_fan(float cx, float cy, float rx, float ry,
+           float r0, float g0, float b0, float a0,
+           float r1, float g1, float b1, float a1) -> void # effect {*IO.GPU};
+def sw_fan(float cx, float cy, float rx, float ry,
+           float r0, float g0, float b0, float a0,
+           float r1, float g1, float b1, float a1) -> void
+{
+    int   xx, yy, xa, xb, ya, yb;
+    float dxn, dyn, d, u;
+
+    xa = (int)(cx - rx) - 1;
+    xb = (int)(cx + rx) + 1;
+    ya = (int)(cy - ry) - 1;
+    yb = (int)(cy + ry) + 1;
+
+    for (yy = ya; yy <= yb; yy++)
+    {
+        for (xx = xa; xx <= xb; xx++)
+        {
+            dxn = ((float)xx + 0.5 - cx) / rx;
+            dyn = ((float)yy + 0.5 - cy) / ry;
+            d   = dxn * dxn + dyn * dyn;
+            if (d > 1.0) { continue; };
+            u = sqrt(d);
+            sw_plot(xx, yy,
+                    r0 + (r1 - r0) * u,
+                    g0 + (g1 - g0) * u,
+                    b0 + (b1 - b0) * u,
+                    a0 + (a1 - a0) * u);
+        };
+    };
+    return;
+};
+
+// Quad with horizontal bottom (v0, v1) and top (v2, v3) edges and a vertical color gradient
+def sw_quad_grad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+                 float br, float bg, float bb, float ba,
+                 float tr, float tg, float tb, float ta) -> void # effect {*IO.GPU};
+def sw_quad_grad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+                 float br, float bg, float bb, float ba,
+                 float tr, float tg, float tb, float ta) -> void
+{
+    int   yy, xx, ya, yb, xa, xb;
+    float t, xl, xr, span;
+
+    span = y3 - y0;
+    if (span < 1.0) { return; };
+    ya = (int)y0;
+    yb = (int)y3;
+
+    for (yy = ya; yy < yb; yy++)
+    {
+        t  = ((float)yy + 0.5 - y0) / span;
+        xl = x0 + (x3 - x0) * t;
+        xr = x1 + (x2 - x1) * t;
+        xa = (int)(xl + 0.5);
+        xb = (int)(xr + 0.5);
+        for (xx = xa; xx < xb; xx++)
+        {
+            sw_plot(xx, yy,
+                    br + (tr - br) * t,
+                    bg + (tg - bg) * t,
+                    bb + (tb - bb) * t,
+                    ba + (ta - ba) * t);
+        };
+    };
+    return;
+};
+
+// Line in y-up pixels with the current color; thick 2 doubles it
+def sw_line_up(int x0, int y0, int x1, int y1, int thick) -> void # effect {*IO.GPU};
+def sw_line_up(int x0, int y0, int x1, int y1, int thick) -> void
+{
+    int dx = x1 - x0;
+    int dy = y1 - y0;
+    int sx = 1;
+    int sy = 1;
+    int err, e2;
+    bool flat;
+
+    if (dx < 0) { dx = -dx; sx = -1; };
+    if (dy < 0) { dy = -dy; sy = -1; };
+    flat = dx >= dy;
+    err  = dx - dy;
+
+    while (true)
+    {
+        sw_plot(x0, y0, g_cr, g_cg, g_cb, g_ca);
+        if (thick > 1)
+        {
+            if (flat) { sw_plot(x0, y0 + 1, g_cr, g_cg, g_cb, g_ca); }
+            else      { sw_plot(x0 + 1, y0, g_cr, g_cg, g_cb, g_ca); };
+        };
+        if (x0 == x1 & y0 == y1) { break; };
+        e2 = err * 2;
+        if (e2 > -dy) { err = err - dy; x0 = x0 + sx; };
+        if (e2 < dx)  { err = err + dx; y0 = y0 + sy; };
+    };
+    return;
+};
+
+// Solid diamond with half-size hs centered at (cx, cy)
+def sw_diamond(int cx, int cy, int hs) -> void # effect {*IO.GPU};
+def sw_diamond(int cx, int cy, int hs) -> void
+{
+    int y, x, hw, ady;
+    for (y = cy - hs; y <= cy + hs; y++)
+    {
+        ady = y - cy;
+        if (ady < 0) { ady = -ady; };
+        hw = hs - ady;
+        for (x = cx - hw; x < cx + hw; x++)
+        {
+            sw_plot(x, y, g_cr, g_cg, g_cb, g_ca);
+        };
+    };
+    return;
+};
+
+// ============================================================================
 // PADDLE
 // ============================================================================
 
@@ -1404,22 +1596,12 @@ def draw_paddle(int w, int h, int grid_x, int center_gy) -> void
           ci, ri,
           cx_px, cy_px,
           paddle_left_px, paddle_bot_px, paddle_top_px,
-          paddle_w_px, paddle_h_px,
-          seg, num_seg;
-    float inv_w, inv_h,
-          cell_w, cell_h,
-          radius,
-          ox, oy,
-          fx, fy,
-          angle, step,
-          ndcx, ndcy;
+          paddle_w_px, paddle_h_px;
+    float cell_w, cell_h,
+          radius;
 
     cols    = 5;
     rows    = 20;
-    num_seg = 16;
-
-    inv_w = 2.0 / (float)w;
-    inv_h = 2.0 / (float)h;
 
     paddle_left_px = grid_x         * w / SIM_W;
     paddle_bot_px  = (center_gy - PADDLE_HALF_H) * h / SIM_H;
@@ -1431,12 +1613,8 @@ def draw_paddle(int w, int h, int grid_x, int center_gy) -> void
     cell_h  = (float)paddle_h_px / (float)rows;
     radius  = 5.0;
 
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-
-    step = 6.28318530718 / (float)num_seg;
+    // Additive glowing dots
+    g_additive = true;
 
     ci = 0;
     while (ci < cols)
@@ -1447,35 +1625,15 @@ def draw_paddle(int w, int h, int grid_x, int center_gy) -> void
             cx_px = paddle_left_px + (int)((float)ci * cell_w + cell_w * 0.5);
             cy_px = paddle_bot_px  + (int)((float)ri * cell_h + cell_h * 0.5);
 
-            ndcx = (float)cx_px * inv_w - 1.0;
-            ndcy = (float)cy_px * inv_h - 1.0;
-
-            ox = radius * inv_w;
-            oy = radius * inv_h;
-
-            glBegin(GL_TRIANGLE_FAN);
-            glColor4f(0.6, 0.85, 1.0, 0.2);
-            glVertex2f(ndcx, ndcy);
-            glColor4f(0.3, 0.6, 1.0, 0.2);
-            seg = 0;
-            while (seg <= num_seg)
-            {
-                angle = (float)seg * step;
-                fx    = ndcx + ox * cos(angle);
-                fy    = ndcy + oy * sin(angle);
-                glVertex2f(fx, fy);
-                seg++;
-            };
-            glEnd();
-
+            sw_fan((float)cx_px, (float)cy_px, radius, radius,
+                   0.6, 0.85, 1.0, 0.2,
+                   0.3, 0.6,  1.0, 0.2);
             ri++;
         };
         ci++;
     };
 
-    glDisable(GL_BLEND);
-    glEnable(GL_TEXTURE_2D);
-
+    g_additive = false;
     return;
 };
 
@@ -1629,70 +1787,20 @@ def ball_update(int w, int h) -> void
 def draw_ball(int w, int h) -> void # effect {*IO.GPU};
 def draw_ball(int w, int h) -> void
 {
-    int   seg, num_seg;
-    float inv_w, inv_h,
-          ndcx, ndcy,
-          ox, oy,
-          box, boy,
-          angle, step_b,
-          fx, fy,
-          radius, border;
+    float radius, border;
 
-    num_seg = 32;
-    radius  = BALL_RADIUS;
-    border  = 4.0;
-    inv_w   = 2.0 / (float)w;
-    inv_h   = 2.0 / (float)h;
+    radius = BALL_RADIUS;
+    border = 4.0;
 
-    ndcx = g_ball_x * inv_w - 1.0;
-    ndcy = g_ball_y * inv_h - 1.0;
+    g_additive = false;
 
-    // Outer radius (ball + border) in NDC
-    ox = (radius + border) * inv_w;
-    oy = (radius + border) * inv_h;
-
-    // Inner radius (black fill) in NDC
-    box = radius * inv_w;
-    boy = radius * inv_h;
-
-    step_b = 6.28318530718 / (float)num_seg;
-
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
-
-    // White border circle (drawn first, slightly larger)
-    glBegin(GL_TRIANGLE_FAN);
-    glColor3f(1.0, 1.0, 1.0);
-    glVertex2f(ndcx, ndcy);
-    seg = 0;
-    while (seg <= num_seg)
-    {
-        angle = (float)seg * step_b;
-        fx    = ndcx + ox * cos(angle);
-        fy    = ndcy + oy * sin(angle);
-        glVertex2f(fx, fy);
-        seg++;
-    };
-    glEnd();
-
-    // Black fill circle (drawn on top, radius only)
-    glBegin(GL_TRIANGLE_FAN);
-    glColor3f(0.0, 0.0, 0.0);
-    glVertex2f(ndcx, ndcy);
-    seg = 0;
-    while (seg <= num_seg)
-    {
-        angle = (float)seg * step_b;
-        fx    = ndcx + box * cos(angle);
-        fy    = ndcy + boy * sin(angle);
-        glVertex2f(fx, fy);
-        seg++;
-    };
-    glEnd();
-
-    glEnable(GL_TEXTURE_2D);
-
+    // White border disc (drawn first, slightly larger), then the black fill on top
+    sw_fan(g_ball_x, g_ball_y, radius + border, radius + border,
+           1.0, 1.0, 1.0, 1.0,
+           1.0, 1.0, 1.0, 1.0);
+    sw_fan(g_ball_x, g_ball_y, radius, radius,
+           0.0, 0.0, 0.0, 1.0,
+           0.0, 0.0, 0.0, 1.0);
     return;
 };
 
@@ -1752,19 +1860,10 @@ def draw_hud(int w, int h) -> void
 {
     int   scale, tx, ty, tw, lv, li,
           hx, hy, hs;
-    float inv_w, inv_h,
-          fx0, fy0, fx1, fy1,
-          fxm, fyt;
     byte[16] num_buf;
 
     scale = 2;
-    inv_w = 2.0 / (float)w;
-    inv_h = 2.0 / (float)h;
-
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    g_additive = false;
 
     // ---- LEVEL (top center) ----
     // Label "LEVEL" then number, centered at top
@@ -1773,202 +1872,56 @@ def draw_hud(int w, int h) -> void
     tx = w / 2 - tw / 2;
     ty = h - 28;   // near top in bottom-origin coords
 
-    glColor4f(0.6, 0.8, 1.0, 0.9);
-    draw_text("LEVEL \0", tx, ty, scale, inv_w, inv_h);
+    sw_color(0.6, 0.8, 1.0, 0.9);
+    draw_text("LEVEL \0", tx, ty, scale);
     tx = tx + text_width("LEVEL \0", scale);
-    glColor4f(1.0, 1.0, 1.0, 1.0);
-    draw_text(@num_buf[0], tx, ty, scale, inv_w, inv_h);
+    sw_color(1.0, 1.0, 1.0, 1.0);
+    draw_text(@num_buf[0], tx, ty, scale);
 
     // ---- LIVES (top left) ----
     // Draw heart diamonds then "LIVES" label
     hs = 7;   // half-size of diamond in pixels
 
-    glColor4f(1.0, 0.28, 0.28, 0.95);
+    sw_color(1.0, 0.28, 0.28, 0.95);
 
     li = 0;
     while (li < g_lives)
     {
         hx = 20 + li * (hs * 2 + 6);
         hy = h - 22;   // bottom-origin y near top
-
-        // Diamond: 4 triangles from center
-        fxm = (float)hx * inv_w - 1.0;
-        fyt = (float)hy * inv_h - 1.0;
-        fx0 = (float)(hx - hs) * inv_w - 1.0;
-        fx1 = (float)(hx + hs) * inv_w - 1.0;
-        fy0 = (float)(hy - hs) * inv_h - 1.0;
-        fy1 = (float)(hy + hs) * inv_h - 1.0;
-
-        glBegin(GL_QUADS);
-        glVertex2f(fxm, fy1);   // top
-        glVertex2f(fx1, fyt);   // right
-        glVertex2f(fxm, fy0);   // bottom
-        glVertex2f(fx0, fyt);   // left
-        glEnd();
-
+        sw_diamond(hx, hy, hs);
         li++;
     };
 
     // Draw empty outlines for lost lives
-    glColor4f(0.5, 0.15, 0.15, 0.6);
+    sw_color(0.5, 0.15, 0.15, 0.6);
     lv = 3;
     while (li < lv)
     {
         hx = 20 + li * (hs * 2 + 6);
         hy = h - 22;
 
-        fxm = (float)hx * inv_w - 1.0;
-        fyt = (float)hy * inv_h - 1.0;
-        fx0 = (float)(hx - hs) * inv_w - 1.0;
-        fx1 = (float)(hx + hs) * inv_w - 1.0;
-        fy0 = (float)(hy - hs) * inv_h - 1.0;
-        fy1 = (float)(hy + hs) * inv_h - 1.0;
-
-        glLineWidth(1.0);
-        glBegin(GL_LINE_LOOP);
-        glVertex2f(fxm, fy1);
-        glVertex2f(fx1, fyt);
-        glVertex2f(fxm, fy0);
-        glVertex2f(fx0, fyt);
-        glEnd();
+        sw_line_up(hx,      hy + hs, hx + hs, hy,      1);
+        sw_line_up(hx + hs, hy,      hx,      hy - hs, 1);
+        sw_line_up(hx,      hy - hs, hx - hs, hy,      1);
+        sw_line_up(hx - hs, hy,      hx,      hy + hs, 1);
 
         li++;
     };
 
     // "LIVES" label under diamonds
-    glColor4f(0.6, 0.8, 1.0, 0.7);
+    sw_color(0.6, 0.8, 1.0, 0.7);
     ty = h - 44;
-    draw_text("LIVES\0", 8, ty, scale, inv_w, inv_h);
-
-    glDisable(GL_BLEND);
-    glEnable(GL_TEXTURE_2D);
+    draw_text("LIVES\0", 8, ty, scale);
 
     return;
 };
 
-byte[] VERT_SRC = "#version 120
-void main() {
-    gl_TexCoord[0] = gl_MultiTexCoord0;
-    gl_Position    = gl_Vertex;
-}
-\0";
-
-byte[] FRAG_SRC = "#version 120
-uniform sampler2D u_dens;
-uniform sampler2D u_vel;
-uniform vec2      u_res;
-uniform int       u_palette;
-
-void main() {
-    vec2 uv = gl_TexCoord[0].xy;
-
-    float d  = texture2D(u_dens, uv).r;
-    vec2  v  = texture2D(u_vel,  uv).ra - 0.5;
-    float vm = length(v) * 2.0;
-    float t  = clamp(d, 0.0, 1.0);
-
-    // Wide bloom - 8-tap gather at two radii
-    vec2  px   = 1.0 / u_res;
-    float blur = 0.0;
-    blur += texture2D(u_dens, uv + vec2(-px.x,       0.0      )).r;
-    blur += texture2D(u_dens, uv + vec2( px.x,       0.0      )).r;
-    blur += texture2D(u_dens, uv + vec2( 0.0,       -px.y     )).r;
-    blur += texture2D(u_dens, uv + vec2( 0.0,        px.y     )).r;
-    blur += texture2D(u_dens, uv + vec2(-px.x*2.5,  -px.y*2.5 )).r;
-    blur += texture2D(u_dens, uv + vec2( px.x*2.5,  -px.y*2.5 )).r;
-    blur += texture2D(u_dens, uv + vec2(-px.x*2.5,   px.y*2.5 )).r;
-    blur += texture2D(u_dens, uv + vec2( px.x*2.5,   px.y*2.5 )).r;
-    blur *= 0.125;
-    float glow = clamp(blur * 3.0 + vm * t * 0.5, 0.0, 1.0);
-
-    vec3 col = vec3(0.0);
-
-    // 1: Classic plasma - blue/cyan/magenta
-    if (u_palette == 0) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.0));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.4));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.8));
-    }
-    // 2: Fire - black -> red -> orange -> yellow
-    else if (u_palette == 1) {
-        col.r = clamp(t * 3.0,       0.0, 1.0);
-        col.g = clamp(t * 3.0 - 1.0, 0.0, 1.0);
-        col.b = clamp(t * 3.0 - 2.0, 0.0, 1.0);
-    }
-    // 3: Toxic - green/yellow-green
-    else if (u_palette == 2) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.9));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.3));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 1.3));
-    }
-    // 4: Ice - deep blue -> cyan -> white
-    else if (u_palette == 3) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 1.0));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.6));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.1));
-    }
-    // 5: Sunset - purple -> magenta -> orange
-    else if (u_palette == 4) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.1));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.9));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.5));
-    }
-    // 6: Deep ocean - navy -> teal -> seafoam
-    else if (u_palette == 5) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 1.2));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.7));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.2));
-    }
-    // 7: Neon - hot pink -> purple -> electric blue
-    else if (u_palette == 6) {
-        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.2));
-        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 1.1));
-        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.6));
-    }
-    // 8: Gold - brown -> gold -> bright yellow
-    else if (u_palette == 7) {
-        col.r = clamp(t * 2.5,       0.0, 1.0);
-        col.g = clamp(t * 2.5 - 0.4, 0.0, 1.0);
-        col.b = clamp(t * 3.0 - 2.2, 0.0, 0.3);
-    }
-    // 9: Monochrome - white core with soft halo
-    else if (u_palette == 8) {
-        float lum = t * t * 2.0;
-        col = vec3(clamp(lum, 0.0, 1.0));
-    }
-    // 0: Rainbow - full hue cycle across density
-    else {
-        float h = t * 6.0;
-        float f = clamp(h - floor(h), 0.0, 1.0);
-        if      (h < 1.0) { col = vec3(1.0,     f,       0.0     ); }
-        else if (h < 2.0) { col = vec3(1.0-f,   1.0,     0.0     ); }
-        else if (h < 3.0) { col = vec3(0.0,     1.0,     f       ); }
-        else if (h < 4.0) { col = vec3(0.0,     1.0-f,   1.0     ); }
-        else if (h < 5.0) { col = vec3(f,       0.0,     1.0     ); }
-        else              { col = vec3(1.0,     0.0,     1.0-f   ); }
-        col *= t;
-    }
-
-    // Saturation boost
-    float grey = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(vec3(grey), col, 1.8);
-
-    // Additive glow halo
-    col += col * glow * 1.4;
-
-    // Velocity shimmer
-    col += vec3(0.08, 0.2, 0.4) * vm * d * 0.6;
-
-    col *= t;
-    float alpha = clamp(t * 8.0, 0.0, 1.0);
-    gl_FragColor = vec4(col, alpha);
-}
-\0";
-
 // ============================================================================
-// SYSTEM_INFO for core count
+// CPU core count
 // ============================================================================
 
+#ifdef __WINDOWS__
 struct SYSTEM_INFO_PARTIAL
 {
     u32   dwOemId,
@@ -1981,6 +1934,22 @@ struct SYSTEM_INFO_PARTIAL
           dwAllocationGranularity;
     u16   wProcessorLevel,
           wProcessorRevision;
+};
+#endif;
+
+def cpu_count() -> int
+{
+    int n = 1;
+    #ifdef __WINDOWS__
+    SYSTEM_INFO_PARTIAL sysinfo;
+    GetSystemInfo((void*)@sysinfo);
+    n = (int)sysinfo.dwNumberOfProcessors;
+    #endif;
+    #ifdef __LINUX__
+    n = (int)sysconf(84);   // _SC_NPROCESSORS_ONLN
+    #endif;
+    if (n < 1) { n = 1; };
+    return n;
 };
 
 // ============================================================================
@@ -2164,7 +2133,930 @@ def font_glyph(int c) -> u32*
 // px, py = top-left pixel origin of text; scale = pixel size of each font dot
 // inv_w, inv_h = 2.0/screen_w and 2.0/screen_h for NDC conversion
 def draw_text(byte* str, int px, int py, int scale, float inv_w, float inv_h) -> void # effect {*IO.GPU};
-def draw_text(byte* str, int px, int py, int scale, float inv_w, float inv_h) -> void
+def draw_text(byte* str, int px, int py, int scale) -> void
+{
+    int   ci,       // character index in string
+          cx,       // current x pixel cursor
+          col,      // column within glyph (0..4)
+          row,      // row within glyph (0..6)
+          mask,
+          qx0, qy0,
+          c;
+    u32*  glyph;
+
+    ci = 0;
+    cx = px;
+
+    while (true)
+    {
+        c = (int)str[ci];
+        if (c == 0) { break; };
+
+        // Uppercase fold
+        if (c >= 97 & c <= 122) { c = c - 32; };
+
+        glyph = font_glyph(c);
+
+        col = 0;
+        while (col < 5)
+        {
+            mask = (int)glyph[col];
+            row  = 0;
+            while (row < 7)
+            {
+                if (mask & (1 << row))
+                {
+                    qx0 = cx + col * scale;
+                    qy0 = py + (6 - row) * scale;
+                    sw_fill_up(qx0, qy0, qx0 + scale, qy0 + scale);
+                };
+                row++;
+            };
+            col++;
+        };
+
+        cx  = cx + (5 + 1) * scale;  // 5 columns + 1 gap
+        ci++;
+    };
+
+    return;
+};
+
+// Measure text width in pixels for centering
+def text_width(byte* str, int scale) -> int # effect {Pure};
+def text_width(byte* str, int scale) -> int
+{
+    int ci, c, count;
+    ci    = 0;
+    count = 0;
+    while (true)
+    {
+        c = (int)str[ci];
+        if (c == 0) { break; };
+        count++;
+        ci++;
+    };
+    // Each char: 5 columns + 1 gap, last char has no trailing gap
+    if (count == 0) { return 0; };
+    return count * 6 * scale - scale;
+};
+
+// Draw a parallelogram button at pixel center (cx, cy) with given half-width and half-height
+// highlight = 1 draws with a lighter fill (hover/active feel for dialog boxes)
+def draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, float inv_w, float inv_h) -> void # effect {*IO.GPU};
+def draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant) -> void
+{
+    int   bx0, bx1, tx0, tx1, by0, ty0;
+    float sh_x, sh_y;
+
+    bx0 = cx - half_w - slant;
+    bx1 = cx + half_w - slant;
+    tx0 = cx - half_w + slant;
+    tx1 = cx + half_w + slant;
+    by0 = cy - half_h;
+    ty0 = cy + half_h;
+
+    g_additive = false;
+
+    // Drop shadow
+    sh_x = 0.006 * (float)g_gw.width  / 2.0;
+    sh_y = 0.01  * (float)g_gw.height / 2.0;
+    sw_quad_grad((float)bx0 + sh_x, (float)by0 - sh_y, (float)bx1 + sh_x, (float)by0 - sh_y,
+                 (float)tx1 + sh_x, (float)ty0 - sh_y, (float)tx0 + sh_x, (float)ty0 - sh_y,
+                 0.0, 0.0, 0.0, 0.5,
+                 0.0, 0.0, 0.0, 0.5);
+
+    // Fill - gradient dark navy bottom to slightly lighter top
+    sw_quad_grad((float)bx0, (float)by0, (float)bx1, (float)by0,
+                 (float)tx1, (float)ty0, (float)tx0, (float)ty0,
+                 0.04, 0.07, 0.18, 0.92,
+                 0.08, 0.14, 0.34, 0.92);
+
+    // Top highlight bevel
+    sw_color(0.4, 0.7, 1.0, 0.8);
+    sw_line_up(tx0, ty0, tx1, ty0, 2);
+
+    // Bottom shadow line
+    sw_color(0.0, 0.05, 0.15, 0.9);
+    sw_line_up(bx0, by0, bx1, by0, 1);
+
+    // Outer border
+    sw_color(0.25, 0.55, 1.0, 0.95);
+    sw_line_up(bx0, by0, bx1, by0, 2);
+    sw_line_up(bx1, by0, tx1, ty0, 2);
+    sw_line_up(tx1, ty0, tx0, ty0, 2);
+    sw_line_up(tx0, ty0, bx0, by0, 2);
+
+    return;
+};
+
+def draw_gui(int w, int h) -> void # effect {*IO.GPU};
+def draw_gui(int w, int h) -> void
+{
+    int   cx, cy, tw, tx, ty, scale;
+    byte* labelx;
+
+    cx    = w / 2;
+    cy    = h / 2;
+    scale = 2;
+
+    g_additive = false;
+
+    // Start Game button
+    draw_parallelogram_btn(cx, cy, BTN_W / 2, BTN_H / 2, BTN_SLANT);
+
+    // Button label - centered inside button
+    labelx = "START GAME\0";
+    tw    = text_width(labelx, scale);
+    tx    = cx - tw / 2;
+    // Bottom-origin coords: center text vertically around cy
+    ty    = cy - (7 * scale) / 2;
+    sw_color(0.75, 0.88, 1.0, 1.0);
+    draw_text(labelx, tx, ty, scale);
+
+    return;
+};
+
+def draw_quit_dialog(int w, int h) -> void # effect {*IO.GPU};
+def draw_quit_dialog(int w, int h) -> void
+{
+    int   cx, cy,
+          panel_w, panel_h,
+          px0, py0, px1, py1,
+          tw, tx, ty, scale;
+    byte* msg_str;
+    byte* yes_str;
+    byte* no_str;
+
+    cx      = w / 2;
+    cy      = h / 2;
+    panel_w = 420;
+    panel_h = 160;
+    scale   = 2;
+
+    px0 = cx - panel_w / 2;
+    py0 = cy - panel_h / 2;
+    px1 = cx + panel_w / 2;
+    py1 = cy + panel_h / 2;
+
+    g_additive = false;
+
+    // Dark panel fill
+    sw_color(0.02, 0.04, 0.12, 0.96);
+    sw_fill_up(px0, py0, px1, py1);
+
+    // Panel border
+    sw_color(0.25, 0.55, 1.0, 0.95);
+    sw_line_up(px0, py0, px1, py0, 2);
+    sw_line_up(px1, py0, px1, py1, 2);
+    sw_line_up(px1, py1, px0, py1, 2);
+    sw_line_up(px0, py1, px0, py0, 2);
+
+    // Top highlight line on panel
+    sw_color(0.4, 0.7, 1.0, 0.6);
+    sw_line_up(px0, py1, px1, py1, 1);
+
+    // Message text - "ARE YOU SURE YOU WANT TO QUIT?"
+    msg_str = "ARE YOU SURE YOU WANT TO QUIT?\0";
+    tw      = text_width(msg_str, scale);
+    tx      = cx - tw / 2;
+    // Upper portion of panel in bottom-origin coords
+    ty      = cy + panel_h / 2 - 36;
+    sw_color(0.85, 0.92, 1.0, 1.0);
+    draw_text(msg_str, tx, ty, scale);
+
+    // Yes button - left of center, lower portion of panel
+    yes_str = "YES\0";
+    draw_parallelogram_btn(cx - 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2);
+    tw = text_width(yes_str, scale);
+    tx = (cx - 80) - tw / 2;
+    ty = (cy - 50) - (7 * scale) / 2;
+    sw_color(0.75, 0.88, 1.0, 1.0);
+    draw_text(yes_str, tx, ty, scale);
+
+    // No button - right of center, lower portion of panel
+    no_str = "NO\0";
+    draw_parallelogram_btn(cx + 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2);
+    tw = text_width(no_str, scale);
+    tx = (cx + 80) - tw / 2;
+    ty = (cy - 50) - (7 * scale) / 2;
+    sw_color(0.75, 0.88, 1.0, 1.0);
+    draw_text(no_str, tx, ty, scale);
+
+    return;
+};
+
+
+// ============================================================================
+// FLUID RENDERER - the density and velocity fields shaded per cell, then
+// bilinearly scaled to the window (software replacement of the GL shader)
+// ============================================================================
+
+heap float* g_cell = (float*)0;      // SIM_W * SIM_H * 3, final color already scaled by alpha
+heap int*   g_xi   = (int*)0;        // per window column: left cell
+heap float* g_xf   = (float*)0;      // per window column: blend factor
+global int  g_xcap = 0;
+
+def clamp01(float v) -> float # effect {Pure};
+def clamp01(float v) -> float
+{
+    if (v < 0.0) { return 0.0; };
+    if (v > 1.0) { return 1.0; };
+    return v;
+};
+
+// Bilinear density sample in cell coordinates, clamped to the edge
+def dens_sample(float fx, float fy) -> float # effect {Pure};
+def dens_sample(float fx, float fy) -> float
+{
+    int   x0, y0, x1, y1;
+    float tx, ty, a, b;
+
+    if (fx < 0.0)               { fx = 0.0;               };
+    if (fy < 0.0)               { fy = 0.0;               };
+    if (fx > (float)(SIM_W - 1)) { fx = (float)(SIM_W - 1); };
+    if (fy > (float)(SIM_H - 1)) { fy = (float)(SIM_H - 1); };
+
+    x0 = (int)fx;
+    y0 = (int)fy;
+    x1 = x0 + 1;
+    y1 = y0 + 1;
+    if (x1 > SIM_W - 1) { x1 = SIM_W - 1; };
+    if (y1 > SIM_H - 1) { y1 = SIM_H - 1; };
+    tx = fx - (float)x0;
+    ty = fy - (float)y0;
+
+    a = g_dens_tex[y0 * SIM_W + x0] * (1.0 - tx) + g_dens_tex[y0 * SIM_W + x1] * tx;
+    b = g_dens_tex[y1 * SIM_W + x0] * (1.0 - tx) + g_dens_tex[y1 * SIM_W + x1] * tx;
+    return a * (1.0 - ty) + b * ty;
+};
+
+// Palette color for density t into out[0..2]
+def palette_color(int pal, float t, float* out) -> void # effect {*Mem.Write};
+def palette_color(int pal, float t, float* out) -> void
+{
+    float r, g, b, lum, h, f;
+
+    r = 0.0;
+    g = 0.0;
+    b = 0.0;
+
+    if (pal == 0)
+    {
+        // Classic plasma - blue/cyan/magenta
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.0));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.4));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.8));
+    }
+    else if (pal == 1)
+    {
+        // Fire - black -> red -> orange -> yellow
+        r = clamp01(t * 3.0);
+        g = clamp01(t * 3.0 - 1.0);
+        b = clamp01(t * 3.0 - 2.0);
+    }
+    else if (pal == 2)
+    {
+        // Toxic - green/yellow-green
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.9));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.3));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 1.3));
+    }
+    else if (pal == 3)
+    {
+        // Ice - deep blue -> cyan -> white
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 1.0));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.6));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.1));
+    }
+    else if (pal == 4)
+    {
+        // Sunset - purple -> magenta -> orange
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.1));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.9));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.5));
+    }
+    else if (pal == 5)
+    {
+        // Deep ocean - navy -> teal -> seafoam
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 1.2));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.7));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.2));
+    }
+    else if (pal == 6)
+    {
+        // Neon - hot pink -> purple -> electric blue
+        r = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.2));
+        g = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 1.1));
+        b = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.6));
+    }
+    else if (pal == 7)
+    {
+        // Gold - brown -> gold -> bright yellow
+        r = clamp01(t * 2.5);
+        g = clamp01(t * 2.5 - 0.4);
+        b = t * 3.0 - 2.2;
+        if (b < 0.0) { b = 0.0; };
+        if (b > 0.3) { b = 0.3; };
+    }
+    else if (pal == 8)
+    {
+        // Monochrome - white core with soft halo
+        lum = clamp01(t * t * 2.0);
+        r = lum;
+        g = lum;
+        b = lum;
+    }
+    else
+    {
+        // Rainbow - full hue cycle across density
+        h = t * 6.0;
+        f = clamp01(h - (float)((int)h));
+        if      (h < 1.0) { r = 1.0;     g = f;       b = 0.0;     }
+        else if (h < 2.0) { r = 1.0 - f; g = 1.0;     b = 0.0;     }
+        else if (h < 3.0) { r = 0.0;     g = 1.0;     b = f;       }
+        else if (h < 4.0) { r = 0.0;     g = 1.0 - f; b = 1.0;     }
+        else if (h < 5.0) { r = f;       g = 0.0;     b = 1.0;     }
+        else              { r = 1.0;     g = 0.0;     b = 1.0 - f; };
+        r = r * t;
+        g = g * t;
+        b = b * t;
+    };
+
+    out[0] = r;
+    out[1] = g;
+    out[2] = b;
+    return;
+};
+
+// The fragment shader for one cell: palette, bloom, saturation, shimmer, alpha
+def shade_cell(int i, int j, float* pal) -> void # effect {*Mem.Write};
+def shade_cell(int i, int j, float* pal) -> void
+{
+    int   idx, o;
+    float d, vx, vy, vm, t, blur, glow, fi, fj, r, g, b, grey, alpha;
+
+    idx = j * SIM_W + i;
+    o   = idx * 3;
+    d   = g_dens_tex[idx];
+
+    if (d <= 0.0)
+    {
+        g_cell[o]     = 0.0;
+        g_cell[o + 1] = 0.0;
+        g_cell[o + 2] = 0.0;
+        return;
+    };
+
+    vx = g_vel_tex[idx * 2]     - 0.5;
+    vy = g_vel_tex[idx * 2 + 1] - 0.5;
+    vm = sqrt(vx * vx + vy * vy) * 2.0;
+    t  = clamp01(d);
+
+    // Wide bloom - 8-tap gather at two radii
+    fi   = (float)i;
+    fj   = (float)j;
+    blur = dens_sample(fi - 1.0, fj) + dens_sample(fi + 1.0, fj)
+         + dens_sample(fi, fj - 1.0) + dens_sample(fi, fj + 1.0)
+         + dens_sample(fi - 2.5, fj - 2.5) + dens_sample(fi + 2.5, fj - 2.5)
+         + dens_sample(fi - 2.5, fj + 2.5) + dens_sample(fi + 2.5, fj + 2.5);
+    blur = blur * 0.125;
+    glow = clamp01(blur * 3.0 + vm * t * 0.5);
+
+    palette_color(g_palette, t, pal);
+    r = pal[0];
+    g = pal[1];
+    b = pal[2];
+
+    // Saturation boost
+    grey = r * 0.299 + g * 0.587 + b * 0.114;
+    r = grey + (r - grey) * 1.8;
+    g = grey + (g - grey) * 1.8;
+    b = grey + (b - grey) * 1.8;
+
+    // Additive glow halo
+    r = r + r * glow * 1.4;
+    g = g + g * glow * 1.4;
+    b = b + b * glow * 1.4;
+
+    // Velocity shimmer
+    r = r + 0.08 * vm * d * 0.6;
+    g = g + 0.2  * vm * d * 0.6;
+    b = b + 0.4  * vm * d * 0.6;
+
+    r = r * t;
+    g = g * t;
+    b = b * t;
+    alpha = clamp01(t * 8.0);
+
+    // Blended over the black clear color
+    g_cell[o]     = clamp01(r) * alpha;
+    g_cell[o + 1] = clamp01(g) * alpha;
+    g_cell[o + 2] = clamp01(b) * alpha;
+    return;
+};
+
+def shade_band(int j0, int j1) -> void
+{
+    int   i, j;
+    float[3] pal;
+    for (j = j0; j < j1; j++)
+    {
+        for (i = 0; i < SIM_W; i++)
+        {
+            shade_cell(i, j, @pal[0]);
+        };
+    };
+    return;
+};
+
+def upscale_band(int r0, int r1, int w, int h, u32* px) -> void
+{
+    int   x, y, row, yi, xi, o00, o10, o01, o11;
+    float sy, fx, fy, r, g, b, w00, w10, w01, w11;
+    u32   pr, pg, pb;
+
+    for (row = r0; row < r1; row++)
+    {
+        // Window row 0 is the top, the field row 0 is the bottom
+        y  = h - 1 - row;
+        sy = ((float)y + 0.5) * (float)SIM_H / (float)h - 0.5;
+        if (sy < 0.0) { sy = 0.0; };
+        if (sy > (float)(SIM_H - 1)) { sy = (float)(SIM_H - 1); };
+        yi = (int)sy;
+        if (yi > SIM_H - 2) { yi = SIM_H - 2; };
+        fy = sy - (float)yi;
+
+        for (x = 0; x < w; x++)
+        {
+            xi  = g_xi[x];
+            fx  = g_xf[x];
+            o00 = (yi * SIM_W + xi) * 3;
+            o10 = o00 + 3;
+            o01 = o00 + SIM_W * 3;
+            o11 = o01 + 3;
+            w00 = (1.0 - fx) * (1.0 - fy);
+            w10 = fx * (1.0 - fy);
+            w01 = (1.0 - fx) * fy;
+            w11 = fx * fy;
+
+            r = g_cell[o00]     * w00 + g_cell[o10]     * w10 + g_cell[o01]     * w01 + g_cell[o11]     * w11;
+            g = g_cell[o00 + 1] * w00 + g_cell[o10 + 1] * w10 + g_cell[o01 + 1] * w01 + g_cell[o11 + 1] * w11;
+            b = g_cell[o00 + 2] * w00 + g_cell[o10 + 2] * w10 + g_cell[o01 + 2] * w01 + g_cell[o11 + 2] * w11;
+
+            pr = (u32)(r * 255.0 + 0.5);
+            pg = (u32)(g * 255.0 + 0.5);
+            pb = (u32)(b * 255.0 + 0.5);
+            px[row * w + x] = (pr << 16) `| (pg << 8) `| pb;
+        };
+    };
+    return;
+};
+
+// Runs a render phase over all worker threads and waits for completion
+def dispatch_render(int phase, int w, int h, u32* px) -> void
+{
+    int t, per;
+
+    per = h / g_num_threads;
+    if (per < 1) { per = 1; };
+    for (t = 0; t < g_num_threads; t++)
+    {
+        g_slices[t].phase = phase;
+        g_slices[t].rw    = w;
+        g_slices[t].rh    = h;
+        g_slices[t].rpx   = px;
+        g_slices[t].rr0   = t * per;
+        g_slices[t].rr1   = (t == g_num_threads - 1) ? h : (t + 1) * per;
+        if (g_slices[t].rr0 > h) { g_slices[t].rr0 = h; };
+    };
+    store_fence();
+    for (t = 0; t < g_num_threads; t++) { semaphore_post(@g_slices[t].wake); };
+    for (t = 0; t < g_num_threads; t++) { semaphore_wait(@g_done_sem); };
+    return;
+};
+
+def render_fluid(GuiWindow* win) -> void # effect {*Mem.Write};
+def render_fluid(GuiWindow* win) -> void
+{
+    int   x, w, h, xi;
+    float sx;
+
+    w = win.width;
+    h = win.height;
+
+    dispatch_render(PHASE_SHADE, w, SIM_H, win.pixels);
+
+    // Column table, rebuilt each frame since the window can change size
+    if (w > g_xcap)
+    {
+        if (g_xi != (int*)0)   { ffree((u64)g_xi); };
+        if (g_xf != (float*)0) { ffree((u64)g_xf); };
+        g_xi   = (int*)fmalloc((size_t)(w * 4));
+        g_xf   = (float*)fmalloc((size_t)(w * 4));
+        g_xcap = w;
+    };
+    for (x = 0; x < w; x++)
+    {
+        sx = ((float)x + 0.5) * (float)SIM_W / (float)w - 0.5;
+        if (sx < 0.0) { sx = 0.0; };
+        if (sx > (float)(SIM_W - 1)) { sx = (float)(SIM_W - 1); };
+        xi = (int)sx;
+        if (xi > SIM_W - 2) { xi = SIM_W - 2; };
+        g_xi[x] = xi;
+        g_xf[x] = sx - (float)xi;
+    };
+
+    dispatch_render(PHASE_UPSCALE, w, h, win.pixels);
+    return;
+};
+
+#ifdef __WINDOWS__
+// ============================================================================
+// GPU RENDERING (OpenGL through GuiWindow.init_gl), Windows
+// ============================================================================
+
+using OpenGL;
+
+def gl_draw_paddle(int w, int h, int grid_x, int center_gy) -> void;
+def gl_draw_ball(int w, int h) -> void;
+def gl_draw_hud(int w, int h) -> void;
+def gl_draw_text(byte* str, int px, int py, int scale, float inv_w, float inv_h) -> void;
+def gl_draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, float inv_w, float inv_h) -> void;
+def gl_draw_gui(int w, int h) -> void;
+def gl_draw_quit_dialog(int w, int h) -> void;
+
+int g_tex_dens, g_tex_vel, g_gl_vert, g_gl_frag, g_gl_prog,
+    g_u_dens, g_u_vel, g_u_res, g_u_palette;
+
+byte[] VERT_SRC = "#version 120
+void main() {
+    gl_TexCoord[0] = gl_MultiTexCoord0;
+    gl_Position    = gl_Vertex;
+}
+\0";
+
+byte[] FRAG_SRC = "#version 120
+uniform sampler2D u_dens;
+uniform sampler2D u_vel;
+uniform vec2      u_res;
+uniform int       u_palette;
+
+void main() {
+    vec2 uv = gl_TexCoord[0].xy;
+
+    float d  = texture2D(u_dens, uv).r;
+    vec2  v  = texture2D(u_vel,  uv).ra - 0.5;
+    float vm = length(v) * 2.0;
+    float t  = clamp(d, 0.0, 1.0);
+
+    // Wide bloom - 8-tap gather at two radii
+    vec2  px   = 1.0 / u_res;
+    float blur = 0.0;
+    blur += texture2D(u_dens, uv + vec2(-px.x,       0.0      )).r;
+    blur += texture2D(u_dens, uv + vec2( px.x,       0.0      )).r;
+    blur += texture2D(u_dens, uv + vec2( 0.0,       -px.y     )).r;
+    blur += texture2D(u_dens, uv + vec2( 0.0,        px.y     )).r;
+    blur += texture2D(u_dens, uv + vec2(-px.x*2.5,  -px.y*2.5 )).r;
+    blur += texture2D(u_dens, uv + vec2( px.x*2.5,  -px.y*2.5 )).r;
+    blur += texture2D(u_dens, uv + vec2(-px.x*2.5,   px.y*2.5 )).r;
+    blur += texture2D(u_dens, uv + vec2( px.x*2.5,   px.y*2.5 )).r;
+    blur *= 0.125;
+    float glow = clamp(blur * 3.0 + vm * t * 0.5, 0.0, 1.0);
+
+    vec3 col = vec3(0.0);
+
+    // 1: Classic plasma - blue/cyan/magenta
+    if (u_palette == 0) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.0));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.4));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.8));
+    }
+    // 2: Fire - black -> red -> orange -> yellow
+    else if (u_palette == 1) {
+        col.r = clamp(t * 3.0,       0.0, 1.0);
+        col.g = clamp(t * 3.0 - 1.0, 0.0, 1.0);
+        col.b = clamp(t * 3.0 - 2.0, 0.0, 1.0);
+    }
+    // 3: Toxic - green/yellow-green
+    else if (u_palette == 2) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.9));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 0.3));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.2 + 1.3));
+    }
+    // 4: Ice - deep blue -> cyan -> white
+    else if (u_palette == 3) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 1.0));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.6));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.0 + 0.1));
+    }
+    // 5: Sunset - purple -> magenta -> orange
+    else if (u_palette == 4) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.1));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.9));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.1 + 0.5));
+    }
+    // 6: Deep ocean - navy -> teal -> seafoam
+    else if (u_palette == 5) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 1.2));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.7));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.3 + 0.2));
+    }
+    // 7: Neon - hot pink -> purple -> electric blue
+    else if (u_palette == 6) {
+        col.r = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.2));
+        col.g = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 1.1));
+        col.b = 0.5 - 0.5 * cos(3.14159 * (t * 1.4 + 0.6));
+    }
+    // 8: Gold - brown -> gold -> bright yellow
+    else if (u_palette == 7) {
+        col.r = clamp(t * 2.5,       0.0, 1.0);
+        col.g = clamp(t * 2.5 - 0.4, 0.0, 1.0);
+        col.b = clamp(t * 3.0 - 2.2, 0.0, 0.3);
+    }
+    // 9: Monochrome - white core with soft halo
+    else if (u_palette == 8) {
+        float lum = t * t * 2.0;
+        col = vec3(clamp(lum, 0.0, 1.0));
+    }
+    // 0: Rainbow - full hue cycle across density
+    else {
+        float h = t * 6.0;
+        float f = clamp(h - floor(h), 0.0, 1.0);
+        if      (h < 1.0) { col = vec3(1.0,     f,       0.0     ); }
+        else if (h < 2.0) { col = vec3(1.0-f,   1.0,     0.0     ); }
+        else if (h < 3.0) { col = vec3(0.0,     1.0,     f       ); }
+        else if (h < 4.0) { col = vec3(0.0,     1.0-f,   1.0     ); }
+        else if (h < 5.0) { col = vec3(f,       0.0,     1.0     ); }
+        else              { col = vec3(1.0,     0.0,     1.0-f   ); }
+        col *= t;
+    }
+
+    // Saturation boost
+    float grey = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(grey), col, 1.8);
+
+    // Additive glow halo
+    col += col * glow * 1.4;
+
+    // Velocity shimmer
+    col += vec3(0.08, 0.2, 0.4) * vm * d * 0.6;
+
+    col *= t;
+    float alpha = clamp(t * 8.0, 0.0, 1.0);
+    gl_FragColor = vec4(col, alpha);
+}
+\0";
+
+def gl_draw_paddle(int w, int h, int grid_x, int center_gy) -> void
+{
+    int   cols, rows,
+          ci, ri,
+          cx_px, cy_px,
+          paddle_left_px, paddle_bot_px, paddle_top_px,
+          paddle_w_px, paddle_h_px,
+          seg, num_seg;
+    float inv_w, inv_h,
+          cell_w, cell_h,
+          radius,
+          ox, oy,
+          fx, fy,
+          angle, step,
+          ndcx, ndcy;
+
+    cols    = 5;
+    rows    = 20;
+    num_seg = 16;
+
+    inv_w = 2.0 / (float)w;
+    inv_h = 2.0 / (float)h;
+
+    paddle_left_px = grid_x         * w / SIM_W;
+    paddle_bot_px  = (center_gy - PADDLE_HALF_H) * h / SIM_H;
+    paddle_top_px  = (center_gy + PADDLE_HALF_H) * h / SIM_H;
+    paddle_w_px    = (grid_x + 2)   * w / SIM_W - paddle_left_px;
+    paddle_h_px    = paddle_top_px - paddle_bot_px;
+
+    cell_w  = (float)paddle_w_px / (float)cols;
+    cell_h  = (float)paddle_h_px / (float)rows;
+    radius  = 5.0;
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    step = 6.28318530718 / (float)num_seg;
+
+    ci = 0;
+    while (ci < cols)
+    {
+        ri = 0;
+        while (ri < rows)
+        {
+            cx_px = paddle_left_px + (int)((float)ci * cell_w + cell_w * 0.5);
+            cy_px = paddle_bot_px  + (int)((float)ri * cell_h + cell_h * 0.5);
+
+            ndcx = (float)cx_px * inv_w - 1.0;
+            ndcy = (float)cy_px * inv_h - 1.0;
+
+            ox = radius * inv_w;
+            oy = radius * inv_h;
+
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4f(0.6, 0.85, 1.0, 0.2);
+            glVertex2f(ndcx, ndcy);
+            glColor4f(0.3, 0.6, 1.0, 0.2);
+            seg = 0;
+            while (seg <= num_seg)
+            {
+                angle = (float)seg * step;
+                fx    = ndcx + ox * cos(angle);
+                fy    = ndcy + oy * sin(angle);
+                glVertex2f(fx, fy);
+                seg++;
+            };
+            glEnd();
+
+            ri++;
+        };
+        ci++;
+    };
+
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+
+    return;
+};
+
+def gl_draw_ball(int w, int h) -> void
+{
+    int   seg, num_seg;
+    float inv_w, inv_h,
+          ndcx, ndcy,
+          ox, oy,
+          box, boy,
+          angle, step_b,
+          fx, fy,
+          radius, border;
+
+    num_seg = 32;
+    radius  = BALL_RADIUS;
+    border  = 4.0;
+    inv_w   = 2.0 / (float)w;
+    inv_h   = 2.0 / (float)h;
+
+    ndcx = g_ball_x * inv_w - 1.0;
+    ndcy = g_ball_y * inv_h - 1.0;
+
+    // Outer radius (ball + border) in NDC
+    ox = (radius + border) * inv_w;
+    oy = (radius + border) * inv_h;
+
+    // Inner radius (black fill) in NDC
+    box = radius * inv_w;
+    boy = radius * inv_h;
+
+    step_b = 6.28318530718 / (float)num_seg;
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+
+    // White border circle (drawn first, slightly larger)
+    glBegin(GL_TRIANGLE_FAN);
+    glColor3f(1.0, 1.0, 1.0);
+    glVertex2f(ndcx, ndcy);
+    seg = 0;
+    while (seg <= num_seg)
+    {
+        angle = (float)seg * step_b;
+        fx    = ndcx + ox * cos(angle);
+        fy    = ndcy + oy * sin(angle);
+        glVertex2f(fx, fy);
+        seg++;
+    };
+    glEnd();
+
+    // Black fill circle (drawn on top, radius only)
+    glBegin(GL_TRIANGLE_FAN);
+    glColor3f(0.0, 0.0, 0.0);
+    glVertex2f(ndcx, ndcy);
+    seg = 0;
+    while (seg <= num_seg)
+    {
+        angle = (float)seg * step_b;
+        fx    = ndcx + box * cos(angle);
+        fy    = ndcy + boy * sin(angle);
+        glVertex2f(fx, fy);
+        seg++;
+    };
+    glEnd();
+
+    glEnable(GL_TEXTURE_2D);
+
+    return;
+};
+
+def gl_draw_hud(int w, int h) -> void
+{
+    int   scale, tx, ty, tw, lv, li,
+          hx, hy, hs;
+    float inv_w, inv_h,
+          fx0, fy0, fx1, fy1,
+          fxm, fyt;
+    byte[16] num_buf;
+
+    scale = 2;
+    inv_w = 2.0 / (float)w;
+    inv_h = 2.0 / (float)h;
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // ---- LEVEL (top center) ----
+    // Label "LEVEL" then number, centered at top
+    int_to_str(g_level, @num_buf[0]);
+    tw = text_width("LEVEL \0", scale) + text_width(@num_buf[0], scale);
+    tx = w / 2 - tw / 2;
+    ty = h - 28;   // near top in bottom-origin coords
+
+    glColor4f(0.6, 0.8, 1.0, 0.9);
+    gl_draw_text("LEVEL \0", tx, ty, scale, inv_w, inv_h);
+    tx = tx + text_width("LEVEL \0", scale);
+    glColor4f(1.0, 1.0, 1.0, 1.0);
+    gl_draw_text(@num_buf[0], tx, ty, scale, inv_w, inv_h);
+
+    // ---- LIVES (top left) ----
+    // Draw heart diamonds then "LIVES" label
+    hs = 7;   // half-size of diamond in pixels
+
+    glColor4f(1.0, 0.28, 0.28, 0.95);
+
+    li = 0;
+    while (li < g_lives)
+    {
+        hx = 20 + li * (hs * 2 + 6);
+        hy = h - 22;   // bottom-origin y near top
+
+        // Diamond: 4 triangles from center
+        fxm = (float)hx * inv_w - 1.0;
+        fyt = (float)hy * inv_h - 1.0;
+        fx0 = (float)(hx - hs) * inv_w - 1.0;
+        fx1 = (float)(hx + hs) * inv_w - 1.0;
+        fy0 = (float)(hy - hs) * inv_h - 1.0;
+        fy1 = (float)(hy + hs) * inv_h - 1.0;
+
+        glBegin(GL_QUADS);
+        glVertex2f(fxm, fy1);   // top
+        glVertex2f(fx1, fyt);   // right
+        glVertex2f(fxm, fy0);   // bottom
+        glVertex2f(fx0, fyt);   // left
+        glEnd();
+
+        li++;
+    };
+
+    // Draw empty outlines for lost lives
+    glColor4f(0.5, 0.15, 0.15, 0.6);
+    lv = 3;
+    while (li < lv)
+    {
+        hx = 20 + li * (hs * 2 + 6);
+        hy = h - 22;
+
+        fxm = (float)hx * inv_w - 1.0;
+        fyt = (float)hy * inv_h - 1.0;
+        fx0 = (float)(hx - hs) * inv_w - 1.0;
+        fx1 = (float)(hx + hs) * inv_w - 1.0;
+        fy0 = (float)(hy - hs) * inv_h - 1.0;
+        fy1 = (float)(hy + hs) * inv_h - 1.0;
+
+        glLineWidth(1.0);
+        glBegin(GL_LINE_LOOP);
+        glVertex2f(fxm, fy1);
+        glVertex2f(fx1, fyt);
+        glVertex2f(fxm, fy0);
+        glVertex2f(fx0, fyt);
+        glEnd();
+
+        li++;
+    };
+
+    // "LIVES" label under diamonds
+    glColor4f(0.6, 0.8, 1.0, 0.7);
+    ty = h - 44;
+    gl_draw_text("LIVES\0", 8, ty, scale, inv_w, inv_h);
+
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+
+    return;
+};
+
+def gl_draw_text(byte* str, int px, int py, int scale, float inv_w, float inv_h) -> void
 {
     int   ci,       // character index in string
           cx,       // current x pixel cursor
@@ -2229,29 +3121,7 @@ def draw_text(byte* str, int px, int py, int scale, float inv_w, float inv_h) ->
     return;
 };
 
-// Measure text width in pixels for centering
-def text_width(byte* str, int scale) -> int # effect {Pure};
-def text_width(byte* str, int scale) -> int
-{
-    int ci, c, count;
-    ci    = 0;
-    count = 0;
-    while (true)
-    {
-        c = (int)str[ci];
-        if (c == 0) { break; };
-        count++;
-        ci++;
-    };
-    // Each char: 5 columns + 1 gap, last char has no trailing gap
-    if (count == 0) { return 0; };
-    return count * 6 * scale - scale;
-};
-
-// Draw a parallelogram button at pixel center (cx, cy) with given half-width and half-height
-// highlight = 1 draws with a lighter fill (hover/active feel for dialog boxes)
-def draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, float inv_w, float inv_h) -> void # effect {*IO.GPU};
-def draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, float inv_w, float inv_h) -> void
+def gl_draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, float inv_w, float inv_h) -> void
 {
     int   bx0, bx1, tx0, tx1, by0, ty0;
     float ny_bot, ny_top;
@@ -2315,8 +3185,7 @@ def draw_parallelogram_btn(int cx, int cy, int half_w, int half_h, int slant, fl
     return;
 };
 
-def draw_gui(int w, int h) -> void # effect {*IO.GPU};
-def draw_gui(int w, int h) -> void
+def gl_draw_gui(int w, int h) -> void
 {
     int   cx, cy, tw, tx, ty, scale;
     float inv_w, inv_h;
@@ -2334,7 +3203,7 @@ def draw_gui(int w, int h) -> void
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // Start Game button
-    draw_parallelogram_btn(cx, cy, BTN_W / 2, BTN_H / 2, BTN_SLANT, inv_w, inv_h);
+    gl_draw_parallelogram_btn(cx, cy, BTN_W / 2, BTN_H / 2, BTN_SLANT, inv_w, inv_h);
 
     // Button labelx - centered inside button
     labelx = "START GAME\0";
@@ -2343,7 +3212,7 @@ def draw_gui(int w, int h) -> void
     // Bottom-origin coords: center text vertically around cy
     ty    = cy - (7 * scale) / 2;
     glColor4f(0.75, 0.88, 1.0, 1.0);
-    draw_text(labelx, tx, ty, scale, inv_w, inv_h);
+    gl_draw_text(labelx, tx, ty, scale, inv_w, inv_h);
 
     glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
@@ -2351,8 +3220,7 @@ def draw_gui(int w, int h) -> void
     return;
 };
 
-def draw_quit_dialog(int w, int h) -> void # effect {*IO.GPU};
-def draw_quit_dialog(int w, int h) -> void
+def gl_draw_quit_dialog(int w, int h) -> void
 {
     int   cx, cy,
           panel_w, panel_h,
@@ -2421,25 +3289,25 @@ def draw_quit_dialog(int w, int h) -> void
     // Upper portion of panel in bottom-origin coords
     ty      = cy + panel_h / 2 - 36;
     glColor4f(0.85, 0.92, 1.0, 1.0);
-    draw_text(msg_str, tx, ty, scale, inv_w, inv_h);
+    gl_draw_text(msg_str, tx, ty, scale, inv_w, inv_h);
 
     // Yes button - left of center, lower portion of panel
     yes_str = "YES\0";
-    draw_parallelogram_btn(cx - 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2, inv_w, inv_h);
+    gl_draw_parallelogram_btn(cx - 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2, inv_w, inv_h);
     tw = text_width(yes_str, scale);
     tx = (cx - 80) - tw / 2;
     ty = (cy - 50) - (7 * scale) / 2;
     glColor4f(0.75, 0.88, 1.0, 1.0);
-    draw_text(yes_str, tx, ty, scale, inv_w, inv_h);
+    gl_draw_text(yes_str, tx, ty, scale, inv_w, inv_h);
 
     // No button - right of center, lower portion of panel
     no_str = "NO\0";
-    draw_parallelogram_btn(cx + 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2, inv_w, inv_h);
+    gl_draw_parallelogram_btn(cx + 80, cy - 50, BTN_W / 4, BTN_H / 2, BTN_SLANT / 2, inv_w, inv_h);
     tw = text_width(no_str, scale);
     tx = (cx + 80) - tw / 2;
     ty = (cy - 50) - (7 * scale) / 2;
     glColor4f(0.75, 0.88, 1.0, 1.0);
-    draw_text(no_str, tx, ty, scale, inv_w, inv_h);
+    gl_draw_text(no_str, tx, ty, scale, inv_w, inv_h);
 
     glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
@@ -2447,119 +3315,9 @@ def draw_quit_dialog(int w, int h) -> void
     return;
 };
 
-
-def main() -> int
+// Binds the GL entry points, builds the fluid shader and the two field textures
+def gl_setup() -> void
 {
-    size_t field_bytes, dens_tex_bytes, vel_tex_bytes;
-    HINSTANCE hInstance;
-    HWND hwnd;
-    HDC  hdc;
-    MSG  msg;
-    bool running;
-    int  tex_dens,
-         tex_vel,
-         vert_sh,
-         frag_sh,
-         prog,
-         u_dens,
-         u_vel, u_res,
-         u_palette,
-         t, i, seg;
-    float px, py,
-          ndcx, ndcy,
-          pr, ox, oy,
-          angle, step_a,
-          dens_val, fx, fy;
-    RECT client_rect;
-    SYSTEM_INFO_PARTIAL sysinfo;
-
-    GetSystemInfo((void*)@sysinfo);
-    g_num_threads = (int)sysinfo.dwNumberOfProcessors;
-    if (g_num_threads < 1)           { g_num_threads = 1;           };
-    if (g_num_threads > MAX_THREADS) { g_num_threads = MAX_THREADS; };
-
-    field_bytes    = (size_t)(SIM_W * SIM_H * 8);
-    dens_tex_bytes = (size_t)(SIM_W * SIM_H * 4);        // 1 float per cell
-    vel_tex_bytes  = (size_t)(SIM_W * SIM_H * 4 * 2);    // 2 floats per cell
-
-    g_dens      = (double*)fmalloc(field_bytes);
-    g_dens_prev = (double*)fmalloc(field_bytes);
-    g_vx        = (double*)fmalloc(field_bytes);
-    g_vy        = (double*)fmalloc(field_bytes);
-    g_vx_prev   = (double*)fmalloc(field_bytes);
-    g_vy_prev   = (double*)fmalloc(field_bytes);
-    g_dens_tex  = (float*)fmalloc(dens_tex_bytes);
-    g_vel_tex   = (float*)fmalloc(vel_tex_bytes);
-    g_part_x    = (float*)fmalloc((size_t)(MAX_PARTICLES * 4));
-    g_part_y    = (float*)fmalloc((size_t)(MAX_PARTICLES * 4));
-    defer ffree((u64)g_dens);
-    defer ffree((u64)g_dens_prev);
-    defer ffree((u64)g_vx);
-    defer ffree((u64)g_vy);
-    defer ffree((u64)g_vx_prev);
-    defer ffree((u64)g_vy_prev);
-    defer ffree((u64)g_dens_tex);
-    defer ffree((u64)g_vel_tex);
-    defer ffree((u64)g_part_x);
-    defer ffree((u64)g_part_y);
-
-    particles_init();
-
-    semaphore_init(@g_work_sem, 0);
-    semaphore_init(@g_done_sem, 0);
-    semaphore_init(@g_work_sem2, 0);
-    semaphore_init(@g_done_sem2, 0);
-
-    g_rows_per_thread = SIM_H / g_num_threads;
-    if (g_rows_per_thread < 1) { g_rows_per_thread = 1; };
-
-    for (t = 0; t < g_num_threads; t++)
-    {
-        g_slices[t].row_start  = t * g_rows_per_thread;
-        g_slices[t].row_end    = (t == g_num_threads - 1) ? SIM_H : (t + 1) * g_rows_per_thread;
-        g_slices[t].phase      = PHASE_DECAY;
-        g_slices2[t].row_start = t * g_rows_per_thread;
-        g_slices2[t].row_end   = (t == g_num_threads - 1) ? SIM_H : (t + 1) * g_rows_per_thread;
-        g_slices2[t].phase     = PHASE_DECAY;
-        thread_create((void*)@worker,  (void*)@g_slices[t],  @g_threads[t]);
-        thread_create((void*)@worker2, (void*)@g_slices2[t], @g_threads2[t]);
-    };
-
-    hInstance = GetModuleHandleA((LPCSTR)0);
-
-    byte* class_name = "FluidSim\0",
-          win_title  = "Fluid Simulation\0";
-
-    WNDCLASSEXA wc;
-    wc.cbSize        = (UINT)(sizeof(WNDCLASSEXA) / 8);
-    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
-    wc.lpfnWndProc   = (WNDPROC)@FluidWindowProc;
-    wc.cbClsExtra    = 0;
-    wc.cbWndExtra    = 0;
-    wc.hInstance     = hInstance;
-    wc.hIcon         = LoadIconA((HINSTANCE)0, (LPCSTR)32512);
-    wc.hCursor       = LoadCursorA((HINSTANCE)0, (LPCSTR)32512);
-    wc.hbrBackground = GetStockObject(BLACK_BRUSH);
-    wc.lpszMenuName  = (LPCSTR)0;
-    wc.lpszClassName = (LPCSTR)class_name;
-    wc.hIconSm       = (HICON)0;
-
-    RegisterClassExA(@wc);
-
-    hwnd = CreateWindowExA(
-        WS_EX_APPWINDOW,
-        (LPCSTR)class_name,
-        (LPCSTR)win_title,
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        100, 100, WIN_W, WIN_H,
-        (HWND)0, (HMENU)0, hInstance, STDLIB_GVP);
-
-    hdc = GetDC(hwnd);
-
-    GLContext gl(hdc);
-    gl.load_extensions();
-
-    // Bind extension function pointers
     glCreateShader_fp       = _glCreateShader;
     glShaderSource_fp       = _glShaderSource;
     glCompileShader_fp      = _glCompileShader;
@@ -2582,19 +3340,19 @@ def main() -> int
     glEnable(GL_TEXTURE_2D);
 
     // Compile and link shader
-    vert_sh = compile_shader(GL_VERTEX_SHADER,   @VERT_SRC[0]);
-    frag_sh = compile_shader(GL_FRAGMENT_SHADER, @FRAG_SRC[0]);
-    prog    = link_program(vert_sh, frag_sh);
+    g_gl_vert = compile_shader(GL_VERTEX_SHADER,   @VERT_SRC[0]);
+    g_gl_frag = compile_shader(GL_FRAGMENT_SHADER, @FRAG_SRC[0]);
+    g_gl_prog    = link_program(g_gl_vert, g_gl_frag);
 
-    u_dens    = glGetUniformLocation_fp(prog, "u_dens\0");
-    u_vel     = glGetUniformLocation_fp(prog, "u_vel\0");
-    u_res     = glGetUniformLocation_fp(prog, "u_res\0");
-    u_palette = glGetUniformLocation_fp(prog, "u_palette\0");
+    g_u_dens    = glGetUniformLocation_fp(g_gl_prog, "u_dens\0");
+    g_u_vel     = glGetUniformLocation_fp(g_gl_prog, "u_vel\0");
+    g_u_res     = glGetUniformLocation_fp(g_gl_prog, "u_res\0");
+    g_u_palette = glGetUniformLocation_fp(g_gl_prog, "u_palette\0");
 
     // Density texture - single channel float
-    tex_dens = 0;
-    glGenTextures(1, @tex_dens);
-    glBindTexture(GL_TEXTURE_2D, tex_dens);
+    g_tex_dens = 0;
+    glGenTextures(1, @g_tex_dens);
+    glBindTexture(GL_TEXTURE_2D, g_tex_dens);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2603,9 +3361,9 @@ def main() -> int
                  (i32)GL_LUMINANCE, (i32)GL_FLOAT, (void*)g_dens_tex);
 
     // Velocity texture - two channel (vx=luminance, vy=alpha)
-    tex_vel = 0;
-    glGenTextures(1, @tex_vel);
-    glBindTexture(GL_TEXTURE_2D, tex_vel);
+    g_tex_vel = 0;
+    glGenTextures(1, @g_tex_vel);
+    glBindTexture(GL_TEXTURE_2D, g_tex_vel);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2613,59 +3371,26 @@ def main() -> int
     glTexImage2D(GL_TEXTURE_2D, 0, (i32)GL_LUMINANCE_ALPHA, SIM_W, SIM_H, 0,
                  (i32)GL_LUMINANCE_ALPHA, (i32)GL_FLOAT, (void*)g_vel_tex);
 
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+    return;
+};
 
-    running = true;
+// One frame on the GPU: fluid shader, particles, paddles, ball, HUD and menus
+def gl_render_frame(int cur_w, int cur_h) -> void
+{
+    int   i, seg;
+    float px, py, ndcx, ndcy, pr, ox, oy, angle, step_a, dens_val, fx, fy;
 
-    while (running)
-    {
-        while (PeekMessageA(@msg, (HWND)0, 0, 0, PM_REMOVE))
-        {
-            if (msg.message == WM_QUIT) { running = false; };
-            TranslateMessage(@msg);
-            DispatchMessageA(@msg);
-        };
-
-        if (!running) { break; };
-
-        GetClientRect(hwnd, @client_rect);
-        cur_w = client_rect.right  - client_rect.left;
-        cur_h = client_rect.bottom - client_rect.top;
-        if (cur_w < 1) { cur_w = 1; };
-        if (cur_h < 1) { cur_h = 1; };
-        glViewport(0, 0, cur_w, cur_h);
-
-        // Simulate
-        if (g_game_state == 1)
-        {
-            if (g_ball_x < 0.0) { ball_reset(cur_w, cur_h); };
-            paddle_update();
-            cpu_paddle_update();
-            ball_update(cur_w, cur_h);
-            vel_step();
-            dens_step();
-            dispatch_decay();
-        };
-
-        // Update particles CPU-side
-        if (g_game_state == 1)
-        {
-            particles_update();
-        };
-
-        // Convert double fields to float upload buffers
-        upload_textures();
+    glViewport(0, 0, cur_w, cur_h);
 
         // Upload density texture to unit 0
         glActiveTexture_fp(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tex_dens);
+        glBindTexture(GL_TEXTURE_2D, g_tex_dens);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_W, SIM_H,
                         (i32)GL_LUMINANCE, (i32)GL_FLOAT, (void*)g_dens_tex);
 
         // Upload velocity texture to unit 1
         glActiveTexture_fp(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, tex_vel);
+        glBindTexture(GL_TEXTURE_2D, g_tex_vel);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_W, SIM_H,
                         (i32)GL_LUMINANCE_ALPHA, (i32)GL_FLOAT, (void*)g_vel_tex);
 
@@ -2675,11 +3400,11 @@ def main() -> int
         // Draw fluid via shader - fullscreen triangle
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glUseProgram_fp(prog);
-        glUniform1i_fp(u_dens, 0);
-        glUniform1i_fp(u_vel,  1);
-        glUniform2f_fp(u_res, (float)SIM_W, (float)SIM_H);
-        glUniform1i_fp(u_palette, g_palette);
+        glUseProgram_fp(g_gl_prog);
+        glUniform1i_fp(g_u_dens, 0);
+        glUniform1i_fp(g_u_vel,  1);
+        glUniform2f_fp(g_u_res, (float)SIM_W, (float)SIM_H);
+        glUniform1i_fp(g_u_palette, g_palette);
 
         glBegin(GL_TRIANGLES);
         glTexCoord2f(0.0, 0.0); glVertex2f(-1.0, -1.0);
@@ -2745,28 +3470,237 @@ def main() -> int
         glDisable(GL_BLEND);
         glEnable(GL_TEXTURE_2D);
 
-        // Draw paddle during gameplay
+    // Draw paddle during gameplay
+    if (g_game_state == 1)
+    {
+        gl_draw_paddle(cur_w, cur_h, PADDLE_X,     g_paddle_gy);
+        gl_draw_paddle(cur_w, cur_h, PADDLE_X_CPU, g_cpu_paddle_gy);
+        gl_draw_ball(cur_w, cur_h);
+        gl_draw_hud(cur_w, cur_h);
+    };
+
+    if (g_game_state == 0) { gl_draw_gui(cur_w, cur_h); };
+    if (g_game_state == 2) { gl_draw_quit_dialog(cur_w, cur_h); };
+    return;
+};
+
+def gl_teardown() -> void
+{
+    glDeleteShader_fp(g_gl_vert);
+    glDeleteShader_fp(g_gl_frag);
+    glDeleteProgram_fp(g_gl_prog);
+    glDeleteTextures(1, @g_tex_dens);
+    glDeleteTextures(1, @g_tex_vel);
+    return;
+};
+#endif;
+
+def sw_render_frame(GuiWindow* win, int cur_w, int cur_h) -> void
+{
+    int   i;
+    float px, py, pr, dens_val, cxp, cyp;
+
+    // Fluid into the framebuffer
+    render_fluid(win);
+
+    // Draw particles as soft glowing discs
+    g_additive = true;
+    for (i = 0; i < MAX_PARTICLES; i++)
+    {
+        px = g_part_x[i];
+        py = g_part_y[i];
+
+        dens_val = (float)g_dens[(int)py * SIM_W + (int)px];
+        if (dens_val > 8.0)
+        {
+            // Scale particle radius with local density, clamped
+            pr = 1.5 + dens_val * 0.018;
+            if (pr > 5.5) { pr = 5.5; };
+
+            cxp = (px / (float)SIM_W) * (float)cur_w;
+            cyp = (py / (float)SIM_H) * (float)cur_h;
+
+            // Bright white core, soft blue-white rim fading to transparent
+            sw_fan(cxp, cyp, pr, pr,
+                   1.0,  1.0,  1.0, 0.55,
+                   0.55, 0.75, 1.0, 0.0);
+        };
+    };
+    g_additive = false;
+
+    // Draw paddle during gameplay
+    if (g_game_state == 1)
+    {
+        draw_paddle(cur_w, cur_h, PADDLE_X,     g_paddle_gy);
+        draw_paddle(cur_w, cur_h, PADDLE_X_CPU, g_cpu_paddle_gy);
+        draw_ball(cur_w, cur_h);
+        draw_hud(cur_w, cur_h);
+    };
+
+    // Draw main menu GUI overlay
+    if (g_game_state == 0)
+    {
+        draw_gui(cur_w, cur_h);
+    };
+
+    // Draw quit confirmation dialog
+    if (g_game_state == 2)
+    {
+        draw_quit_dialog(cur_w, cur_h);
+    };
+
+
+    return;
+};
+
+def render_frame(GuiWindow* win, int cur_w, int cur_h) -> void
+{
+    #ifdef __WINDOWS__
+    if (g_gl)
+    {
+        gl_render_frame(cur_w, cur_h);
+        win.present();
+        return;
+    };
+    #endif;
+    sw_render_frame(win, cur_w, cur_h);
+    win.present();
+    return;
+};
+
+def main() -> int
+{
+    size_t field_bytes, dens_tex_bytes, vel_tex_bytes;
+    GuiWindow win;
+    int  t, i;
+    float px, py, pr, dens_val, cxp, cyp;
+    i64  frame_start;
+    i64  elapsed_ms;
+
+    g_num_threads = cpu_count();
+    if (g_num_threads < 1)           { g_num_threads = 1;           };
+    if (g_num_threads > MAX_THREADS) { g_num_threads = MAX_THREADS; };
+
+    win.__init("Fluid Simulation\0", WIN_W, WIN_H);
+    if (!win.running)
+    {
+        println("could not open a window\0");
+        return 1;
+    };
+    g_gw = @win;
+
+    field_bytes    = (size_t)(SIM_W * SIM_H * 8);
+    dens_tex_bytes = (size_t)(SIM_W * SIM_H * 4);        // 1 float per cell
+    vel_tex_bytes  = (size_t)(SIM_W * SIM_H * 4 * 2);    // 2 floats per cell
+
+    g_dens      = (double*)fmalloc(field_bytes);
+    g_dens_prev = (double*)fmalloc(field_bytes);
+    g_vx        = (double*)fmalloc(field_bytes);
+    g_vy        = (double*)fmalloc(field_bytes);
+    g_vx_prev   = (double*)fmalloc(field_bytes);
+    g_vy_prev   = (double*)fmalloc(field_bytes);
+    g_dens_tex  = (float*)fmalloc(dens_tex_bytes);
+    g_vel_tex   = (float*)fmalloc(vel_tex_bytes);
+    g_part_x    = (float*)fmalloc((size_t)(MAX_PARTICLES * 4));
+    g_part_y    = (float*)fmalloc((size_t)(MAX_PARTICLES * 4));
+    g_cell      = (float*)fmalloc((size_t)(SIM_W * SIM_H * 3 * 4));
+    defer ffree((u64)g_dens);
+    defer ffree((u64)g_dens_prev);
+    defer ffree((u64)g_vx);
+    defer ffree((u64)g_vy);
+    defer ffree((u64)g_vx_prev);
+    defer ffree((u64)g_vy_prev);
+    defer ffree((u64)g_dens_tex);
+    defer ffree((u64)g_vel_tex);
+    defer ffree((u64)g_part_x);
+    defer ffree((u64)g_part_y);
+    defer ffree((u64)g_cell);
+
+    particles_init();
+
+    semaphore_init(@g_done_sem, 0);
+    semaphore_init(@g_done_sem2, 0);
+
+    g_rows_per_thread = SIM_H / g_num_threads;
+    if (g_rows_per_thread < 1) { g_rows_per_thread = 1; };
+
+    for (t = 0; t < g_num_threads; t++)
+    {
+        semaphore_init(@g_slices[t].wake, 0);
+        semaphore_init(@g_slices2[t].wake, 0);
+        g_slices[t].row_start  = t * g_rows_per_thread;
+        g_slices[t].row_end    = (t == g_num_threads - 1) ? SIM_H : (t + 1) * g_rows_per_thread;
+        g_slices[t].phase      = PHASE_DECAY;
+        g_slices2[t].row_start = t * g_rows_per_thread;
+        g_slices2[t].row_end   = (t == g_num_threads - 1) ? SIM_H : (t + 1) * g_rows_per_thread;
+        g_slices2[t].phase     = PHASE_DECAY;
+        thread_create((void*)@worker,  (void*)@g_slices[t],  @g_threads[t]);
+        thread_create((void*)@worker2, (void*)@g_slices2[t], @g_threads2[t]);
+    };
+
+    #ifdef __WINDOWS__
+    // Prefer the GPU path, the software framebuffer stays as the fallback
+    if (win.init_gl())
+    {
+        g_gl = true;
+        gl_setup();
+        println("renderer: OpenGL\0");
+    }
+    else
+    {
+        println("renderer: software\0");
+    };
+    #endif;
+
+    while (win.running & !g_quit)
+    {
+        frame_start = standard::time::time_now();
+
+        win.running = win.process_messages();
+        if (!win.running) { break; };
+
+        cur_w = win.width;
+        cur_h = win.height;
+        if (cur_w < 1) { cur_w = 1; };
+        if (cur_h < 1) { cur_h = 1; };
+
+        handle_input(@win);
+        if (g_quit) { break; };
+
+        // Simulate
         if (g_game_state == 1)
         {
-            draw_paddle(cur_w, cur_h, PADDLE_X,     g_paddle_gy);
-            draw_paddle(cur_w, cur_h, PADDLE_X_CPU, g_cpu_paddle_gy);
-            draw_ball(cur_w, cur_h);
-            draw_hud(cur_w, cur_h);
+            if (g_ball_x < 0.0) { ball_reset(cur_w, cur_h); };
+            paddle_update();
+            cpu_paddle_update();
+            ball_update(cur_w, cur_h);
+            vel_step();
+            dens_step();
+            dispatch_decay();
         };
 
-        // Draw main menu GUI overlay
-        if (g_game_state == 0)
+        // Update particles CPU-side
+        if (g_game_state == 1)
         {
-            draw_gui(cur_w, cur_h);
+            particles_update();
         };
 
-        // Draw quit confirmation dialog
-        if (g_game_state == 2)
+        // Convert double fields to float buffers
+        upload_textures();
+
+        // Draw the frame (GPU when the window has a GL context)
+        render_frame(@win, cur_w, cur_h);
+
+        // Linux has no vsync here, so hold the frame rate near 60. Windows
+        // paces on the buffer swap, and its Sleep granularity is about 15 ms,
+        // which would turn a 16 ms wait into uneven 16 and 31 ms frames.
+        #ifdef __LINUX__
+        elapsed_ms = standard::time::ns_to_ms(standard::time::time_now() - frame_start);
+        if (elapsed_ms < (i64)16)
         {
-            draw_quit_dialog(cur_w, cur_h);
+            standard::time::sleep_ms((u32)((i64)16 - elapsed_ms));
         };
-
-        gl.present();
+        #endif;
     };
 
     // Shutdown
@@ -2774,8 +3708,8 @@ def main() -> int
     {
         g_slices[t].phase  = PHASE_EXIT;
         g_slices2[t].phase = PHASE_EXIT;
-        semaphore_post(@g_work_sem);
-        semaphore_post(@g_work_sem2);
+        semaphore_post(@g_slices[t].wake);
+        semaphore_post(@g_slices2[t].wake);
     };
     for (t = 0; t < g_num_threads; t++)
     {
@@ -2783,21 +3717,18 @@ def main() -> int
         thread_join(@g_threads2[t]);
     };
 
-    semaphore_destroy(@g_work_sem);
     semaphore_destroy(@g_done_sem);
-    semaphore_destroy(@g_work_sem2);
+    #ifdef __WINDOWS__
+    if (g_gl) { gl_teardown(); };
+    #endif;
+
     semaphore_destroy(@g_done_sem2);
+    for (t = 0; t < g_num_threads; t++) { semaphore_destroy(@g_slices[t].wake); semaphore_destroy(@g_slices2[t].wake); };
 
-    glDeleteShader_fp(vert_sh);
-    glDeleteShader_fp(frag_sh);
-    glDeleteProgram_fp(prog);
-    glDeleteTextures(1, @tex_dens);
-    glDeleteTextures(1, @tex_vel);
-    gl.__exit();
+    if (g_xi != (int*)0)   { ffree((u64)g_xi); };
+    if (g_xf != (float*)0) { ffree((u64)g_xf); };
 
-
-    ReleaseDC(hwnd, hdc);
-    UnregisterClassA((LPCSTR)class_name, hInstance);
+    win.__exit();
 
     return 0;
 };

@@ -255,13 +255,7 @@ namespace standard
                 byte[108] path;
             };
 
-            struct sockaddr_in
-            {
-                u16    family;
-                u16    port;
-                u32    addr;
-                byte[8] pad;
-            };
+            // sockaddr_in is the neutral struct from builtins/socket_object_raw.idk
 
             struct msghdr
             {
@@ -357,7 +351,7 @@ namespace standard
                 cm.cmsg_len   = (size_t)20;
                 cm.cmsg_level = 1;   // SOL_SOCKET
                 cm.cmsg_type  = 1;   // SCM_RIGHTS
-                int* fd_ptr   = (int*)(@cmsg_buf + sizeof(cmsghdr));
+                int* fd_ptr   = (int*)(@cmsg_buf + (sizeof(cmsghdr) / 8));
                 fd_ptr[0]     = fd_to_send;
 
                 msghdr msg;

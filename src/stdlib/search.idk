@@ -96,7 +96,7 @@ namespace standard
 
 		def search_binary<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n - 1, mid;
+			int lo, mid, hi = n - 1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -110,7 +110,7 @@ namespace standard
 		def search_binary_cmp<T>(T* arr, int n, void* key, void* cmp_fn) -> int
 		{
 			def{}* cmp(void*, void*) -> int = cmp_fn;
-			int lo, hi = n - 1, mid, r;
+			int lo, mid, r, hi = n - 1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -130,7 +130,7 @@ namespace standard
 
 		def search_binary_first<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n - 1, mid, result = -1;
+			int lo, mid, hi = n - 1, result = -1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -144,7 +144,7 @@ namespace standard
 		def search_binary_first_cmp<T>(T* arr, int n, void* key, void* cmp_fn) -> int
 		{
 			def{}* cmp(void*, void*) -> int = cmp_fn;
-			int lo, hi = n - 1, mid, r, result = -1;
+			int lo, mid, r, hi = n - 1, result = -1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -164,7 +164,7 @@ namespace standard
 
 		def search_binary_last<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n - 1, mid, result = -1;
+			int lo, mid, hi = n - 1, result = -1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -178,7 +178,7 @@ namespace standard
 		def search_binary_last_cmp<T>(T* arr, int n, void* key, void* cmp_fn) -> int
 		{
 			def{}* cmp(void*, void*) -> int = cmp_fn;
-			int lo, hi = n - 1, mid, r, result = -1;
+			int lo, mid, r, hi = n - 1, result = -1;
 			while (lo <= hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -198,7 +198,7 @@ namespace standard
 
 		def search_lower_bound<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n, mid;
+			int lo, mid, hi = n;
 			while (lo < hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -211,7 +211,7 @@ namespace standard
 		def search_lower_bound_cmp<T>(T* arr, int n, void* key, void* cmp_fn) -> int
 		{
 			def{}* cmp(void*, void*) -> int = cmp_fn;
-			int lo, hi = n, mid;
+			int lo, mid, hi = n;
 			while (lo < hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -229,7 +229,7 @@ namespace standard
 
 		def search_upper_bound<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n, mid;
+			int lo, mid, hi = n;
 			while (lo < hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -242,7 +242,7 @@ namespace standard
 		def search_upper_bound_cmp<T>(T* arr, int n, void* key, void* cmp_fn) -> int
 		{
 			def{}* cmp(void*, void*) -> int = cmp_fn;
-			int lo, hi = n, mid;
+			int lo, mid, hi = n;
 			while (lo < hi)
 			{
 				mid = lo + (hi - lo) / 2;
@@ -262,7 +262,7 @@ namespace standard
 
 		def search_interpolation<T>(T* arr, int n, T key) -> int
 		{
-			int lo, hi = n - 1, mid;
+			int lo, mid, hi = n - 1;
 			T range_val, key_off;
 			while (lo <= hi & arr[lo] <= key & arr[hi] >= key)
 			{

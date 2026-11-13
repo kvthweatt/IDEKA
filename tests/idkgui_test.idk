@@ -1,0 +1,36 @@
+// IDEKA GUI demo: same source on every platform
+
+#import <standard.idk>, <idkgui.idk>;
+
+using standard::system::idkgui,
+      standard::io::console;
+
+def main() -> int
+{
+    GuiWindow win;
+    win.__init("IDEKA GUI\0", 640, 480);
+    if (!win.running)
+    {
+        println("could not open a window\0");
+        return 1;
+    };
+
+    println(f"backend {backend_name()}");
+
+    int frames = 0;
+    while (win.running)
+    {
+        win.clear(0x00181818);
+        win.fill_rect(40, 40, 240, 160, 0x00CC4444);
+        win.rect(30, 30, 250, 170, 0x00FFFFFF);
+        win.line(0, 479, 639, 0, 0x0044AAFF);
+        win.circle(400, 120, 60, 0x00FFDD33);
+        win.fill_circle(win.mouse_x, win.mouse_y, 12, 0x0033DD77);
+        win.present();
+        win.running = win.process_messages();
+        frames++;
+    };
+
+    win.__exit();
+    return 0;
+};

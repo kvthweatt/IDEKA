@@ -1,0 +1,1171 @@
+// Author: Karac V. Thweatt
+
+// IDEKA X11 Client Library
+// Pure X11 wire protocol over a Unix domain socket, no Xlib, no libc beyond the
+// Linux externs in linux.idk. Windows draw into a client side 0x00RRGGBB
+// framebuffer that present() uploads with PutImage.
+//
+// Display: $DISPLAY of the form ":N" or ":N.S" (local Unix socket only).
+// Auth:    MIT-MAGIC-COOKIE-1 read from $XAUTHORITY or $HOME/.Xauthority.
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifndef __LINUX_INTERFACE__
+#import <linux.idk>;
+#endif;
+
+#ifndef IDEKA_STANDARD_NET_LINUX
+#import <net_linux.idk>;
+#endif;
+
+using standard::system::linux;
+using standard::net;
+
+#ifndef __X11_CLIENT__
+#def __X11_CLIENT__ 1;
+
+namespace standard
+{
+    namespace system
+    {
+        namespace x11
+        {
+            // ================================================================
+            // PROTOCOL CONSTANTS
+            // ================================================================
+
+            // Core request opcodes
+            enum X11Op
+            {
+                X_CREATE_WINDOW   = 1,
+                X_DESTROY_WINDOW  = 4,
+                X_MAP_WINDOW      = 8,
+                X_INTERN_ATOM     = 16,
+                X_CHANGE_PROPERTY = 18,
+                X_CREATE_GC       = 55,
+                X_FREE_GC         = 60,
+                X_PUT_IMAGE       = 72
+            };
+
+            // Core event codes
+            enum X11Ev
+            {
+                X_ERROR            = 0,
+                X_REPLY            = 1,
+                X_KEY_PRESS        = 2,
+                X_KEY_RELEASE      = 3,
+                X_BUTTON_PRESS     = 4,
+                X_BUTTON_RELEASE   = 5,
+                X_MOTION_NOTIFY    = 6,
+                X_EXPOSE           = 12,
+                X_CONFIGURE_NOTIFY = 22,
+                X_CLIENT_MESSAGE   = 33
+            };
+
+            // Event mask bits
+            enum X11Mask
+            {
+                X_MASK_KEY_PRESS      = 0x1,
+                X_MASK_KEY_RELEASE    = 0x2,
+                X_MASK_BUTTON_PRESS   = 0x4,
+                X_MASK_BUTTON_RELEASE = 0x8,
+                X_MASK_POINTER_MOTION = 0x40,
+                X_MASK_EXPOSURE       = 0x8000,
+                X_MASK_STRUCTURE      = 0x20000
+            };
+
+            // Predefined atoms
+            enum X11Atom
+            {
+                XA_ATOM    = 4,
+                XA_STRING  = 31,
+                XA_WM_NAME = 39
+            };
+
+            #def X11_RBUF_SIZE 8192;
+
+            // ================================================================
+            // BYTE ORDER HELPERS (X11 requests here are always little endian)
+            // ================================================================
+
+            def x_put16(byte* b, int off, u32 v) -> void
+            {
+                b[off]     = (byte)(v `& (u32)0xFF);
+                b[off + 1] = (byte)((v >> 8) `& (u32)0xFF);
+                return;
+            };
+
+            def x_put32(byte* b, int off, u32 v) -> void
+            {
+                b[off]     = (byte)(v `& (u32)0xFF);
+                b[off + 1] = (byte)((v >> 8) `& (u32)0xFF);
+                b[off + 2] = (byte)((v >> 16) `& (u32)0xFF);
+                b[off + 3] = (byte)((v >> 24) `& (u32)0xFF);
+                return;
+            };
+
+            def x_get16(byte* b, int off) -> u32
+            {
+                return (u32)b[off] `| ((u32)b[off + 1] << 8);
+            };
+
+            def x_get32(byte* b, int off) -> u32
+            {
+                return (u32)b[off] `| ((u32)b[off + 1] << 8) `| ((u32)b[off + 2] << 16) `| ((u32)b[off + 3] << 24);
+            };
+
+            // Big endian 16 bit read, for the Xauthority file
+            def x_get16be(byte* b, int off) -> int
+            {
+                return ((int)b[off] << 8) `| (int)b[off + 1];
+            };
+
+            // Round n up to a multiple of 4
+            def x_pad4(int n) -> int
+            {
+                return ((n + 3) / 4) * 4;
+            };
+
+            // ================================================================
+            // SOCKET HELPERS
+            // ================================================================
+
+            // Write every byte of buf, false on error
+            def x_write_all(int fd, byte* buf, int len) -> bool
+            {
+                int done = 0;
+                i64 w;
+                while (done < len)
+                {
+                    w = write(fd, (void*)(buf + done), (size_t)(len - done));
+                    if (w <= (i64)0)
+                    {
+                        return false;
+                    };
+                    done = done + (int)w;
+                };
+                return true;
+            };
+
+            // Read exactly len bytes (blocking), false on error or end of stream
+            def x_read_exact(int fd, byte* buf, int len) -> bool
+            {
+                int done = 0;
+                i64 r;
+                while (done < len)
+                {
+                    r = read(fd, (void*)(buf + done), (size_t)(len - done));
+                    if (r <= (i64)0)
+                    {
+                        return false;
+                    };
+                    done = done + (int)r;
+                };
+                return true;
+            };
+
+            // Zeroed request buffer of n bytes
+            def x_alloc(int n) -> byte*
+            {
+                byte* b = (byte*)fmalloc((size_t)n);
+                memset((void*)b, 0, (size_t)n);
+                return b;
+            };
+
+            // ================================================================
+            // DISPLAY AND AUTHORITY
+            // ================================================================
+
+            // Display number from $DISPLAY (":N", ":N.S"), -1 when it is not a local display
+            def x_display_number() -> int
+            {
+                byte* d = getenv((byte*)"DISPLAY\0");
+                int i = 0;
+                int n = 0;
+                if (d == (byte*)0)
+                {
+                    return 0;
+                };
+                if (d[0] != ':')
+                {
+                    return -1;
+                };
+                i = 1;
+                if (d[i] < '0' | d[i] > '9')
+                {
+                    return -1;
+                };
+                while (d[i] >= '0' & d[i] <= '9')
+                {
+                    n = n * 10 + (int)(d[i] - '0');
+                    i++;
+                };
+                return n;
+            };
+
+            // Decimal text of n into out, returns its length
+            def x_itoa(int n, byte* out) -> int
+            {
+                byte[16] tmp;
+                int len = 0;
+                int i = 0;
+                if (n == 0)
+                {
+                    out[0] = '0';
+                    out[1] = 0;
+                    return 1;
+                };
+                while (n > 0)
+                {
+                    tmp[len] = (byte)('0' + (n % 10));
+                    n = n / 10;
+                    len++;
+                };
+                while (i < len)
+                {
+                    out[i] = tmp[len - 1 - i];
+                    i++;
+                };
+                out[len] = 0;
+                return len;
+            };
+
+            // Appends the NUL terminated string s to dst at *pos
+            def x_append(byte* dst, int* pos, byte* s) -> void
+            {
+                int i = 0;
+                while (s[i] != 0)
+                {
+                    dst[*pos] = s[i];
+                    *pos = *pos + 1;
+                    i++;
+                };
+                dst[*pos] = 0;
+                return;
+            };
+
+            // Looks up the MIT-MAGIC-COOKIE-1 for display dnum. cookie must hold 16 bytes.
+            def x_auth_cookie(int dnum, byte* cookie) -> bool
+            {
+                byte[512] path;
+                byte[16]  num;
+                int pos = 0;
+                int fd, got, p, fam, alen, nlen, mlen, dlen, i, nl;
+                bool same;
+                byte* env = getenv((byte*)"XAUTHORITY\0");
+                byte* buf;
+                byte* want = (byte*)"MIT-MAGIC-COOKIE-1\0";
+
+                if (env != (byte*)0)
+                {
+                    x_append((byte*)path, @pos, env);
+                }
+                else
+                {
+                    byte* home = getenv((byte*)"HOME\0");
+                    if (home == (byte*)0)
+                    {
+                        return false;
+                    };
+                    x_append((byte*)path, @pos, home);
+                    x_append((byte*)path, @pos, (byte*)"/.Xauthority\0");
+                };
+
+                fd = open((byte*)path, 0, (u32)0);
+                if (fd < 0)
+                {
+                    return false;
+                };
+                buf = (byte*)fmalloc((size_t)65536);
+                got = (int)read(fd, (void*)buf, (size_t)65536);
+                close(fd);
+                if (got <= 0)
+                {
+                    ffree((u64)buf);
+                    return false;
+                };
+
+                nl = x_itoa(dnum, (byte*)num);
+                p = 0;
+                while (p + 2 <= got)
+                {
+                    fam = x_get16be(buf, p);
+                    p = p + 2;
+                    if (p + 2 > got) { break; };
+                    alen = x_get16be(buf, p);
+                    p = p + 2 + alen;
+                    if (p + 2 > got) { break; };
+                    nlen = x_get16be(buf, p);
+                    p = p + 2;
+                    same = nlen == nl;
+                    i = 0;
+                    while (same & i < nlen)
+                    {
+                        if (p + i >= got) { same = false; break; };
+                        if (buf[p + i] != num[i]) { same = false; };
+                        i++;
+                    };
+                    p = p + nlen;
+                    if (p + 2 > got) { break; };
+                    mlen = x_get16be(buf, p);
+                    p = p + 2;
+                    // Name must be exactly MIT-MAGIC-COOKIE-1 (18 characters)
+                    if (mlen != 18) { same = false; };
+                    if (same)
+                    {
+                        i = 0;
+                        while (i < 18)
+                        {
+                            if (p + i >= got) { same = false; break; };
+                            if (buf[p + i] != want[i]) { same = false; };
+                            i++;
+                        };
+                    };
+                    p = p + mlen;
+                    if (p + 2 > got) { break; };
+                    dlen = x_get16be(buf, p);
+                    p = p + 2;
+                    if (same & dlen == 16 & p + 16 <= got)
+                    {
+                        i = 0;
+                        while (i < 16)
+                        {
+                            cookie[i] = buf[p + i];
+                            i++;
+                        };
+                        ffree((u64)buf);
+                        return true;
+                    };
+                    p = p + dlen;
+                };
+                ffree((u64)buf);
+                return false;
+            };
+
+            // Connects to the local X server, -1 on failure
+            def x_connect(int dnum) -> int
+            {
+                byte[64] path;
+                int pos = 0;
+                byte[16] num;
+                x_append((byte*)path, @pos, (byte*)"/tmp/.X11-unix/X\0");
+                x_itoa(dnum, (byte*)num);
+                x_append((byte*)path, @pos, (byte*)num);
+                return unix_connect((byte*)path);
+            };
+
+            // Keysym to the Win32 virtual key scheme: ASCII upper case for letters and
+            // digits, 27 escape, 13 return, 8 backspace, 9 tab, 32 space, 37 to 40 arrows,
+            // 16 shift, 17 control, 18 alt, 112 to 123 function keys. 0 when unknown.
+            def x_key_code(u32 ks) -> int
+            {
+                int k = (int)ks;
+                if (k >= 97 & k <= 122) { return k - 32; };
+                if (k >= 32 & k <= 126) { return k; };
+                if (k >= 0xFFBE & k <= 0xFFC9) { return 112 + (k - 0xFFBE); };
+                if (k == 0xFF1B) { return 27; };
+                if (k == 0xFF0D | k == 0xFF8D) { return 13; };
+                if (k == 0xFF08) { return 8; };
+                if (k == 0xFF09) { return 9; };
+                if (k == 0xFFFF) { return 46; };
+                if (k == 0xFF63) { return 45; };
+                if (k == 0xFF50) { return 36; };
+                if (k == 0xFF57) { return 35; };
+                if (k == 0xFF55) { return 33; };
+                if (k == 0xFF56) { return 34; };
+                if (k == 0xFF51) { return 37; };
+                if (k == 0xFF52) { return 38; };
+                if (k == 0xFF53) { return 39; };
+                if (k == 0xFF54) { return 40; };
+                if (k == 0xFFE1 | k == 0xFFE2) { return 16; };
+                if (k == 0xFFE3 | k == 0xFFE4) { return 17; };
+                if (k == 0xFFE9 | k == 0xFFEA) { return 18; };
+                return 0;
+            };
+
+            // ================================================================
+            // X11 WINDOW OBJECT
+            // ================================================================
+
+            object Window
+            {
+                int     fd;
+                u32     rid_base,
+                        rid_mask,
+                        rid_next;
+                u32     root,
+                        root_visual,
+                        white_pixel,
+                        black_pixel;
+                int     root_depth,
+                        max_req_words;
+                u32     win,
+                        gc,
+                        wm_protocols,
+                        wm_delete;
+                int     width,
+                        height;
+                u32*    pixels;
+                bool    running,
+                        exposed,
+                        resized;
+                int     mouse_x,
+                        mouse_y;
+                u32     mouse_buttons;
+                int     last_key,
+                        last_button;
+                bool    key_down;
+                int     rlen;
+                u32     mouse_hit,
+                        mouse_released;
+                int*    keymap;                 // keycode -> normalized key code, 0 when unmapped
+                byte[256] key_state;            // 1 while the key is held, by normalized key code
+                byte[256] key_hit;              // 1 when pressed since the last process_messages
+                byte[8192] rbuf;
+
+                // ============================================================
+                // CONSTRUCTOR
+                // ============================================================
+
+                def __init(byte* title, int w, int h) -> this
+                {
+                    byte[16] cookie;
+                    byte*    setup;
+                    byte*    hdr;
+                    byte*    rep;
+                    int      dnum, vlen, nfmt, nscr, s, extra, i, fp, depth, bpp, kmin, kmax;
+                    bool     have_cookie, fmt_ok;
+                    u32      mask;
+                    byte*    req;
+
+                    this.width         = w;
+                    this.height        = h;
+                    this.running       = false;
+                    this.exposed       = false;
+                    this.resized       = false;
+                    this.pixels        = (u32*)0;
+                    this.rlen          = 0;
+                    this.mouse_x       = 0;
+                    this.mouse_y       = 0;
+                    this.mouse_buttons = (u32)0;
+                    this.last_key      = 0;
+                    this.last_button   = 0;
+                    this.key_down      = false;
+                    this.mouse_hit     = (u32)0;
+                    this.mouse_released = (u32)0;
+                    this.keymap        = (int*)0;
+                    memset((void*)this.key_state, 0, (size_t)256);
+                    memset((void*)this.key_hit, 0, (size_t)256);
+                    this.fd            = -1;
+
+                    dnum = x_display_number();
+                    if (dnum < 0)
+                    {
+                        return this;
+                    };
+                    this.fd = x_connect(dnum);
+                    if (this.fd < 0)
+                    {
+                        return this;
+                    };
+
+                    // ---- connection setup request ----
+                    have_cookie = x_auth_cookie(dnum, (byte*)cookie);
+                    if (have_cookie)
+                    {
+                        // 12 byte header + name "MIT-MAGIC-COOKIE-1" padded to 20 + 16 byte data
+                        setup = x_alloc(48);
+                        x_put16(setup, 6, (u32)18);
+                        x_put16(setup, 8, (u32)16);
+                        byte* nm = (byte*)"MIT-MAGIC-COOKIE-1\0";
+                        i = 0;
+                        while (i < 18)
+                        {
+                            setup[12 + i] = nm[i];
+                            i++;
+                        };
+                        i = 0;
+                        while (i < 16)
+                        {
+                            setup[32 + i] = cookie[i];
+                            i++;
+                        };
+                        setup[0] = 'l';
+                        x_put16(setup, 2, (u32)11);
+                        x_put16(setup, 4, (u32)0);
+                        if (!x_write_all(this.fd, setup, 48))
+                        {
+                            ffree((u64)setup);
+                            this.close_fd();
+                            return this;
+                        };
+                        ffree((u64)setup);
+                    }
+                    else
+                    {
+                        setup = x_alloc(12);
+                        setup[0] = 'l';
+                        x_put16(setup, 2, (u32)11);
+                        if (!x_write_all(this.fd, setup, 12))
+                        {
+                            ffree((u64)setup);
+                            this.close_fd();
+                            return this;
+                        };
+                        ffree((u64)setup);
+                    };
+
+                    // ---- setup reply ----
+                    hdr = x_alloc(8);
+                    if (!x_read_exact(this.fd, hdr, 8))
+                    {
+                        ffree((u64)hdr);
+                        this.close_fd();
+                        return this;
+                    };
+                    extra = (int)x_get16(hdr, 6) * 4;
+                    if (hdr[0] != 1)
+                    {
+                        ffree((u64)hdr);
+                        this.close_fd();
+                        return this;
+                    };
+                    rep = x_alloc(8 + extra);
+                    for (i = 0; i < 8; i++) { rep[i] = hdr[i]; };
+                    ffree((u64)hdr);
+                    if (!x_read_exact(this.fd, rep + 8, extra))
+                    {
+                        ffree((u64)rep);
+                        this.close_fd();
+                        return this;
+                    };
+
+                    this.rid_base      = x_get32(rep, 12);
+                    this.rid_mask      = x_get32(rep, 16);
+                    this.rid_next      = (u32)0;
+                    vlen               = (int)x_get16(rep, 24);
+                    this.max_req_words = (int)x_get16(rep, 26);
+                    nscr               = (int)rep[28];
+                    nfmt               = (int)rep[29];
+                    if (nscr < 1)
+                    {
+                        ffree((u64)rep);
+                        this.close_fd();
+                        return this;
+                    };
+
+                    // First screen follows the vendor string and the pixmap formats
+                    fp = 40 + x_pad4(vlen);
+                    s  = fp + nfmt * 8;
+                    this.root        = x_get32(rep, s);
+                    this.white_pixel = x_get32(rep, s + 8);
+                    this.black_pixel = x_get32(rep, s + 12);
+                    this.root_visual = x_get32(rep, s + 32);
+                    this.root_depth  = (int)rep[s + 38];
+                    kmin             = (int)rep[34];
+                    kmax             = (int)rep[35];
+
+                    // The framebuffer is 32 bits per pixel, so the root depth needs a 32 bpp format
+                    fmt_ok = false;
+                    for (i = 0; i < nfmt; i++)
+                    {
+                        depth = (int)rep[fp + i * 8];
+                        bpp   = (int)rep[fp + i * 8 + 1];
+                        if (depth == this.root_depth & bpp == 32)
+                        {
+                            fmt_ok = true;
+                        };
+                    };
+                    ffree((u64)rep);
+                    if (!fmt_ok)
+                    {
+                        this.close_fd();
+                        return this;
+                    };
+
+                    // Keyboard layout, fetched before the window exists so no event can arrive first
+                    this.load_keymap(kmin, kmax);
+
+                    // ---- window and graphics context ----
+                    this.win = this.alloc_id();
+                    this.gc  = this.alloc_id();
+
+                    mask = (u32)X11Mask.X_MASK_KEY_PRESS `| (u32)X11Mask.X_MASK_KEY_RELEASE `|
+                           (u32)X11Mask.X_MASK_BUTTON_PRESS `| (u32)X11Mask.X_MASK_BUTTON_RELEASE `|
+                           (u32)X11Mask.X_MASK_POINTER_MOTION `| (u32)X11Mask.X_MASK_EXPOSURE `|
+                           (u32)X11Mask.X_MASK_STRUCTURE;
+
+                    req = x_alloc(40);
+                    req[0] = (byte)X11Op.X_CREATE_WINDOW;
+                    x_put16(req, 2, (u32)10);
+                    x_put32(req, 4, this.win);
+                    x_put32(req, 8, this.root);
+                    x_put16(req, 12, (u32)0);
+                    x_put16(req, 14, (u32)0);
+                    x_put16(req, 16, (u32)w);
+                    x_put16(req, 18, (u32)h);
+                    x_put16(req, 20, (u32)0);
+                    x_put16(req, 22, (u32)1);            // InputOutput
+                    x_put32(req, 24, (u32)0);            // visual CopyFromParent
+                    x_put32(req, 28, (u32)0x802);        // CWBackPixel | CWEventMask
+                    x_put32(req, 32, this.black_pixel);
+                    x_put32(req, 36, mask);
+                    x_write_all(this.fd, req, 40);
+                    ffree((u64)req);
+
+                    req = x_alloc(16);
+                    req[0] = (byte)X11Op.X_CREATE_GC;
+                    x_put16(req, 2, (u32)4);
+                    x_put32(req, 4, this.gc);
+                    x_put32(req, 8, this.win);
+                    x_put32(req, 12, (u32)0);
+                    x_write_all(this.fd, req, 16);
+                    ffree((u64)req);
+
+                    this.set_title(title);
+
+                    // Ask the window manager to send a ClientMessage instead of killing the connection
+                    this.wm_protocols = this.intern((byte*)"WM_PROTOCOLS\0");
+                    this.wm_delete    = this.intern((byte*)"WM_DELETE_WINDOW\0");
+                    if (this.wm_protocols != (u32)0 & this.wm_delete != (u32)0)
+                    {
+                        req = x_alloc(28);
+                        req[0] = (byte)X11Op.X_CHANGE_PROPERTY;
+                        x_put16(req, 2, (u32)7);
+                        x_put32(req, 4, this.win);
+                        x_put32(req, 8, this.wm_protocols);
+                        x_put32(req, 12, (u32)X11Atom.XA_ATOM);
+                        req[16] = 32;
+                        x_put32(req, 20, (u32)1);
+                        x_put32(req, 24, this.wm_delete);
+                        x_write_all(this.fd, req, 28);
+                        ffree((u64)req);
+                    };
+
+                    req = x_alloc(8);
+                    req[0] = (byte)X11Op.X_MAP_WINDOW;
+                    x_put16(req, 2, (u32)2);
+                    x_put32(req, 4, this.win);
+                    x_write_all(this.fd, req, 8);
+                    ffree((u64)req);
+
+                    this.alloc_pixels(w, h);
+                    this.running = true;
+                    return this;
+                };
+
+                // ============================================================
+                // DESTRUCTOR
+                // ============================================================
+
+                def __exit() -> void
+                {
+                    byte* req;
+                    if (this.fd >= 0)
+                    {
+                        req = x_alloc(8);
+                        req[0] = (byte)X11Op.X_FREE_GC;
+                        x_put16(req, 2, (u32)2);
+                        x_put32(req, 4, this.gc);
+                        x_write_all(this.fd, req, 8);
+                        req[0] = (byte)X11Op.X_DESTROY_WINDOW;
+                        x_put32(req, 4, this.win);
+                        x_write_all(this.fd, req, 8);
+                        ffree((u64)req);
+                        close(this.fd);
+                        this.fd = -1;
+                    };
+                    if (this.pixels != (u32*)0)
+                    {
+                        ffree((u64)this.pixels);
+                        this.pixels = (u32*)0;
+                    };
+                    if (this.keymap != (int*)0)
+                    {
+                        ffree((u64)this.keymap);
+                        this.keymap = (int*)0;
+                    };
+                    this.running = false;
+                    return;
+                };
+
+                // ============================================================
+                // INTERNALS
+                // ============================================================
+
+                // GetKeyboardMapping: first keysym of every keycode, normalized to the
+                // Win32 virtual key scheme (ASCII upper case for letters and digits)
+                def load_keymap(int kmin, int kmax) -> void
+                {
+                    int count = kmax - kmin + 1;
+                    int i, kpk, extra;
+                    byte[32] head;
+                    byte* req;
+                    byte* syms;
+                    if (count < 1) { return; };
+                    this.keymap = (int*)fmalloc((size_t)(256 * 4));
+                    memset((void*)this.keymap, 0, (size_t)(256 * 4));
+
+                    req = x_alloc(8);
+                    req[0] = 101;                          // GetKeyboardMapping
+                    x_put16(req, 2, (u32)2);
+                    req[4] = (byte)kmin;
+                    req[5] = (byte)count;
+                    if (!x_write_all(this.fd, req, 8))
+                    {
+                        ffree((u64)req);
+                        return;
+                    };
+                    ffree((u64)req);
+
+                    // Skip anything that is not the reply
+                    while (true)
+                    {
+                        if (!x_read_exact(this.fd, (byte*)head, 32)) { return; };
+                        if (head[0] == 1) { break; };
+                        if (head[0] == 0) { return; };
+                    };
+                    kpk   = (int)head[1];
+                    extra = (int)x_get32((byte*)head, 4) * 4;
+                    if (extra <= 0 | kpk < 1) { return; };
+                    syms = x_alloc(extra);
+                    if (!x_read_exact(this.fd, syms, extra))
+                    {
+                        ffree((u64)syms);
+                        return;
+                    };
+                    for (i = 0; i < count; i++)
+                    {
+                        if (kmin + i < 256)
+                        {
+                            this.keymap[kmin + i] = x_key_code(x_get32(syms, i * kpk * 4));
+                        };
+                    };
+                    ffree((u64)syms);
+                    return;
+                };
+
+                // Expression value: the connection descriptor
+                def __expr() -> int
+                {
+                    return this.fd;
+                };
+
+                def close_fd() -> void
+                {
+                    if (this.fd >= 0)
+                    {
+                        close(this.fd);
+                        this.fd = -1;
+                    };
+                    return;
+                };
+
+                def alloc_id() -> u32
+                {
+                    u32 id = this.rid_base `| (this.rid_next `& this.rid_mask);
+                    this.rid_next = this.rid_next + (u32)1;
+                    return id;
+                };
+
+                def alloc_pixels(int w, int h) -> void
+                {
+                    size_t bytes = (size_t)(w * h * 4);
+                    if (this.pixels != (u32*)0)
+                    {
+                        ffree((u64)this.pixels);
+                    };
+                    this.pixels = (u32*)fmalloc(bytes);
+                    memset((void*)this.pixels, 0, bytes);
+                    this.width  = w;
+                    this.height = h;
+                    return;
+                };
+
+                // Atom id for name, 0 when the server does not answer
+                def intern(byte* name) -> u32
+                {
+                    int n = standard::strings::strlen(name);
+                    int total = 8 + x_pad4(n);
+                    int i;
+                    byte[32] ev;
+                    byte* req = x_alloc(total);
+                    req[0] = (byte)X11Op.X_INTERN_ATOM;
+                    x_put16(req, 2, (u32)(total / 4));
+                    x_put16(req, 4, (u32)n);
+                    for (i = 0; i < n; i++) { req[8 + i] = name[i]; };
+                    if (!x_write_all(this.fd, req, total))
+                    {
+                        ffree((u64)req);
+                        return (u32)0;
+                    };
+                    ffree((u64)req);
+
+                    // Skip any event that arrives before the reply
+                    while (true)
+                    {
+                        if (!x_read_exact(this.fd, (byte*)ev, 32))
+                        {
+                            return (u32)0;
+                        };
+                        if (ev[0] == 1)
+                        {
+                            return x_get32((byte*)ev, 8);
+                        };
+                        if (ev[0] == 0)
+                        {
+                            return (u32)0;
+                        };
+                    };
+                    return (u32)0;
+                };
+
+                // ============================================================
+                // WINDOW CONTROL
+                // ============================================================
+
+                def set_title(byte* title) -> void
+                {
+                    int n = standard::strings::strlen(title);
+                    int total = 24 + x_pad4(n);
+                    int i;
+                    byte* req = x_alloc(total);
+                    req[0] = (byte)X11Op.X_CHANGE_PROPERTY;
+                    x_put16(req, 2, (u32)(total / 4));
+                    x_put32(req, 4, this.win);
+                    x_put32(req, 8, (u32)X11Atom.XA_WM_NAME);
+                    x_put32(req, 12, (u32)X11Atom.XA_STRING);
+                    req[16] = 8;
+                    x_put32(req, 20, (u32)n);
+                    for (i = 0; i < n; i++) { req[24 + i] = title[i]; };
+                    x_write_all(this.fd, req, total);
+                    ffree((u64)req);
+                    return;
+                };
+
+                // ============================================================
+                // FRAMEBUFFER DRAWING (0x00RRGGBB)
+                // ============================================================
+
+                def clear(u32 color) -> void
+                {
+                    int total = this.width * this.height;
+                    int i = 0;
+                    while (i < total)
+                    {
+                        this.pixels[i] = color;
+                        i++;
+                    };
+                    return;
+                };
+
+                def pixel(int x, int y, u32 color) -> void
+                {
+                    if (x >= 0 & y >= 0 & x < this.width & y < this.height)
+                    {
+                        this.pixels[y * this.width + x] = color;
+                    };
+                    return;
+                };
+
+                def fill_rect(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    int t, x, y;
+                    if (x1 > x2) { t = x1; x1 = x2; x2 = t; };
+                    if (y1 > y2) { t = y1; y1 = y2; y2 = t; };
+                    if (x1 < 0) { x1 = 0; };
+                    if (y1 < 0) { y1 = 0; };
+                    if (x2 > this.width)  { x2 = this.width; };
+                    if (y2 > this.height) { y2 = this.height; };
+                    for (y = y1; y < y2; y++)
+                    {
+                        for (x = x1; x < x2; x++)
+                        {
+                            this.pixels[y * this.width + x] = color;
+                        };
+                    };
+                    return;
+                };
+
+                def rect(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    this.line(x1, y1, x2 - 1, y1, color);
+                    this.line(x2 - 1, y1, x2 - 1, y2 - 1, color);
+                    this.line(x2 - 1, y2 - 1, x1, y2 - 1, color);
+                    this.line(x1, y2 - 1, x1, y1, color);
+                    return;
+                };
+
+                // Bresenham line
+                def line(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    int dx = x2 - x1;
+                    int dy = y2 - y1;
+                    int sx = 1;
+                    int sy = 1;
+                    int err, e2;
+                    if (dx < 0) { dx = -dx; sx = -1; };
+                    if (dy < 0) { dy = -dy; sy = -1; };
+                    err = dx - dy;
+                    while (true)
+                    {
+                        this.pixel(x1, y1, color);
+                        if (x1 == x2 & y1 == y2) { break; };
+                        e2 = err * 2;
+                        if (e2 > -dy) { err = err - dy; x1 = x1 + sx; };
+                        if (e2 < dx)  { err = err + dx; y1 = y1 + sy; };
+                    };
+                    return;
+                };
+
+                // Midpoint circle outline
+                def circle(int cx, int cy, int r, u32 color) -> void
+                {
+                    int x = r;
+                    int y = 0;
+                    int err = 1 - r;
+                    while (x >= y)
+                    {
+                        this.pixel(cx + x, cy + y, color);
+                        this.pixel(cx + y, cy + x, color);
+                        this.pixel(cx - y, cy + x, color);
+                        this.pixel(cx - x, cy + y, color);
+                        this.pixel(cx - x, cy - y, color);
+                        this.pixel(cx - y, cy - x, color);
+                        this.pixel(cx + y, cy - x, color);
+                        this.pixel(cx + x, cy - y, color);
+                        y++;
+                        if (err < 0)
+                        {
+                            err = err + 2 * y + 1;
+                        }
+                        else
+                        {
+                            x--;
+                            err = err + 2 * (y - x) + 1;
+                        };
+                    };
+                    return;
+                };
+
+                def fill_circle(int cx, int cy, int r, u32 color) -> void
+                {
+                    int y, x, rr;
+                    rr = r * r;
+                    for (y = -r; y <= r; y++)
+                    {
+                        for (x = -r; x <= r; x++)
+                        {
+                            if (x * x + y * y <= rr)
+                            {
+                                this.pixel(cx + x, cy + y, color);
+                            };
+                        };
+                    };
+                    return;
+                };
+
+                // ============================================================
+                // PRESENT - upload the framebuffer with PutImage in strips
+                // ============================================================
+
+                def present() -> void
+                {
+                    int stride = this.width * 4;
+                    int max_bytes = this.max_req_words * 4 - 24;
+                    int rows_per, row, rows, total, i;
+                    byte* req;
+                    byte* src;
+                    if (this.fd < 0 | this.pixels == (u32*)0)
+                    {
+                        return;
+                    };
+                    rows_per = max_bytes / stride;
+                    if (rows_per < 1) { rows_per = 1; };
+                    if (rows_per > this.height) { rows_per = this.height; };
+
+                    row = 0;
+                    while (row < this.height)
+                    {
+                        rows = rows_per;
+                        if (row + rows > this.height) { rows = this.height - row; };
+                        total = 24 + rows * stride;
+                        req = x_alloc(total);
+                        req[0] = (byte)X11Op.X_PUT_IMAGE;
+                        req[1] = 2;                                  // ZPixmap
+                        x_put16(req, 2, (u32)(total / 4));
+                        x_put32(req, 4, this.win);
+                        x_put32(req, 8, this.gc);
+                        x_put16(req, 12, (u32)this.width);
+                        x_put16(req, 14, (u32)rows);
+                        x_put16(req, 16, (u32)0);
+                        x_put16(req, 18, (u32)row);
+                        req[20] = 0;
+                        req[21] = (byte)this.root_depth;
+                        src = (byte*)this.pixels + row * stride;
+                        memcpy((void*)(req + 24), (void*)src, (size_t)(rows * stride));
+                        if (!x_write_all(this.fd, req, total))
+                        {
+                            this.running = false;
+                            ffree((u64)req);
+                            return;
+                        };
+                        ffree((u64)req);
+                        row = row + rows;
+                    };
+                    this.exposed = false;
+                    return;
+                };
+
+                // ============================================================
+                // EVENTS - returns false once the window has been closed
+                // ============================================================
+
+                def process_messages() -> bool
+                {
+                    byte[8] pfd;
+                    int got, off, code;
+                    i64 r;
+                    byte* ev;
+                    u32 st, bit;
+                    int kn;
+                    int nw, nh;
+
+                    if (this.fd < 0 | !this.running)
+                    {
+                        return false;
+                    };
+                    this.resized = false;
+                    this.mouse_hit      = (u32)0;
+                    this.mouse_released = (u32)0;
+                    memset((void*)this.key_hit, 0, (size_t)256);
+
+                    // Pump while the socket has data
+                    while (true)
+                    {
+                        x_put32((byte*)pfd, 0, (u32)this.fd);
+                        x_put16((byte*)pfd, 4, (u32)1);      // POLLIN
+                        x_put16((byte*)pfd, 6, (u32)0);
+                        if (poll((void*)pfd, (u32)1, 0) <= 0)
+                        {
+                            break;
+                        };
+                        if (this.rlen >= 8192)
+                        {
+                            this.rlen = 0;
+                        };
+                        r = read(this.fd, (void*)((byte*)this.rbuf + this.rlen), (size_t)(8192 - this.rlen));
+                        if (r <= (i64)0)
+                        {
+                            this.running = false;
+                            return false;
+                        };
+                        this.rlen = this.rlen + (int)r;
+
+                        off = 0;
+                        while (off + 32 <= this.rlen)
+                        {
+                            ev   = (byte*)this.rbuf + off;
+                            code = (int)(ev[0] `& (byte)0x7F);
+
+                            if (code == (int)X11Ev.X_KEY_PRESS | code == (int)X11Ev.X_KEY_RELEASE)
+                            {
+                                kn = 0;
+                                if (this.keymap != (int*)0) { kn = this.keymap[(int)ev[1]]; };
+                                this.last_key = kn;
+                                this.key_down = code == (int)X11Ev.X_KEY_PRESS;
+                                if (kn > 0 & kn < 256)
+                                {
+                                    if (this.key_down)
+                                    {
+                                        this.key_state[kn] = 1;
+                                        this.key_hit[kn]   = 1;
+                                    }
+                                    else
+                                    {
+                                        this.key_state[kn] = 0;
+                                    };
+                                };
+                                this.mouse_x  = (int)(i16)x_get16(ev, 24);
+                                this.mouse_y  = (int)(i16)x_get16(ev, 26);
+                            };
+                            if (code == (int)X11Ev.X_BUTTON_PRESS | code == (int)X11Ev.X_BUTTON_RELEASE)
+                            {
+                                this.last_button = (int)ev[1];
+                                this.mouse_x     = (int)(i16)x_get16(ev, 24);
+                                this.mouse_y     = (int)(i16)x_get16(ev, 26);
+                                st = x_get16(ev, 28);
+                                // State is the mask before this event, so apply the change for buttons 1 to 3
+                                if (ev[1] >= 1 & ev[1] <= 3)
+                                {
+                                    bit = (u32)1 << (u32)(ev[1] - 1);
+                                    if (code == (int)X11Ev.X_BUTTON_PRESS)
+                                    {
+                                        this.mouse_buttons = this.mouse_buttons `| bit;
+                                        this.mouse_hit     = this.mouse_hit `| bit;
+                                    }
+                                    else
+                                    {
+                                        this.mouse_released = this.mouse_released `| bit;
+                                        if ((this.mouse_buttons `& bit) != (u32)0)
+                                        {
+                                            this.mouse_buttons = this.mouse_buttons - bit;
+                                        };
+                                    };
+                                };
+                            };
+                            if (code == (int)X11Ev.X_MOTION_NOTIFY)
+                            {
+                                this.mouse_x = (int)(i16)x_get16(ev, 24);
+                                this.mouse_y = (int)(i16)x_get16(ev, 26);
+                            };
+                            if (code == (int)X11Ev.X_EXPOSE)
+                            {
+                                if (x_get16(ev, 16) == (u32)0)
+                                {
+                                    this.exposed = true;
+                                };
+                            };
+                            if (code == (int)X11Ev.X_CONFIGURE_NOTIFY)
+                            {
+                                nw = (int)x_get16(ev, 20);
+                                nh = (int)x_get16(ev, 22);
+                                if (nw > 0 & nh > 0 & (nw != this.width | nh != this.height))
+                                {
+                                    this.alloc_pixels(nw, nh);
+                                    this.resized = true;
+                                    this.exposed = true;
+                                };
+                            };
+                            if (code == (int)X11Ev.X_CLIENT_MESSAGE)
+                            {
+                                if (x_get32(ev, 8) == this.wm_protocols & x_get32(ev, 12) == this.wm_delete)
+                                {
+                                    this.running = false;
+                                };
+                            };
+                            off = off + 32;
+                        };
+                        // Keep any partial packet at the front of the buffer
+                        if (off > 0)
+                        {
+                            memmove((void*)this.rbuf, (void*)((byte*)this.rbuf + off), (size_t)(this.rlen - off));
+                            this.rlen = this.rlen - off;
+                        };
+                    };
+
+                    // Redraw after an expose with the current framebuffer
+                    if (this.exposed & this.running)
+                    {
+                        this.present();
+                    };
+                    return this.running;
+                };
+            };
+        };
+    };
+};
+
+#endif;

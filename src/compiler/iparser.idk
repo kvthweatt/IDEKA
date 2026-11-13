@@ -13161,6 +13161,43 @@ namespace IDEKA
                 };
             };
 
+            // True when the item after the current comma is a value: anything except an identifier followed by = or @=
+            comma_value_follows() -> bool
+            {
+                int m = this.mark();
+                bool r;
+                this.advance();
+                r = true;
+                switch (this.expect(TokenType.IDENTIFIER))
+                {
+                    case (true) {
+                        this.advance();
+                        r = !this.expect2(TokenType.ASSIGN, TokenType.ADDRESS_ASSIGN);
+                    }
+                    default {};
+                };
+                this.reset(m);
+                -> r;
+            };
+
+            // Removes one leading null initializer, shifting the rest down
+            drop_leading_null(PtrVec* v) -> void
+            {
+                int i;
+                switch (v.len > 1 & v.items[0] == (void*)0)
+                {
+                    case (true) {
+                        while (i < v.len - 1)
+                        {
+                            v.items[i] = v.items[i + 1];
+                            i++;
+                        };
+                        v.len = v.len - 1;
+                    }
+                    default {};
+                };
+            };
+
             // variable_declaration -> type_spec ( 'as' name ('=' expr)? (',' name ('=' expr)?)*
             //                                   | name ( '(' args ')' | '@=' expr | 'from' expr | '=' expr | '{' dict '}' )
             //                                     (',' name ...)* )
@@ -13642,6 +13679,21 @@ namespace IDEKA
                                                                             {
                                                                                 this.note_comptime_string(name, ts, rhs);
                                                                                 pv_push(inits, (void*)rhs);
+                                                                                // int a, b = 5, 2: values after the comma extend the list
+                                                                                while (this.expect(TokenType.COMMA) & this.comma_value_follows() & !this.failed)
+                                                                                {
+                                                                                    this.advance();
+                                                                                    rhs = this.expression();
+                                                                                    switch (this.failed)
+                                                                                    {
+                                                                                        case (true) { pv_free(names); -> this.decl_abort(ts, inits, (NodeVec*)0); }
+                                                                                        default
+                                                                                        {
+                                                                                            pv_push(inits, (void*)rhs);
+                                                                                            this.drop_leading_null(inits);
+                                                                                        };
+                                                                                    };
+                                                                                };
                                                                             };
                                                                         };
                                                                     };

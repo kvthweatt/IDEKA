@@ -1,0 +1,244 @@
+// P-384 ECDSA test against vectors from tests/p384_gen.py
+#import <standard.idk>, <cryptography.idk>;
+
+using standard::io::console,
+      standard::crypto::P384;
+
+def hexval(byte c) -> int
+{
+    if (c >= (byte)97) { return (int)c - 87; };
+    return (int)c - 48;
+};
+
+def unhex(byte* s, byte* out) -> int
+{
+    int n = 0;
+    while (s[n * 2] != (byte)0) { out[n] = (byte)(hexval(s[n * 2]) * 16 + hexval(s[n * 2 + 1])); n++; };
+    return n;
+};
+
+def hexd(byte* h, int n) -> void
+{
+    int i, hi, lo;
+    for (i = 0; i < n; i++)
+    {
+        hi = (int)((h[i] >> 4) `& (byte)15);
+        lo = (int)(h[i] `& (byte)15);
+        if (hi < 10) { print(hi); } else { print((byte)(hi - 10 + 97)); };
+        if (lo < 10) { print(lo); } else { print((byte)(lo - 10 + 97)); };
+    };
+};
+
+global int fails = 0;
+
+def check(byte* name, bool ok) -> void
+{
+    if (ok) { print(name); print(" ok\n\0"); } else { print(name); print(" FAIL\n\0"); fails++; };
+};
+
+def vec0() -> void
+{
+    byte[49] b_d;
+    byte* s_d = "43a2814dd6226456c8d2b21ba8716446b8a401c5202a6e9b2a59eb9c833969e09e2294f5115546d6baef79aa91af8c90\0";
+    int l_d = unhex(s_d, @b_d[0]);
+    byte[49] b_qx;
+    byte* s_qx = "cefe037eb1d1b0e9687dc12c8877c2eafb11fc1d0bf0140c216a917814a775ae94eec3afeed0e0a6ce904707ea44cdb0\0";
+    int l_qx = unhex(s_qx, @b_qx[0]);
+    byte[49] b_qy;
+    byte* s_qy = "689b9091390c9f9b9adf119673f21a9ddb49027263318269451ac4ea0f803eb4fcbfc79e43821ba0a5af192eb53b9d65\0";
+    int l_qy = unhex(s_qy, @b_qy[0]);
+    byte[49] b_dig;
+    byte* s_dig = "57499807bcfc62cce9141021e11943458508111509bd478cd63922f4068fce8106e90ca810cb89188248633d9618a24c\0";
+    int l_dig = unhex(s_dig, @b_dig[0]);
+    byte[49] b_r;
+    byte* s_r = "4b1d2db8dd56a0255fb6c4cb5b4ebd89723c0664892cba8a3c457c4e35748cbc5f126c4514ebec84d13cadadc226667f\0";
+    int l_r = unhex(s_r, @b_r[0]);
+    byte[49] b_s;
+    byte* s_s = "4efe31ed4694c2661740ca84b5461c3c4b0b0e051dd59941e7c8cb3974bfc19e0264db3d266f43712a3fc8a3e7e90def\0";
+    int l_s = unhex(s_s, @b_s[0]);
+    byte[103] b_der;
+    byte* s_der = "306402304b1d2db8dd56a0255fb6c4cb5b4ebd89723c0664892cba8a3c457c4e35748cbc5f126c4514ebec84d13cadadc226667f02304efe31ed4694c2661740ca84b5461c3c4b0b0e051dd59941e7c8cb3974bfc19e0264db3d266f43712a3fc8a3e7e90def\0";
+    int l_der = unhex(s_der, @b_der[0]);
+    byte[48] px, py, r2, s2, nonce, dr, ds;
+    byte[120] der2;
+    int dl, j;
+    bool same;
+    for (j = 0; j < 48; j++) { nonce[j] = (byte)(j * 5 + 9); };
+    print("vector 0\n\0");
+    check("pubkey\0", P384::ecdsa_p384_pubkey(@px[0], @py[0], @b_d[0]));
+    same = true;
+    for (j = 0; j < 48; j++) { if (px[j] != b_qx[j] | py[j] != b_qy[j]) { same = false; }; };
+    check("pubkey matches\0", same);
+    check("verify python sig\0", P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("der decode\0", P384::ecdsa_der_decode_n(@dr[0], @ds[0], 48, @b_der[0], l_der));
+    same = true;
+    for (j = 0; j < 48; j++) { if (dr[j] != b_r[j] | ds[j] != b_s[j]) { same = false; }; };
+    check("der decode matches\0", same);
+    P384::ecdsa_der_encode_n(@der2[0], @dl, @dr[0], @ds[0], 48);
+    same = dl == l_der;
+    for (j = 0; j < dl; j++) { if (der2[j] != b_der[j]) { same = false; }; };
+    check("der roundtrip\0", same);
+    b_s[10] = b_s[10] ^| (byte)4;
+    check("tamper rejected\0", !P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("own sign\0", P384::ecdsa_p384_sign(@r2[0], @s2[0], @b_d[0], @b_dig[0], l_dig, @nonce[0]));
+    check("own verify\0", P384::ecdsa_p384_verify(@r2[0], @s2[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    print("SIG \0"); hexd(@b_qx[0], 48); print(" \0"); hexd(@b_qy[0], 48); print(" \0"); hexd(@b_dig[0], l_dig); print(" \0"); hexd(@r2[0], 48); print(" \0"); hexd(@s2[0], 48); print("\n\0");
+};
+
+def vec1() -> void
+{
+    byte[49] b_d;
+    byte* s_d = "34f55e545644ce4b5f8c5579c9b9abfd222748dcef996bd7c5c0a21d15db8104f8020636526008930b079a3bba48e8b7\0";
+    int l_d = unhex(s_d, @b_d[0]);
+    byte[49] b_qx;
+    byte* s_qx = "60a0cc3a2eb713be3ad104c838e85a4e6e9492ad858a84513d961c3a93325216b09732ca75b1530b629b64e34a64bf6b\0";
+    int l_qx = unhex(s_qx, @b_qx[0]);
+    byte[49] b_qy;
+    byte* s_qy = "7d8c9ec478191e8abce2616a83eaf4225ffcc0a8d22d79158123112dfdccd4c5d622990a009f4f5272011bbc8c3f9f45\0";
+    int l_qy = unhex(s_qy, @b_qy[0]);
+    byte[33] b_dig;
+    byte* s_dig = "99f014d84a1e83b1d4c527c1455c9819f88ab71ba7193793c6334a0b413d9fa3\0";
+    int l_dig = unhex(s_dig, @b_dig[0]);
+    byte[49] b_r;
+    byte* s_r = "db6eff081fe3fa965c4d2b4a204f7c811564bc48c8fd3dc34639fea0148da4b7baf495f8a97b128aaa90b0114825f13d\0";
+    int l_r = unhex(s_r, @b_r[0]);
+    byte[49] b_s;
+    byte* s_s = "46b8f4e3f44dca44b9580fd1d015ec03b9edd9e96fc0db78254a991376cd5874506695d4a37b05be976baf98f7a766b4\0";
+    int l_s = unhex(s_s, @b_s[0]);
+    byte[104] b_der;
+    byte* s_der = "3065023100db6eff081fe3fa965c4d2b4a204f7c811564bc48c8fd3dc34639fea0148da4b7baf495f8a97b128aaa90b0114825f13d023046b8f4e3f44dca44b9580fd1d015ec03b9edd9e96fc0db78254a991376cd5874506695d4a37b05be976baf98f7a766b4\0";
+    int l_der = unhex(s_der, @b_der[0]);
+    byte[48] px, py, r2, s2, nonce, dr, ds;
+    byte[120] der2;
+    int dl, j;
+    bool same;
+    for (j = 0; j < 48; j++) { nonce[j] = (byte)(j * 5 + 9); };
+    print("vector 1\n\0");
+    check("pubkey\0", P384::ecdsa_p384_pubkey(@px[0], @py[0], @b_d[0]));
+    same = true;
+    for (j = 0; j < 48; j++) { if (px[j] != b_qx[j] | py[j] != b_qy[j]) { same = false; }; };
+    check("pubkey matches\0", same);
+    check("verify python sig\0", P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("der decode\0", P384::ecdsa_der_decode_n(@dr[0], @ds[0], 48, @b_der[0], l_der));
+    same = true;
+    for (j = 0; j < 48; j++) { if (dr[j] != b_r[j] | ds[j] != b_s[j]) { same = false; }; };
+    check("der decode matches\0", same);
+    P384::ecdsa_der_encode_n(@der2[0], @dl, @dr[0], @ds[0], 48);
+    same = dl == l_der;
+    for (j = 0; j < dl; j++) { if (der2[j] != b_der[j]) { same = false; }; };
+    check("der roundtrip\0", same);
+    b_s[10] = b_s[10] ^| (byte)4;
+    check("tamper rejected\0", !P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("own sign\0", P384::ecdsa_p384_sign(@r2[0], @s2[0], @b_d[0], @b_dig[0], l_dig, @nonce[0]));
+    check("own verify\0", P384::ecdsa_p384_verify(@r2[0], @s2[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    print("SIG \0"); hexd(@b_qx[0], 48); print(" \0"); hexd(@b_qy[0], 48); print(" \0"); hexd(@b_dig[0], l_dig); print(" \0"); hexd(@r2[0], 48); print(" \0"); hexd(@s2[0], 48); print("\n\0");
+};
+
+def vec2() -> void
+{
+    byte[49] b_d;
+    byte* s_d = "aefbadf56bb8f32fba257ef75008ecef35075ff32698a67cd2ddd0424acd0fde95169071cf6cdc4fc68c18cfe1913b39\0";
+    int l_d = unhex(s_d, @b_d[0]);
+    byte[49] b_qx;
+    byte* s_qx = "8d0edaa04cbb68f46e3e53ec0c2047b2afc518918e03ca16e3bebd7f5f7bc062f60af4fb0e4393b55305540373d1515a\0";
+    int l_qx = unhex(s_qx, @b_qx[0]);
+    byte[49] b_qy;
+    byte* s_qy = "a9b684065c8d3e96df68bbb07f5ad718d9c68527e32ac225887c8192c8d4ddccfd04cc4e51288033015a5f6d5a86cd8a\0";
+    int l_qy = unhex(s_qy, @b_qy[0]);
+    byte[49] b_dig;
+    byte* s_dig = "263c965ff9fc1398d5feef723096a48c0b2a5ae7a8b8af56bd36d387bc6fb914be087d9c617c8cd2921561e6c32ec0ad\0";
+    int l_dig = unhex(s_dig, @b_dig[0]);
+    byte[49] b_r;
+    byte* s_r = "d6d55f2d6c08c6089fa5bca214f1ca7d21e0d0dec403937a5a5f5e2037c701a1a6cbaab72a964f8ef25797b26d4e2566\0";
+    int l_r = unhex(s_r, @b_r[0]);
+    byte[49] b_s;
+    byte* s_s = "367aadca5348e52d63ee52070482e60ed14296c88cf6a34a7d45385159e908179cbbe426c2ce5172ef924fe6cdbc489e\0";
+    int l_s = unhex(s_s, @b_s[0]);
+    byte[104] b_der;
+    byte* s_der = "3065023100d6d55f2d6c08c6089fa5bca214f1ca7d21e0d0dec403937a5a5f5e2037c701a1a6cbaab72a964f8ef25797b26d4e25660230367aadca5348e52d63ee52070482e60ed14296c88cf6a34a7d45385159e908179cbbe426c2ce5172ef924fe6cdbc489e\0";
+    int l_der = unhex(s_der, @b_der[0]);
+    byte[48] px, py, r2, s2, nonce, dr, ds;
+    byte[120] der2;
+    int dl, j;
+    bool same;
+    for (j = 0; j < 48; j++) { nonce[j] = (byte)(j * 5 + 9); };
+    print("vector 2\n\0");
+    check("pubkey\0", P384::ecdsa_p384_pubkey(@px[0], @py[0], @b_d[0]));
+    same = true;
+    for (j = 0; j < 48; j++) { if (px[j] != b_qx[j] | py[j] != b_qy[j]) { same = false; }; };
+    check("pubkey matches\0", same);
+    check("verify python sig\0", P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("der decode\0", P384::ecdsa_der_decode_n(@dr[0], @ds[0], 48, @b_der[0], l_der));
+    same = true;
+    for (j = 0; j < 48; j++) { if (dr[j] != b_r[j] | ds[j] != b_s[j]) { same = false; }; };
+    check("der decode matches\0", same);
+    P384::ecdsa_der_encode_n(@der2[0], @dl, @dr[0], @ds[0], 48);
+    same = dl == l_der;
+    for (j = 0; j < dl; j++) { if (der2[j] != b_der[j]) { same = false; }; };
+    check("der roundtrip\0", same);
+    b_s[10] = b_s[10] ^| (byte)4;
+    check("tamper rejected\0", !P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("own sign\0", P384::ecdsa_p384_sign(@r2[0], @s2[0], @b_d[0], @b_dig[0], l_dig, @nonce[0]));
+    check("own verify\0", P384::ecdsa_p384_verify(@r2[0], @s2[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    print("SIG \0"); hexd(@b_qx[0], 48); print(" \0"); hexd(@b_qy[0], 48); print(" \0"); hexd(@b_dig[0], l_dig); print(" \0"); hexd(@r2[0], 48); print(" \0"); hexd(@s2[0], 48); print("\n\0");
+};
+
+def vec3() -> void
+{
+    byte[49] b_d;
+    byte* s_d = "ff3b767dffacc11daa28ff32a64bcbe087e2440501004ac5787df095367d334c89798730eadbbda90f3afe4505e1f7ce\0";
+    int l_d = unhex(s_d, @b_d[0]);
+    byte[49] b_qx;
+    byte* s_qx = "c7d166a3bc60631c13d4c1f11f96114332a369891a79aa159c47c807e049e789de86f944c9d01d4edd53a6ea4940b49b\0";
+    int l_qx = unhex(s_qx, @b_qx[0]);
+    byte[49] b_qy;
+    byte* s_qy = "d8f47f2dca906907fa4d03f8e26b8c2f4700ba76cbf6f3d1bcbaea5e74deafd6068b1b62829cca1c710c85cc9725402e\0";
+    int l_qy = unhex(s_qy, @b_qy[0]);
+    byte[33] b_dig;
+    byte* s_dig = "cdef67177236550eb799d0b8849e8a7c8f4e80212a453fe535a3c2b6df4a5064\0";
+    int l_dig = unhex(s_dig, @b_dig[0]);
+    byte[49] b_r;
+    byte* s_r = "9b655c939267c15759ea61d42018eb3d771e04ceb86b5edd24ce36cd9b1f15dd775c85da60346bb726bda749c4029aaf\0";
+    int l_r = unhex(s_r, @b_r[0]);
+    byte[49] b_s;
+    byte* s_s = "b8f57d104fd56dd0995516c023adbf71a05d900392d3a869b67613c0d15eb83a12d29c766e458e3b6741c06a0230f119\0";
+    int l_s = unhex(s_s, @b_s[0]);
+    byte[105] b_der;
+    byte* s_der = "30660231009b655c939267c15759ea61d42018eb3d771e04ceb86b5edd24ce36cd9b1f15dd775c85da60346bb726bda749c4029aaf023100b8f57d104fd56dd0995516c023adbf71a05d900392d3a869b67613c0d15eb83a12d29c766e458e3b6741c06a0230f119\0";
+    int l_der = unhex(s_der, @b_der[0]);
+    byte[48] px, py, r2, s2, nonce, dr, ds;
+    byte[120] der2;
+    int dl, j;
+    bool same;
+    for (j = 0; j < 48; j++) { nonce[j] = (byte)(j * 5 + 9); };
+    print("vector 3\n\0");
+    check("pubkey\0", P384::ecdsa_p384_pubkey(@px[0], @py[0], @b_d[0]));
+    same = true;
+    for (j = 0; j < 48; j++) { if (px[j] != b_qx[j] | py[j] != b_qy[j]) { same = false; }; };
+    check("pubkey matches\0", same);
+    check("verify python sig\0", P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("der decode\0", P384::ecdsa_der_decode_n(@dr[0], @ds[0], 48, @b_der[0], l_der));
+    same = true;
+    for (j = 0; j < 48; j++) { if (dr[j] != b_r[j] | ds[j] != b_s[j]) { same = false; }; };
+    check("der decode matches\0", same);
+    P384::ecdsa_der_encode_n(@der2[0], @dl, @dr[0], @ds[0], 48);
+    same = dl == l_der;
+    for (j = 0; j < dl; j++) { if (der2[j] != b_der[j]) { same = false; }; };
+    check("der roundtrip\0", same);
+    b_s[10] = b_s[10] ^| (byte)4;
+    check("tamper rejected\0", !P384::ecdsa_p384_verify(@b_r[0], @b_s[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    check("own sign\0", P384::ecdsa_p384_sign(@r2[0], @s2[0], @b_d[0], @b_dig[0], l_dig, @nonce[0]));
+    check("own verify\0", P384::ecdsa_p384_verify(@r2[0], @s2[0], @b_qx[0], @b_qy[0], @b_dig[0], l_dig));
+    print("SIG \0"); hexd(@b_qx[0], 48); print(" \0"); hexd(@b_qy[0], 48); print(" \0"); hexd(@b_dig[0], l_dig); print(" \0"); hexd(@r2[0], 48); print(" \0"); hexd(@s2[0], 48); print("\n\0");
+};
+
+def main() -> int
+{
+    vec0();
+    vec1();
+    vec2();
+    vec3();
+    if (fails == 0) { print("ALL PASS\n\0"); } else { print("FAILS\n\0"); };
+    flush();
+    return fails;
+};

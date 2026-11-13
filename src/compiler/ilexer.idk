@@ -2048,7 +2048,7 @@ namespace IDEKA
                             default {};
                         };
 
-                        int lt, m = flen, idx, dch;
+                        int lt, idx, dch, m = flen;
                         while (m > 0)
                         {
                             idx = m - 1;

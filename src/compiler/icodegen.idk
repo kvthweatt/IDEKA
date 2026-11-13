@@ -4613,10 +4613,17 @@ namespace IDEKA
                                                 {
                                                     case (true) {
                                             sw = 32;
-                                            switch (v > (i64)2147483647)
+                                            // A suffixed literal wider than 32 bits keeps its full 64 bit value
+                                            switch (v > (i64)4294967295 | v < (i64)0)
                                             {
-                                                case (true) { v = v - ((i64)1 << (i64)32); }
-                                                default {};
+                                                case (true) { sw = 64; }
+                                                default {
+                                                    switch (v > (i64)2147483647)
+                                                    {
+                                                        case (true) { v = v - ((i64)1 << (i64)32); }
+                                                        default {};
+                                                    };
+                                                };
                                             };
                                         }
                                                     default {
@@ -9255,7 +9262,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             {
                 int op = n.op;
                 IRValue* lhs, rhs, r, ovp;
-                bool uns, is_cmp, might_ptr, lp, rp, li, ri, lzero, rzero, dhandled, ohandled;
+                bool uns, is_cmp, might_ptr, scat, lp, rp, li, ri, lzero, rzero, dhandled, ohandled;
                 IRType* pe;
                 int lcat, rcat, bare_cat, other_cat;
                 Node* other_n;
@@ -9420,6 +9427,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                 li = lhs.ty.kind == LK.INT;
                                                                 ri = rhs.ty.kind == LK.INT;
                                                                 might_ptr = false;
+                                                                // A byte pointer added to a string literal array is a string concatenation
+                                                                scat = op == Operator.ADD & lp & rp &
+                                                                    ((lhs.ty.elem.kind == LK.INT & lhs.ty.elem.width == 8 & rhs.ty.elem.kind == LK.ARRAY & rhs.ty.elem.elem.kind == LK.INT & rhs.ty.elem.elem.width == 8) |
+                                                                     (rhs.ty.elem.kind == LK.INT & rhs.ty.elem.width == 8 & lhs.ty.elem.kind == LK.ARRAY & lhs.ty.elem.elem.kind == LK.INT & lhs.ty.elem.elem.width == 8));
                                                                 switch (op == Operator.ADD | op == Operator.SUB)
                                                                 {
                                                                     case (true) {
@@ -9482,7 +9493,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         case (true) {
                                                                         pe = lhs.ty.elem;
                                                                         switch (pe.kind != LK.ARRAY & pe.kind != LK.STRUCT & pe.kind != LK.ISTRUCT &
-                                                                            (lhs.flags `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) == 0)
+                                                                            (lhs.flags `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) == 0 & !scat)
                                                                         {
                                                                             case (true) {
                                                                             lhs = this.mod.load(lhs, g"auto_deref_lhs\0");
@@ -9497,7 +9508,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         case (true) {
                                                                         pe = rhs.ty.elem;
                                                                         switch (pe.kind != LK.ARRAY & pe.kind != LK.STRUCT & pe.kind != LK.ISTRUCT &
-                                                                            (rhs.flags `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) == 0)
+                                                                            (rhs.flags `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) == 0 & !scat)
                                                                         {
                                                                             case (true) {
                                                                             rhs = this.mod.load(rhs, g"auto_deref_rhs\0");
@@ -9603,7 +9614,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                 switch (op == Operator.ADD)
                                                                 {
                                                                     case (true) {
-                                                                    switch (((lhs.flags `| rhs.flags) `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) != 0)
+                                                                    switch (scat | (((lhs.flags `| rhs.flags) `& (VF_FROM_EXPR `| VF_TYPEFUNC_STR `| VF_STRING_VALUE)) != 0))
                                                                     {
                                                                         case (true) {
                                                                         IRFunc* cf = this.mod.find_function(g"standard__strings__manip__concat__2__byteE1_ptr1__byteE1_ptr1__ret_byteE1_ptr1\0");

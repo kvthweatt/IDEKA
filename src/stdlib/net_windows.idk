@@ -1,8 +1,8 @@
 // Author: Karac V. Thweatt
 
 // Networking Library - Windows Sockets API (Winsock2)
-// Provides minimal TCP/UDP socket functionality for Windows
-// No object usage - structs and functions only
+// Platform half of the socket library: implements the primitives that the
+// neutral builtins/socket_object_raw.idk is written against.
 
 #ifndef IDEKA_STANDARD
 #def IDEKA_STANDARD 1;
@@ -18,9 +18,49 @@
 #import <runtime\memory.idk>;
 #endif;
 
-#ifndef IDEKA_STANDARD_SOCKETS
-#import <builtins\socket_object_raw.idk>;
-#endif;
+// ============ WINSOCK FFI DECLARATIONS ============
+extern
+{
+    // Core socket functions
+    def !!
+        socket(int, int, int) -> int,
+        bind(int, void*, int) -> int,
+        listen(int, int) -> int,
+        accept(int, void*, int*) -> int,
+        connect(int, void*, int) -> int,
+        send(int, void*, int, int) -> int,
+        recv(int, void*, int, int) -> int,
+        sendto(int, void*, int, int, void*, int) -> int,
+        recvfrom(int, void*, int, int, void*, int*) -> int,
+        closesocket(int) -> int,
+        shutdown(int, int) -> int,
+
+        // Socket options
+        setsockopt(int, int, int, void*, int) -> int,
+        getsockopt(int, int, int, void*, int*) -> int,
+
+        // Address conversion
+        inet_addr(byte*) -> u32,
+        inet_ntoa(u32) -> byte*,
+        htons(u16) -> u16,
+        htonl(u32) -> u32,
+        ntohs(u16) -> u16,
+        ntohl(u32) -> u32,
+
+        // Name resolution
+        gethostbyname(byte*) -> void*,
+        getaddrinfo(byte*, byte*, void*, void**) -> int,
+        freeaddrinfo(void* res) -> void,
+
+        // Socket control (Windows uses ioctlsocket instead of fcntl)
+        ioctlsocket(int, u32, u32*) -> int,
+        select(int, void*, void*, void*, void*) -> int,
+
+        // WSA initialization/cleanup
+        WSAStartup(u16, void*) -> int,
+        WSACleanup() -> int,
+        WSAGetLastError() -> int;
+};
 
 // Time value for timeouts (different on Windows - uses milliseconds as DWORD)
 struct timeval
@@ -29,10 +69,203 @@ struct timeval
         tv_usec;         // Microseconds
 };
 
+// WSAData structure (simplified)
+struct WSAData
+{
+    u16 wVersion,
+        wHighVersion;
+    byte[257] szDescription;
+    byte[129] szSystemStatus;
+    u16 iMaxSockets,
+        iMaxUdpDg;
+    u64* lpVendorInfo;
+};
+
+// Neutral half. Imported after the externs above so they precede the socket object.
+#ifndef IDEKA_STANDARD_SOCKETS
+#import <socket_object_raw.idk>;
+#endif;
+
 namespace standard
 {
     namespace net
     {
+    };
+
+    namespace sockets
+    {
+        // ============ CONSTANTS (Windows values) ============
+
+        global const int AF_INET6 = 23,    // IPv6 (different on Windows!)
+
+        // Socket options levels
+                         SOL_SOCKET = 0xFFFF,  // Different on Windows!
+
+        // Socket options
+                         SO_REUSEADDR = 0x0004,
+                         SO_KEEPALIVE = 0x0008,
+                         SO_BROADCAST = 0x0020,
+                         SO_RCVBUF = 0x1002,
+                         SO_SNDBUF = 0x1001,
+                         SO_RCVTIMEO = 0x1006,
+                         SO_SNDTIMEO = 0x1005,
+
+        // Shutdown modes
+                         SD_RECEIVE = 0x00,    // Shutdown receive (same as SHUT_RD)
+                         SD_SEND = 0x01,       // Shutdown send (same as SHUT_WR)
+                         SD_BOTH = 0x02,       // Shutdown both (same as SHUT_RDWR)
+
+        // WSA Error codes (some common ones)
+                         WSAEWOULDBLOCK = 10035,
+                         WSAECONNRESET = 10054,
+                         WSAETIMEDOUT = 10060;
+
+        // ioctlsocket commands (replaces fcntl)
+        global const u32 FIONBIO = 0x8004667E,  // Set non-blocking mode
+                         FIONREAD = 0x4004667F; // Get number of bytes available
+
+        // WSA version
+        global const u16 WINSOCK_VERSION = 0x0202;  // Version 2.2 (stored as 0x0202)
+
+        // ============ INITIALIZATION ============
+
+        // Initialize Winsock (MUST be called before any socket operations on Windows!)
+        def init() -> int
+        {
+            WSAData wsaData;
+            return WSAStartup(WINSOCK_VERSION, @wsaData);
+        };
+
+        // Cleanup Winsock (should be called when done with sockets)
+        def cleanup() -> int
+        {
+            return WSACleanup();
+        };
+
+        // Get last socket error
+        def get_last_error() -> int
+        {
+            return WSAGetLastError();
+        };
+
+        // ============ PRIMITIVES ============
+
+        def tcp_socket() -> int
+        {
+            return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        };
+
+        def udp_socket() -> int
+        {
+            return socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        };
+
+        def sock_close(int sockfd) -> int
+        {
+            return closesocket(sockfd);
+        };
+
+        def sock_shutdown(int sockfd) -> int
+        {
+            return shutdown(sockfd, SD_BOTH);
+        };
+
+        def sock_bind(int sockfd, sockaddr_in* addr) -> int
+        {
+            return bind(sockfd, (void*)addr, 16);
+        };
+
+        def sock_listen(int sockfd, int backlog) -> int
+        {
+            return listen(sockfd, backlog);
+        };
+
+        def sock_accept(int sockfd, sockaddr_in* addr) -> int
+        {
+            int addr_len = 16;
+            return accept(sockfd, (void*)addr, @addr_len);
+        };
+
+        def sock_connect(int sockfd, sockaddr_in* addr) -> int
+        {
+            return connect(sockfd, (void*)addr, 16);
+        };
+
+        def sock_send(int sockfd, byte* buf, int length) -> int
+        {
+            return send(sockfd, (void*)buf, length, 0);
+        };
+
+        def sock_recv(int sockfd, byte* buf, int length) -> int
+        {
+            return recv(sockfd, (void*)buf, length, 0);
+        };
+
+        def sock_sendto(int sockfd, byte* buf, int length, sockaddr_in* addr) -> int
+        {
+            return sendto(sockfd, (void*)buf, length, 0, (void*)addr, 16);
+        };
+
+        def sock_recvfrom(int sockfd, byte* buf, int length, sockaddr_in* addr) -> int
+        {
+            int addr_len = 16;
+            return recvfrom(sockfd, (void*)buf, length, 0, (void*)addr, @addr_len);
+        };
+
+        // Set socket to non-blocking mode (Windows version using ioctlsocket)
+        def set_nonblocking(int sockfd) -> int
+        {
+            u32 mode = 1;  // 1 = non-blocking, 0 = blocking
+            return ioctlsocket(sockfd, FIONBIO, @mode);
+        };
+
+        // Set socket to blocking mode
+        def set_blocking(int sockfd) -> int
+        {
+            u32 mode = 0;
+            return ioctlsocket(sockfd, FIONBIO, @mode);
+        };
+
+        // Enable SO_REUSEADDR option
+        def set_reuseaddr(int sockfd, bool enable) -> int
+        {
+            int optval = enable ? 1 : 0;
+            return setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, @optval, 4);
+        };
+
+        // Set receive timeout (Windows uses milliseconds as DWORD, not timeval)
+        def set_recv_timeout(int sockfd, int milliseconds) -> int
+        {
+            return setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, @milliseconds, 4);
+        };
+
+        // Set send timeout (Windows uses milliseconds as DWORD, not timeval)
+        def set_send_timeout(int sockfd, int milliseconds) -> int
+        {
+            return setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, @milliseconds, 4);
+        };
+
+        // Convert port from host byte order to network byte order
+        def port_hton(u16 host_port) -> u16
+        {
+            return htons(host_port);
+        };
+
+        // Convert port from network byte order to host byte order
+        def port_ntoh(u16 net_port) -> u16
+        {
+            return ntohs(net_port);
+        };
+
+        def ip_from_string(byte* ip_str) -> u32
+        {
+            return inet_addr(ip_str);
+        };
+
+        def ip_to_string(u32 ip) -> byte*
+        {
+            return inet_ntoa(ip);
+        };
     };
 };
 

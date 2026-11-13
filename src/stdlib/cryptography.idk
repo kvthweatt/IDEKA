@@ -481,6 +481,96 @@ namespace standard
                     sha384_final(@ctx, hash);
                 };
 
+                // ---- SHA-512 ----
+                // Same compression function as SHA-384, different IV and a full 64-byte digest.
+                // The context type is SHA384_CTX.
+
+                // Initialize a SHA-512 context
+                def sha512_init(SHA384_CTX* ctx) -> void
+                {
+                    ctx.state = [0x6A09E667F3BCC908u,
+                                 0xBB67AE8584CAA73Bu,
+                                 0x3C6EF372FE94F82Bu,
+                                 0xA54FF53A5F1D36F1u,
+                                 0x510E527FADE682D1u,
+                                 0x9B05688C2B3E6C1Fu,
+                                 0x1F83D9ABFB41BD6Bu,
+                                 0x5BE0CD19137E2179u];
+
+                    ctx.bitlen_lo = 0u;
+                    ctx.bitlen_hi = 0u;
+                    ctx.buflen = 0u;
+                };
+
+                // Feed data into a SHA-512 context (identical to SHA-384)
+                def sha512_update(SHA384_CTX* ctx, byte* datax, u64 len) -> void
+                {
+                    sha384_update(ctx, datax, len);
+                };
+
+                // Finalize and write the 64-byte digest to hash
+                def sha512_final(SHA384_CTX* ctx, byte* hash) -> void
+                {
+                    u32 i;
+                    u64 total_bits_lo, total_bits_hi;
+
+                    i = ctx.buflen;
+                    ctx.buffer[i] = (byte)0x80;
+                    i++;
+
+                    if (ctx.buflen < 112u)
+                    {
+                        while (i < 112u)
+                        {
+                            ctx.buffer[i] = (byte)0;
+                            i++;
+                        };
+                    }
+                    else
+                    {
+                        while (i < 128u)
+                        {
+                            ctx.buffer[i] = (byte)0;
+                            i++;
+                        };
+                        sha384_transform(ctx, ctx.buffer);
+                        for (i = 0; i < 112; i++)
+                        {
+                            ctx.buffer[i] = (byte)0;
+                        };
+                    };
+
+                    total_bits_lo = ctx.bitlen_lo + ((u64)ctx.buflen * 8u);
+                    total_bits_hi = ctx.bitlen_hi;
+                    if (total_bits_lo < ctx.bitlen_lo)
+                    {
+                        total_bits_hi += 1u;
+                    };
+
+                    ctx.buffer[112..119] = (byte[8])(be64)total_bits_hi;
+                    ctx.buffer[120..127] = (byte[8])(be64)total_bits_lo;
+
+                    sha384_transform(ctx, ctx.buffer);
+
+                    hash[0..7]   = (byte[8])(be64)ctx.state[0];
+                    hash[8..15]  = (byte[8])(be64)ctx.state[1];
+                    hash[16..23] = (byte[8])(be64)ctx.state[2];
+                    hash[24..31] = (byte[8])(be64)ctx.state[3];
+                    hash[32..39] = (byte[8])(be64)ctx.state[4];
+                    hash[40..47] = (byte[8])(be64)ctx.state[5];
+                    hash[48..55] = (byte[8])(be64)ctx.state[6];
+                    hash[56..63] = (byte[8])(be64)ctx.state[7];
+                };
+
+                // Convenience: SHA-512 of a single buffer
+                def sha512(byte* datax, u64 len, byte* hash) -> void
+                {
+                    SHA384_CTX ctx;
+                    sha512_init(@ctx);
+                    sha512_update(@ctx, datax, len);
+                    sha512_final(@ctx, hash);
+                };
+
             }; // SHA384
 
             namespace MD5
@@ -1950,6 +2040,132 @@ namespace standard
                     return hkdf_expand(@prk[0], info, info_len, okm, okm_len);
                 };
 
+                // ------------------------------------------------------------------
+                // HMAC-SHA384 and HMAC-SHA512 (block size 128 bytes)
+                // ------------------------------------------------------------------
+                def hmac_sha2_128(byte* key, int key_len,
+                                  byte* msg, int msg_len,
+                                  byte* out, bool is384) -> void
+                {
+                    byte[128] ipad_key, opad_key;
+                    byte[64] inner_hash, hashed_key;
+                    SHA384_CTX inner_ctx, outer_ctx, key_ctx;
+                    byte* effective_key;
+                    int effective_key_len, i, dlen;
+                    byte k;
+
+                    dlen = is384 ? 48 : 64;
+
+                    if (key_len > 128)
+                    {
+                        if (is384) { SHA384::sha384_init(@key_ctx); } else { SHA384::sha512_init(@key_ctx); };
+                        SHA384::sha384_update(@key_ctx, key, (u64)key_len);
+                        if (is384) { SHA384::sha384_final(@key_ctx, @hashed_key[0]); } else { SHA384::sha512_final(@key_ctx, @hashed_key[0]); };
+                        effective_key = @hashed_key[0];
+                        effective_key_len = dlen;
+                    }
+                    else
+                    {
+                        effective_key = key;
+                        effective_key_len = key_len;
+                    };
+
+                    for (i = 0; i < 128; i++)
+                    {
+                        k = (i < effective_key_len) ? effective_key[i] : (byte)0;
+                        ipad_key[i] = k ^| (byte)0x36;
+                        opad_key[i] = k ^| (byte)0x5C;
+                    };
+
+                    if (is384) { SHA384::sha384_init(@inner_ctx); } else { SHA384::sha512_init(@inner_ctx); };
+                    SHA384::sha384_update(@inner_ctx, @ipad_key[0], (u64)128);
+                    SHA384::sha384_update(@inner_ctx, msg, (u64)msg_len);
+                    if (is384) { SHA384::sha384_final(@inner_ctx, @inner_hash[0]); } else { SHA384::sha512_final(@inner_ctx, @inner_hash[0]); };
+
+                    if (is384) { SHA384::sha384_init(@outer_ctx); } else { SHA384::sha512_init(@outer_ctx); };
+                    SHA384::sha384_update(@outer_ctx, @opad_key[0], (u64)128);
+                    SHA384::sha384_update(@outer_ctx, @inner_hash[0], (u64)dlen);
+                    if (is384) { SHA384::sha384_final(@outer_ctx, out); } else { SHA384::sha512_final(@outer_ctx, out); };
+                };
+
+                def hmac_sha384(byte* key, int key_len, byte* msg, int msg_len, byte* out) -> void
+                {
+                    hmac_sha2_128(key, key_len, msg, msg_len, out, true);
+                };
+
+                def hmac_sha512(byte* key, int key_len, byte* msg, int msg_len, byte* out) -> void
+                {
+                    hmac_sha2_128(key, key_len, msg, msg_len, out, false);
+                };
+
+                // ------------------------------------------------------------------
+                // HKDF over SHA-384 (HashLen 48), as used by TLS_AES_256_GCM_SHA384
+                // ------------------------------------------------------------------
+                def hkdf_extract_sha384(byte* salt, int salt_len,
+                                        byte* ikm,  int ikm_len,
+                                        byte* prk) -> void
+                {
+                    byte[48] zero_salt;
+                    int i;
+
+                    if (salt == (byte*)0)
+                    {
+                        for (i = 0; i < 48; i++) { zero_salt[i] = (byte)0; };
+                        hmac_sha384(@zero_salt[0], 48, ikm, ikm_len, prk);
+                    }
+                    else
+                    {
+                        hmac_sha384(salt, salt_len, ikm, ikm_len, prk);
+                    };
+                };
+
+                // Returns 1 on success, 0 if okm_len > 255 * 48
+                def hkdf_expand_sha384(byte* prk,
+                                       byte* info, int info_len,
+                                       byte* okm,  int okm_len) -> int
+                {
+                    byte[48] t_prev, t_cur;
+                    byte[320] hmac_in;
+                    int n, i, j, offset, prev_len, copy_len, built;
+
+                    if (okm_len > (255 * 48)) { return 0; };
+                    if (info_len > 270) { return 0; };
+
+                    offset = 0;
+                    n = (okm_len + 47) / 48;
+
+                    for (i = 1; i <= n; i++)
+                    {
+                        built = 0;
+                        prev_len = (i == 1) ? 0 : 48;
+                        for (j = 0; j < prev_len; j++)
+                        {
+                            hmac_in[built] = t_prev[j];
+                            built = built + 1;
+                        };
+                        if (info != (byte*)0)
+                        {
+                            for (j = 0; j < info_len; j++)
+                            {
+                                hmac_in[built] = info[j];
+                                built = built + 1;
+                            };
+                        };
+                        hmac_in[built] = (byte)i;
+                        built = built + 1;
+
+                        hmac_sha384(prk, 48, @hmac_in[0], built, @t_cur[0]);
+
+                        copy_len = okm_len - offset;
+                        if (copy_len > 48) { copy_len = 48; };
+                        for (j = 0; j < copy_len; j++) { okm[offset + j] = t_cur[j]; };
+                        offset = offset + copy_len;
+                        for (j = 0; j < 48; j++) { t_prev[j] = t_cur[j]; };
+                    };
+
+                    return 1;
+                };
+
             }; // HKDF
         }; // kdf
 
@@ -2729,6 +2945,1906 @@ namespace standard
             };
 
         }; // ECDSA
+
+        namespace RSA
+        {
+            // =========================================================================
+            // RSA (RFC 8017) up to 4096 bit moduli
+            //
+            // Arithmetic runs on little endian 32 bit limb arrays with Montgomery
+            // multiplication, independent of the 4096 bit BigInt type so that a 4096 bit
+            // modulus (which squares to 8192 bits) works. All byte interfaces are big
+            // endian, as on the wire.
+            //
+            // Hash identifiers used by the signature schemes:
+            //   RSA_HASH_SHA256 = 1, RSA_HASH_SHA384 = 2, RSA_HASH_SHA512 = 3
+            //
+            // Public API:
+            //   rsa_public_op(out, in, n, n_len, e, e_len) -> bool
+            //   rsa_private_op(out, in, n, n_len, d, d_len) -> bool
+            //   rsa_private_crt_op(out, in, n, n_len, p, p_len, q, q_len,
+            //                      dp, dp_len, dq, dq_len, qinv, qinv_len) -> bool
+            //   rsa_pkcs1_verify(n, n_len, e, e_len, hash_id, digest, sig, sig_len) -> bool
+            //   rsa_pkcs1_sign_crt(sig, hash_id, digest, key parts...) -> bool
+            //   rsa_pss_verify(n, n_len, e, e_len, hash_id, digest, sig, sig_len) -> bool
+            //   rsa_pss_sign_crt(sig, hash_id, digest, salt, key parts...) -> bool
+            //
+            // The modular exponentiation is not constant time. Do not expose private
+            // key operations to an attacker who can measure their timing.
+            // =========================================================================
+
+            global const int RSA_HASH_SHA256 = 1,
+                             RSA_HASH_SHA384 = 2,
+                             RSA_HASH_SHA512 = 3;
+
+            // Montgomery context for one odd modulus
+            struct RSA_MONT
+            {
+                uint[128] n;        // modulus
+                uint[128] rr;       // R^2 mod n, R = 2^(32 * len)
+                uint[128] one;      // R mod n, the Montgomery form of 1
+                uint n0inv;         // -n^-1 mod 2^32
+                int len;            // limbs in use
+            };
+
+            // ---- byte and limb conversion ----
+
+            // Big endian bytes to little endian limbs, zero filling up to nlimbs
+            def rsa_be_to_limbs(uint* out, int nlimbs, byte* src, int srclen) -> void
+            {
+                int i, li, sh;
+                for (i = 0; i < nlimbs; i++) { out[i] = 0u; };
+                for (i = 0; i < srclen; i++)
+                {
+                    li = i / 4;
+                    sh = (i % 4) * 8;
+                    if (li < nlimbs)
+                    {
+                        out[li] = out[li] `| ((uint)src[srclen - 1 - i] << (uint)sh);
+                    };
+                };
+            };
+
+            // Little endian limbs to exactly dstlen big endian bytes
+            def rsa_limbs_to_be(byte* dst, int dstlen, uint* limbs, int nlimbs) -> void
+            {
+                int i, li, sh;
+                for (i = 0; i < dstlen; i++)
+                {
+                    li = i / 4;
+                    sh = (i % 4) * 8;
+                    if (li < nlimbs)
+                    {
+                        dst[dstlen - 1 - i] = (byte)((limbs[li] >> (uint)sh) `& 0xFFu);
+                    }
+                    else
+                    {
+                        dst[dstlen - 1 - i] = (byte)0;
+                    };
+                };
+            };
+
+            // Number of significant bytes after leading zeros
+            def rsa_byte_len(byte* v, int len) -> int
+            {
+                int i = 0;
+                while (i < len & v[i] == (byte)0) { i++; };
+                return len - i;
+            };
+
+            // Number of limbs actually used (index of top nonzero limb + 1)
+            def rsa_limb_len(uint* a, int nlimbs) -> int
+            {
+                int n = nlimbs;
+                while (n > 0 & a[n - 1] == 0u) { n--; };
+                return n;
+            };
+
+            // ---- limb arithmetic ----
+
+            // Compare equal length arrays, -1 / 0 / 1
+            def rsa_cmp(uint* a, uint* b, int n) -> int
+            {
+                int i;
+                for (i = n - 1; i >= 0; i--)
+                {
+                    if (a[i] > b[i]) { return 1; };
+                    if (a[i] < b[i]) { return -1; };
+                };
+                return 0;
+            };
+
+            // r = a - b over n limbs, returns the borrow
+            def rsa_sub(uint* r, uint* a, uint* b, int n) -> uint
+            {
+                int i;
+                u64 d;
+                uint borrow = 0u;
+                for (i = 0; i < n; i++)
+                {
+                    d = (u64)a[i] - (u64)b[i] - (u64)borrow;
+                    r[i] = (uint)d;
+                    borrow = (uint)((d >> 63u) `& (u64)1);
+                };
+                return borrow;
+            };
+
+            // r = a + b over n limbs, returns the carry
+            def rsa_add(uint* r, uint* a, uint* b, int n) -> uint
+            {
+                int i;
+                u64 s;
+                uint carry = 0u;
+                for (i = 0; i < n; i++)
+                {
+                    s = (u64)a[i] + (u64)b[i] + (u64)carry;
+                    r[i] = (uint)s;
+                    carry = (uint)(s >> 32u);
+                };
+                return carry;
+            };
+
+            // r = a mod m by bitwise long division. a has alen limbs, m has mlen limbs
+            // (top limb nonzero), r has mlen limbs.
+            def rsa_mod(uint* r, uint* a, int alen, uint* m, int mlen) -> void
+            {
+                int i, b, j;
+                uint bit, carry, newcarry;
+                for (j = 0; j < mlen; j++) { r[j] = 0u; };
+                for (i = alen - 1; i >= 0; i--)
+                {
+                    for (b = 31; b >= 0; b--)
+                    {
+                        bit = (a[i] >> (uint)b) `& 1u;
+                        carry = bit;
+                        for (j = 0; j < mlen; j++)
+                        {
+                            newcarry = r[j] >> 31u;
+                            r[j] = (r[j] << 1u) `| carry;
+                            carry = newcarry;
+                        };
+                        if (carry != 0u | rsa_cmp(r, m, mlen) >= 0)
+                        {
+                            rsa_sub(r, r, m, mlen);
+                        };
+                    };
+                };
+            };
+
+            // ---- Montgomery ----
+
+            // Prepare the context for modulus n (odd, len limbs, top limb nonzero)
+            def rsa_mont_init(RSA_MONT* m, uint* n, int len) -> void
+            {
+                int i, k;
+                uint x, carry, newcarry;
+                uint[128] v;
+
+                m.len = len;
+                for (i = 0; i < 128; i++) { m.n[i] = 0u; m.rr[i] = 0u; m.one[i] = 0u; };
+                for (i = 0; i < len; i++) { m.n[i] = n[i]; };
+
+                // Newton iteration for n^-1 mod 2^32, then negate
+                x = n[0];
+                for (i = 0; i < 5; i++) { x = x * (2u - n[0] * x); };
+                m.n0inv = 0u - x;
+
+                // v = 2^k mod n by repeated doubling, first k = 32 * len gives R mod n
+                for (i = 0; i < 128; i++) { v[i] = 0u; };
+                v[0] = 1u;
+                for (k = 0; k < 64 * len; k++)
+                {
+                    carry = 0u;
+                    for (i = 0; i < len; i++)
+                    {
+                        newcarry = v[i] >> 31u;
+                        v[i] = (v[i] << 1u) `| carry;
+                        carry = newcarry;
+                    };
+                    if (carry != 0u | rsa_cmp(@v[0], n, len) >= 0)
+                    {
+                        rsa_sub(@v[0], @v[0], n, len);
+                    };
+                    if (k == 32 * len - 1)
+                    {
+                        for (i = 0; i < len; i++) { m.one[i] = v[i]; };
+                    };
+                };
+                for (i = 0; i < len; i++) { m.rr[i] = v[i]; };
+            };
+
+            // r = a * b * R^-1 mod n (CIOS). a, b < n. r may alias a or b.
+            def rsa_mont_mul(RSA_MONT* m, uint* r, uint* a, uint* b) -> void
+            {
+                uint[132] t;
+                int i, j, n;
+                u64 s, c;
+                uint mm;
+
+                n = m.len;
+                for (i = 0; i < n + 2; i++) { t[i] = 0u; };
+
+                for (i = 0; i < n; i++)
+                {
+                    c = (u64)0;
+                    for (j = 0; j < n; j++)
+                    {
+                        s = (u64)t[j] + (u64)a[j] * (u64)b[i] + c;
+                        t[j] = (uint)s;
+                        c = s >> 32u;
+                    };
+                    s = (u64)t[n] + c;
+                    t[n] = (uint)s;
+                    t[n + 1] = (uint)(s >> 32u);
+
+                    mm = t[0] * m.n0inv;
+                    s = (u64)t[0] + (u64)mm * (u64)m.n[0];
+                    c = s >> 32u;
+                    for (j = 1; j < n; j++)
+                    {
+                        s = (u64)t[j] + (u64)mm * (u64)m.n[j] + c;
+                        t[j - 1] = (uint)s;
+                        c = s >> 32u;
+                    };
+                    s = (u64)t[n] + c;
+                    t[n - 1] = (uint)s;
+                    t[n] = t[n + 1] + (uint)(s >> 32u);
+                };
+
+                if (t[n] != 0u | rsa_cmp(@t[0], @m.n[0], n) >= 0)
+                {
+                    rsa_sub(r, @t[0], @m.n[0], n);
+                }
+                else
+                {
+                    for (i = 0; i < n; i++) { r[i] = t[i]; };
+                };
+            };
+
+            // r = base ^ exp mod n. base < n (len limbs), exp has elen limbs.
+            def rsa_mont_exp(RSA_MONT* m, uint* r, uint* base, uint* exp, int elen) -> void
+            {
+                uint[128] bm, acc, onev;
+                int i, b, n, top;
+                bool started;
+
+                n = m.len;
+                rsa_mont_mul(m, @bm[0], base, @m.rr[0]);
+                for (i = 0; i < n; i++) { acc[i] = m.one[i]; onev[i] = 0u; };
+                onev[0] = 1u;
+
+                started = false;
+                for (i = elen - 1; i >= 0; i--)
+                {
+                    for (b = 31; b >= 0; b--)
+                    {
+                        if (started)
+                        {
+                            rsa_mont_mul(m, @acc[0], @acc[0], @acc[0]);
+                        };
+                        if (((exp[i] >> (uint)b) `& 1u) != 0u)
+                        {
+                            rsa_mont_mul(m, @acc[0], @acc[0], @bm[0]);
+                            started = true;
+                        };
+                    };
+                };
+
+                rsa_mont_mul(m, r, @acc[0], @onev[0]);
+            };
+
+            // ---- raw RSA operations on big endian byte strings ----
+
+            // out[k] = inp ^ e mod n, k = significant bytes of n. inp must be k bytes.
+            // Returns false when the modulus is unusable or inp >= n.
+            def rsa_modexp_bytes(byte* out, byte* inp, byte* n, int n_len,
+                                 byte* e, int e_len) -> bool
+            {
+                RSA_MONT mont;
+                uint[128] nl, xl, el, rl;
+                int k, nlimbs, elimbs;
+
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512) { return false; };
+                if ((n[n_len - 1] `& (byte)1) == (byte)0) { return false; };
+
+                nlimbs = (k + 3) / 4;
+                rsa_be_to_limbs(@nl[0], 128, n + (n_len - k), k);
+                rsa_be_to_limbs(@xl[0], 128, inp, k);
+                if (rsa_cmp(@xl[0], @nl[0], 128) >= 0) { return false; };
+
+                elimbs = (e_len + 3) / 4;
+                if (elimbs > 128) { return false; };
+                rsa_be_to_limbs(@el[0], 128, e, e_len);
+
+                rsa_mont_init(@mont, @nl[0], nlimbs);
+                rsa_mont_exp(@mont, @rl[0], @xl[0], @el[0], elimbs);
+                rsa_limbs_to_be(out, k, @rl[0], nlimbs);
+                return true;
+            };
+
+            def rsa_public_op(byte* out, byte* inp, byte* n, int n_len,
+                              byte* e, int e_len) -> bool
+            {
+                return rsa_modexp_bytes(out, inp, n, n_len, e, e_len);
+            };
+
+            def rsa_private_op(byte* out, byte* inp, byte* n, int n_len,
+                               byte* d, int d_len) -> bool
+            {
+                return rsa_modexp_bytes(out, inp, n, n_len, d, d_len);
+            };
+
+            // Private operation with the Chinese remainder theorem.
+            // m1 = c^dp mod p, m2 = c^dq mod q, h = qinv (m1 - m2) mod p, m = m2 + h q
+            def rsa_private_crt_op(byte* out, byte* inp, byte* n, int n_len,
+                                   byte* p, int p_len, byte* q, int q_len,
+                                   byte* dp, int dp_len, byte* dq, int dq_len,
+                                   byte* qinv, int qinv_len) -> bool
+            {
+                RSA_MONT mp, mq;
+                uint[128] nl, cl, pl, ql, dpl, dql, qil;
+                uint[128] c1, c2, m1, m2, m2p, diff, hq, xm, hh;
+                uint[260] prod;
+                int k, plimbs, qlimbs, i, j;
+                u64 s, c;
+
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512) { return false; };
+                rsa_be_to_limbs(@nl[0], 128, n + (n_len - k), k);
+                rsa_be_to_limbs(@cl[0], 128, inp, k);
+                if (rsa_cmp(@cl[0], @nl[0], 128) >= 0) { return false; };
+
+                rsa_be_to_limbs(@pl[0], 128, p, p_len);
+                rsa_be_to_limbs(@ql[0], 128, q, q_len);
+                rsa_be_to_limbs(@dpl[0], 128, dp, dp_len);
+                rsa_be_to_limbs(@dql[0], 128, dq, dq_len);
+                rsa_be_to_limbs(@qil[0], 128, qinv, qinv_len);
+                plimbs = rsa_limb_len(@pl[0], 128);
+                qlimbs = rsa_limb_len(@ql[0], 128);
+                if (plimbs < 1 | qlimbs < 1) { return false; };
+                if ((pl[0] `& 1u) == 0u | (ql[0] `& 1u) == 0u) { return false; };
+
+                rsa_mont_init(@mp, @pl[0], plimbs);
+                rsa_mont_init(@mq, @ql[0], qlimbs);
+
+                // c mod p and c mod q
+                rsa_mod(@c1[0], @cl[0], 128, @pl[0], plimbs);
+                rsa_mod(@c2[0], @cl[0], 128, @ql[0], qlimbs);
+
+                rsa_mont_exp(@mp, @m1[0], @c1[0], @dpl[0], rsa_limb_len(@dpl[0], 128));
+                rsa_mont_exp(@mq, @m2[0], @c2[0], @dql[0], rsa_limb_len(@dql[0], 128));
+
+                // diff = (m1 - m2) mod p
+                rsa_mod(@m2p[0], @m2[0], qlimbs, @pl[0], plimbs);
+                if (rsa_cmp(@m1[0], @m2p[0], plimbs) >= 0)
+                {
+                    rsa_sub(@diff[0], @m1[0], @m2p[0], plimbs);
+                }
+                else
+                {
+                    rsa_sub(@diff[0], @m1[0], @m2p[0], plimbs);
+                    rsa_add(@diff[0], @diff[0], @pl[0], plimbs);
+                };
+
+                // h = qinv * diff mod p, with qinv taken into Montgomery form first
+                rsa_mod(@xm[0], @qil[0], 128, @pl[0], plimbs);
+                rsa_mont_mul(@mp, @xm[0], @xm[0], @mp.rr[0]);
+                rsa_mont_mul(@mp, @hh[0], @xm[0], @diff[0]);
+
+                // m = m2 + h * q
+                for (i = 0; i < 260; i++) { prod[i] = 0u; };
+                for (i = 0; i < plimbs; i++)
+                {
+                    c = (u64)0;
+                    for (j = 0; j < qlimbs; j++)
+                    {
+                        s = (u64)prod[i + j] + (u64)hh[i] * (u64)ql[j] + c;
+                        prod[i + j] = (uint)s;
+                        c = s >> 32u;
+                    };
+                    prod[i + qlimbs] = (uint)c;
+                };
+                c = (u64)0;
+                for (i = 0; i < 260; i++)
+                {
+                    s = (u64)prod[i] + c;
+                    if (i < qlimbs) { s = s + (u64)m2[i]; };
+                    prod[i] = (uint)s;
+                    c = s >> 32u;
+                };
+
+                rsa_limbs_to_be(out, k, @prod[0], 260);
+                return true;
+            };
+
+            // ---- hash helpers ----
+
+            def rsa_hash_len(int hash_id) -> int
+            {
+                if (hash_id == 1) { return 32; };
+                if (hash_id == 2) { return 48; };
+                if (hash_id == 3) { return 64; };
+                return 0;
+            };
+
+            // out = H(a || b), b may be null
+            def rsa_hash2(int hash_id, byte* a, int a_len, byte* b, int b_len, byte* out) -> void
+            {
+                SHA256_CTX c256;
+                SHA384_CTX c384;
+                if (hash_id == 1)
+                {
+                    SHA256::sha256_init(@c256);
+                    SHA256::sha256_update(@c256, a, (u64)a_len);
+                    if (b != (byte*)0) { SHA256::sha256_update(@c256, b, (u64)b_len); };
+                    SHA256::sha256_final(@c256, out);
+                }
+                else
+                {
+                    if (hash_id == 2) { SHA384::sha384_init(@c384); } else { SHA384::sha512_init(@c384); };
+                    SHA384::sha384_update(@c384, a, (u64)a_len);
+                    if (b != (byte*)0) { SHA384::sha384_update(@c384, b, (u64)b_len); };
+                    if (hash_id == 2) { SHA384::sha384_final(@c384, out); } else { SHA384::sha512_final(@c384, out); };
+                };
+            };
+
+            // DigestInfo prefix for EMSA-PKCS1-v1_5, returns its length (19) or 0
+            def rsa_digestinfo_prefix(int hash_id, byte* out) -> int
+            {
+                byte[19] p256 = [48,49,48,13,6,9,96,134,72,1,101,3,4,2,1,5,0,4,32];
+                byte[19] p384 = [48,65,48,13,6,9,96,134,72,1,101,3,4,2,2,5,0,4,48];
+                byte[19] p512 = [48,81,48,13,6,9,96,134,72,1,101,3,4,2,3,5,0,4,64];
+                int i;
+                for (i = 0; i < 19; i++)
+                {
+                    if (hash_id == 1) { out[i] = p256[i]; };
+                    if (hash_id == 2) { out[i] = p384[i]; };
+                    if (hash_id == 3) { out[i] = p512[i]; };
+                };
+                if (hash_id < 1 | hash_id > 3) { return 0; };
+                return 19;
+            };
+
+            // ---- PKCS#1 v1.5 ----
+
+            // Builds EM = 00 01 FF .. FF 00 DigestInfo || digest, k bytes
+            def rsa_pkcs1_encode(byte* em, int k, int hash_id, byte* digest) -> bool
+            {
+                byte[19] prefix;
+                int hl, tl, i;
+
+                hl = rsa_hash_len(hash_id);
+                if (hl == 0) { return false; };
+                tl = rsa_digestinfo_prefix(hash_id, @prefix[0]) + hl;
+                if (k < tl + 11) { return false; };
+
+                em[0] = (byte)0x00;
+                em[1] = (byte)0x01;
+                for (i = 2; i < k - tl - 1; i++) { em[i] = (byte)0xFF; };
+                em[k - tl - 1] = (byte)0x00;
+                for (i = 0; i < 19; i++) { em[k - tl + i] = prefix[i]; };
+                for (i = 0; i < hl; i++) { em[k - hl + i] = digest[i]; };
+                return true;
+            };
+
+            def rsa_pkcs1_verify(byte* n, int n_len, byte* e, int e_len,
+                                 int hash_id, byte* digest,
+                                 byte* sig, int sig_len) -> bool
+            {
+                byte[512] em, expect, dec;
+                int k, i;
+                byte diff;
+
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512 | sig_len != k) { return false; };
+                if (!rsa_public_op(@dec[0], sig, n, n_len, e, e_len)) { return false; };
+                if (!rsa_pkcs1_encode(@expect[0], k, hash_id, digest)) { return false; };
+
+                diff = (byte)0;
+                for (i = 0; i < k; i++) { diff = diff `| (dec[i] ^| expect[i]); };
+                return diff == (byte)0;
+            };
+
+            def rsa_pkcs1_sign_crt(byte* sig, int hash_id, byte* digest,
+                                   byte* n, int n_len,
+                                   byte* p, int p_len, byte* q, int q_len,
+                                   byte* dp, int dp_len, byte* dq, int dq_len,
+                                   byte* qinv, int qinv_len) -> bool
+            {
+                byte[512] em;
+                int k;
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512) { return false; };
+                if (!rsa_pkcs1_encode(@em[0], k, hash_id, digest)) { return false; };
+                return rsa_private_crt_op(sig, @em[0], n, n_len, p, p_len, q, q_len,
+                                          dp, dp_len, dq, dq_len, qinv, qinv_len);
+            };
+
+            // ---- PSS (RFC 8017 section 9.1), salt length equal to the hash length ----
+
+            // mask = MGF1(seed, mask_len) with the given hash
+            def rsa_mgf1(int hash_id, byte* seed, int seed_len, byte* mask, int mask_len) -> void
+            {
+                byte[4] ctr;
+                byte[64] block;
+                byte[1100] buf;
+                int hl, done, i, take;
+                u32 counter;
+
+                hl = rsa_hash_len(hash_id);
+                for (i = 0; i < seed_len; i++) { buf[i] = seed[i]; };
+                done = 0;
+                counter = 0u;
+                while (done < mask_len)
+                {
+                    buf[seed_len]     = (byte)((counter >> 24u) `& 0xFFu);
+                    buf[seed_len + 1] = (byte)((counter >> 16u) `& 0xFFu);
+                    buf[seed_len + 2] = (byte)((counter >> 8u) `& 0xFFu);
+                    buf[seed_len + 3] = (byte)(counter `& 0xFFu);
+                    rsa_hash2(hash_id, @buf[0], seed_len + 4, (byte*)0, 0, @block[0]);
+                    take = mask_len - done;
+                    if (take > hl) { take = hl; };
+                    for (i = 0; i < take; i++) { mask[done + i] = block[i]; };
+                    done = done + take;
+                    counter = counter + 1u;
+                };
+            };
+
+            def rsa_pss_verify(byte* n, int n_len, byte* e, int e_len,
+                               int hash_id, byte* digest,
+                               byte* sig, int sig_len) -> bool
+            {
+                byte[512] dec, db_mask;
+                byte[64] h_check, mprime_hash;
+                byte[136] mprime;
+                int k, hl, sl, em_bits, em_len, top_bits, i, db_len, ps_len;
+                int mod_bits;
+                byte b, diff;
+                byte* em;
+
+                hl = rsa_hash_len(hash_id);
+                if (hl == 0) { return false; };
+                sl = hl;
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512 | sig_len != k) { return false; };
+                if (!rsa_public_op(@dec[0], sig, n, n_len, e, e_len)) { return false; };
+
+                // modulus bit length
+                mod_bits = k * 8;
+                b = n[n_len - k];
+                while ((b `& (byte)0x80) == (byte)0) { b = (byte)(b << 1u); mod_bits = mod_bits - 1; };
+
+                em_bits = mod_bits - 1;
+                em_len = (em_bits + 7) / 8;
+                top_bits = 8 * em_len - em_bits;
+                // EM is the low em_len bytes of the result, anything above must be zero
+                for (i = 0; i < k - em_len; i++)
+                {
+                    if (dec[i] != (byte)0) { return false; };
+                };
+                em = @dec[k - em_len];
+
+                if (em_len < hl + sl + 2) { return false; };
+                if (em[em_len - 1] != (byte)0xBC) { return false; };
+
+                db_len = em_len - hl - 1;
+                // the leftmost top_bits bits of maskedDB must be zero
+                if (top_bits > 0)
+                {
+                    if ((em[0] `& (byte)(0xFF << (8 - top_bits))) != (byte)0) { return false; };
+                };
+
+                rsa_mgf1(hash_id, em + db_len, hl, @db_mask[0], db_len);
+                for (i = 0; i < db_len; i++) { db_mask[i] = db_mask[i] ^| em[i]; };
+                if (top_bits > 0)
+                {
+                    db_mask[0] = db_mask[0] `& (byte)(0xFF >> top_bits);
+                };
+
+                ps_len = db_len - sl - 1;
+                for (i = 0; i < ps_len; i++)
+                {
+                    if (db_mask[i] != (byte)0) { return false; };
+                };
+                if (db_mask[ps_len] != (byte)0x01) { return false; };
+
+                for (i = 0; i < 8; i++) { mprime[i] = (byte)0; };
+                for (i = 0; i < hl; i++) { mprime[8 + i] = digest[i]; };
+                for (i = 0; i < sl; i++) { mprime[8 + hl + i] = db_mask[ps_len + 1 + i]; };
+                rsa_hash2(hash_id, @mprime[0], 8 + hl + sl, (byte*)0, 0, @h_check[0]);
+
+                diff = (byte)0;
+                for (i = 0; i < hl; i++) { diff = diff `| (h_check[i] ^| em[db_len + i]); };
+                return diff == (byte)0;
+            };
+
+            // salt must hold hash_len random bytes supplied by the caller
+            def rsa_pss_sign_crt(byte* sig, int hash_id, byte* digest, byte* salt,
+                                 byte* n, int n_len,
+                                 byte* p, int p_len, byte* q, int q_len,
+                                 byte* dp, int dp_len, byte* dq, int dq_len,
+                                 byte* qinv, int qinv_len) -> bool
+            {
+                byte[512] em, db_mask, padded;
+                byte[64] hh;
+                byte[136] mprime;
+                int k, hl, sl, em_bits, em_len, top_bits, i, db_len, ps_len, mod_bits;
+                byte b;
+
+                hl = rsa_hash_len(hash_id);
+                if (hl == 0) { return false; };
+                sl = hl;
+                k = rsa_byte_len(n, n_len);
+                if (k < 12 | k > 512) { return false; };
+
+                mod_bits = k * 8;
+                b = n[n_len - k];
+                while ((b `& (byte)0x80) == (byte)0) { b = (byte)(b << 1u); mod_bits = mod_bits - 1; };
+                em_bits = mod_bits - 1;
+                em_len = (em_bits + 7) / 8;
+                top_bits = 8 * em_len - em_bits;
+                if (em_len < hl + sl + 2) { return false; };
+
+                for (i = 0; i < 8; i++) { mprime[i] = (byte)0; };
+                for (i = 0; i < hl; i++) { mprime[8 + i] = digest[i]; };
+                for (i = 0; i < sl; i++) { mprime[8 + hl + i] = salt[i]; };
+                rsa_hash2(hash_id, @mprime[0], 8 + hl + sl, (byte*)0, 0, @hh[0]);
+
+                db_len = em_len - hl - 1;
+                ps_len = db_len - sl - 1;
+                for (i = 0; i < ps_len; i++) { em[i] = (byte)0; };
+                em[ps_len] = (byte)0x01;
+                for (i = 0; i < sl; i++) { em[ps_len + 1 + i] = salt[i]; };
+
+                rsa_mgf1(hash_id, @hh[0], hl, @db_mask[0], db_len);
+                for (i = 0; i < db_len; i++) { em[i] = em[i] ^| db_mask[i]; };
+                if (top_bits > 0)
+                {
+                    em[0] = em[0] `& (byte)(0xFF >> top_bits);
+                };
+                for (i = 0; i < hl; i++) { em[db_len + i] = hh[i]; };
+                em[em_len - 1] = (byte)0xBC;
+
+                for (i = 0; i < k - em_len; i++) { padded[i] = (byte)0; };
+                for (i = 0; i < em_len; i++) { padded[k - em_len + i] = em[i]; };
+
+                return rsa_private_crt_op(sig, @padded[0], n, n_len, p, p_len, q, q_len,
+                                          dp, dp_len, dq, dq_len, qinv, qinv_len);
+            };
+
+        }; // RSA
+
+        namespace P384
+        {
+            // =========================================================================
+            // ECDSA over P-384 (secp384r1)
+            //
+            // Field and scalar arithmetic reuse the Montgomery routines of the RSA
+            // namespace on 12 limb values. Points are Jacobian, kept in Montgomery form.
+            // All byte interfaces are big endian 48 byte values.
+            //
+            // Public API:
+            //   ecdsa_p384_pubkey(qx48, qy48, priv48) -> bool
+            //   ecdsa_p384_sign(r48, s48, priv48, hash, hash_len, nonce48) -> bool
+            //   ecdsa_p384_verify(r48, s48, qx48, qy48, hash, hash_len) -> bool
+            //   ecdsa_p256n_pubkey / _sign / _verify: the same for P-256 with 32 byte values
+            //   ecdsa_der_encode_n(der_out, der_len*, r, s, nbytes)
+            //   ecdsa_der_decode_n(r, s, nbytes, der_in, der_len) -> bool
+            //
+            // hash_len may be any length; the leftmost 48 bytes are used. The nonce is
+            // supplied by the caller and must be uniformly random in [1, n-1]. Not
+            // constant time.
+            // =========================================================================
+
+            global uint[12] P384_P = [0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFEu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu];
+            global uint[12] P384_N = [0xCCC52973u, 0xECEC196Au, 0x48B0A77Au, 0x581A0DB2u, 0xF4372DDFu, 0xC7634D81u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu];
+            global uint[12] P384_B = [0xD3EC2AEFu, 0x2A85C8EDu, 0x8A2ED19Du, 0xC656398Du, 0x5013875Au, 0x0314088Fu, 0xFE814112u, 0x181D9C6Eu, 0xE3F82D19u, 0x988E056Bu, 0xE23EE7E4u, 0xB3312FA7u];
+            global uint[12] P384_GX = [0x72760AB7u, 0x3A545E38u, 0xBF55296Cu, 0x5502F25Du, 0x82542A38u, 0x59F741E0u, 0x8BA79B98u, 0x6E1D3B62u, 0xF320AD74u, 0x8EB1C71Eu, 0xBE8B0537u, 0xAA87CA22u];
+            global uint[12] P384_GY = [0x90EA0E5Fu, 0x7A431D7Cu, 0x1D7E819Du, 0x0A60B1CEu, 0xB5F0B8C0u, 0xE9DA3113u, 0x289A147Cu, 0xF8F41DBDu, 0x9292DC29u, 0x5D9E98BFu, 0x96262C6Fu, 0x3617DE4Au];
+
+            global uint[12] P256N_P = [0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u];
+            global uint[12] P256N_N = [0xFC632551u, 0xF3B9CAC2u, 0xA7179E84u, 0xBCE6FAADu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000000u, 0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u];
+            global uint[12] P256N_B = [0x27D2604Bu, 0x3BCE3C3Eu, 0xCC53B0F6u, 0x651D06B0u, 0x769886BCu, 0xB3EBBD55u, 0xAA3A93E7u, 0x5AC635D8u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u];
+            global uint[12] P256N_GX = [0xD898C296u, 0xF4A13945u, 0x2DEB33A0u, 0x77037D81u, 0x63A440F2u, 0xF8BCE6E5u, 0xE12C4247u, 0x6B17D1F2u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u];
+            global uint[12] P256N_GY = [0x37BF51F5u, 0xCBB64068u, 0x6B315ECEu, 0x2BCE3357u, 0x7C0F9E16u, 0x8EE7EB4Au, 0xFE1A7F9Bu, 0x4FE342E2u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u];
+
+            struct P384_PT
+            {
+                uint[12] x;
+                uint[12] y;
+                uint[12] z;
+            };
+
+            // Montgomery multiply that keeps unused upper limbs zero for curves narrower than 12 limbs
+            def p384_fmul(RSA_MONT* m, uint* r, uint* a, uint* b) -> void
+            {
+                int i;
+                RSA::rsa_mont_mul(m, r, a, b);
+                for (i = m.len; i < 12; i++) { r[i] = 0u; };
+            };
+
+            def p384_zero(uint* a) -> void
+            {
+                int i;
+                for (i = 0; i < 12; i++) { a[i] = 0u; };
+            };
+
+            def p384_copy(uint* d, uint* s) -> void
+            {
+                int i;
+                for (i = 0; i < 12; i++) { d[i] = s[i]; };
+            };
+
+            def p384_iszero(uint* a) -> bool
+            {
+                int i;
+                for (i = 0; i < 12; i++) { if (a[i] != 0u) { return false; }; };
+                return true;
+            };
+
+            // modulus taken from the context
+            def p384_addmod(RSA_MONT* m, uint* r, uint* a, uint* b) -> void
+            {
+                uint c = RSA::rsa_add(r, a, b, 12);
+                if (c != 0u | RSA::rsa_cmp(r, @m.n[0], 12) >= 0)
+                {
+                    RSA::rsa_sub(r, r, @m.n[0], 12);
+                };
+            };
+
+            def p384_submod(RSA_MONT* m, uint* r, uint* a, uint* b) -> void
+            {
+                uint br = RSA::rsa_sub(r, a, b, 12);
+                if (br != 0u) { RSA::rsa_add(r, r, @m.n[0], 12); };
+            };
+
+            // a * b mod n for values in normal form
+            def p384_nmul(RSA_MONT* m, uint* r, uint* a, uint* b) -> void
+            {
+                uint[12] t;
+                p384_fmul(m, @t[0], a, @m.rr[0]);
+                p384_fmul(m, r, @t[0], b);
+            };
+
+            // a ^ -1 mod modulus for a value in normal form (modulus prime)
+            def p384_inv(RSA_MONT* m, uint* r, uint* a) -> void
+            {
+                uint[12] e, two;
+                p384_zero(@two[0]);
+                two[0] = 2u;
+                RSA::rsa_sub(@e[0], @m.n[0], @two[0], 12);
+                int i;
+                RSA::rsa_mont_exp(m, r, a, @e[0], 12);
+                for (i = m.len; i < 12; i++) { r[i] = 0u; };
+            };
+
+            def p384_to_mont(RSA_MONT* m, uint* r, uint* a) -> void
+            {
+                p384_fmul(m, r, a, @m.rr[0]);
+            };
+
+            def p384_from_mont(RSA_MONT* m, uint* r, uint* a) -> void
+            {
+                uint[12] one;
+                p384_zero(@one[0]);
+                one[0] = 1u;
+                p384_fmul(m, r, a, @one[0]);
+            };
+
+            def p384_set_inf(P384_PT* r) -> void
+            {
+                p384_zero(@r.x[0]);
+                p384_zero(@r.y[0]);
+                p384_zero(@r.z[0]);
+            };
+
+            def p384_dbl(RSA_MONT* m, P384_PT* r, P384_PT* p) -> void
+            {
+                uint[12] delta, gamma, beta, t1, t2, t, alpha, b2, b4, b8, x3, y3, z3, g2;
+                uint* P = @m.n[0];
+
+                if (p384_iszero(@p.z[0]) | p384_iszero(@p.y[0]))
+                {
+                    p384_set_inf(r);
+                    return;
+                };
+
+                p384_fmul(m, @delta[0], @p.z[0], @p.z[0]);
+                p384_fmul(m, @gamma[0], @p.y[0], @p.y[0]);
+                p384_fmul(m, @beta[0], @p.x[0], @gamma[0]);
+                p384_submod(m, @t1[0], @p.x[0], @delta[0]);
+                p384_addmod(m, @t2[0], @p.x[0], @delta[0]);
+                p384_fmul(m, @t[0], @t1[0], @t2[0]);
+                p384_addmod(m, @alpha[0], @t[0], @t[0]);
+                p384_addmod(m, @alpha[0], @alpha[0], @t[0]);
+
+                p384_addmod(m, @b2[0], @beta[0], @beta[0]);
+                p384_addmod(m, @b4[0], @b2[0], @b2[0]);
+                p384_addmod(m, @b8[0], @b4[0], @b4[0]);
+
+                p384_fmul(m, @x3[0], @alpha[0], @alpha[0]);
+                p384_submod(m, @x3[0], @x3[0], @b8[0]);
+
+                p384_addmod(m, @t1[0], @p.y[0], @p.z[0]);
+                p384_fmul(m, @z3[0], @t1[0], @t1[0]);
+                p384_submod(m, @z3[0], @z3[0], @gamma[0]);
+                p384_submod(m, @z3[0], @z3[0], @delta[0]);
+
+                p384_submod(m, @t1[0], @b4[0], @x3[0]);
+                p384_fmul(m, @y3[0], @alpha[0], @t1[0]);
+                p384_fmul(m, @g2[0], @gamma[0], @gamma[0]);
+                p384_addmod(m, @g2[0], @g2[0], @g2[0]);
+                p384_addmod(m, @g2[0], @g2[0], @g2[0]);
+                p384_addmod(m, @g2[0], @g2[0], @g2[0]);
+                p384_submod(m, @y3[0], @y3[0], @g2[0]);
+
+                p384_copy(@r.x[0], @x3[0]);
+                p384_copy(@r.y[0], @y3[0]);
+                p384_copy(@r.z[0], @z3[0]);
+            };
+
+            def p384_add(RSA_MONT* m, P384_PT* r, P384_PT* p, P384_PT* q) -> void
+            {
+                uint[12] z1z1, z2z2, u1, u2, s1, s2, h, rr, i2, j, v, x3, y3, z3, t, t2;
+
+                if (p384_iszero(@p.z[0]))
+                {
+                    p384_copy(@r.x[0], @q.x[0]);
+                    p384_copy(@r.y[0], @q.y[0]);
+                    p384_copy(@r.z[0], @q.z[0]);
+                    return;
+                };
+                if (p384_iszero(@q.z[0]))
+                {
+                    p384_copy(@r.x[0], @p.x[0]);
+                    p384_copy(@r.y[0], @p.y[0]);
+                    p384_copy(@r.z[0], @p.z[0]);
+                    return;
+                };
+
+                p384_fmul(m, @z1z1[0], @p.z[0], @p.z[0]);
+                p384_fmul(m, @z2z2[0], @q.z[0], @q.z[0]);
+                p384_fmul(m, @u1[0], @p.x[0], @z2z2[0]);
+                p384_fmul(m, @u2[0], @q.x[0], @z1z1[0]);
+                p384_fmul(m, @t[0], @q.z[0], @z2z2[0]);
+                p384_fmul(m, @s1[0], @p.y[0], @t[0]);
+                p384_fmul(m, @t[0], @p.z[0], @z1z1[0]);
+                p384_fmul(m, @s2[0], @q.y[0], @t[0]);
+
+                p384_submod(m, @h[0], @u2[0], @u1[0]);
+                p384_submod(m, @rr[0], @s2[0], @s1[0]);
+                if (p384_iszero(@h[0]))
+                {
+                    if (p384_iszero(@rr[0]))
+                    {
+                        p384_dbl(m, r, p);
+                    }
+                    else
+                    {
+                        p384_set_inf(r);
+                    };
+                    return;
+                };
+                p384_addmod(m, @rr[0], @rr[0], @rr[0]);
+
+                p384_addmod(m, @t[0], @h[0], @h[0]);
+                p384_fmul(m, @i2[0], @t[0], @t[0]);
+                p384_fmul(m, @j[0], @h[0], @i2[0]);
+                p384_fmul(m, @v[0], @u1[0], @i2[0]);
+
+                p384_fmul(m, @x3[0], @rr[0], @rr[0]);
+                p384_submod(m, @x3[0], @x3[0], @j[0]);
+                p384_submod(m, @x3[0], @x3[0], @v[0]);
+                p384_submod(m, @x3[0], @x3[0], @v[0]);
+
+                p384_submod(m, @t[0], @v[0], @x3[0]);
+                p384_fmul(m, @y3[0], @rr[0], @t[0]);
+                p384_fmul(m, @t2[0], @s1[0], @j[0]);
+                p384_addmod(m, @t2[0], @t2[0], @t2[0]);
+                p384_submod(m, @y3[0], @y3[0], @t2[0]);
+
+                p384_addmod(m, @t[0], @p.z[0], @q.z[0]);
+                p384_fmul(m, @z3[0], @t[0], @t[0]);
+                p384_submod(m, @z3[0], @z3[0], @z1z1[0]);
+                p384_submod(m, @z3[0], @z3[0], @z2z2[0]);
+                p384_fmul(m, @z3[0], @z3[0], @h[0]);
+
+                p384_copy(@r.x[0], @x3[0]);
+                p384_copy(@r.y[0], @y3[0]);
+                p384_copy(@r.z[0], @z3[0]);
+            };
+
+            // r = k * p, k is 48 big endian bytes
+            def p384_mul(RSA_MONT* m, P384_PT* r, byte* k, int nb, P384_PT* p) -> void
+            {
+                P384_PT acc, base;
+                int i, b;
+                p384_copy(@base.x[0], @p.x[0]);
+                p384_copy(@base.y[0], @p.y[0]);
+                p384_copy(@base.z[0], @p.z[0]);
+                p384_set_inf(@acc);
+                for (i = 0; i < nb; i++)
+                {
+                    for (b = 7; b >= 0; b--)
+                    {
+                        p384_dbl(m, @acc, @acc);
+                        if (((k[i] >> (byte)b) `& (byte)1) != (byte)0)
+                        {
+                            p384_add(m, @acc, @acc, @base);
+                        };
+                    };
+                };
+                p384_copy(@r.x[0], @acc.x[0]);
+                p384_copy(@r.y[0], @acc.y[0]);
+                p384_copy(@r.z[0], @acc.z[0]);
+            };
+
+            // affine normal form coordinates. Returns false at infinity.
+            def p384_to_affine(RSA_MONT* m, uint* ax, uint* ay, P384_PT* p) -> bool
+            {
+                uint[12] zn, zi, zim, zi2, zi3, x, y;
+                if (p384_iszero(@p.z[0])) { return false; };
+                p384_from_mont(m, @zn[0], @p.z[0]);
+                p384_inv(m, @zi[0], @zn[0]);
+                p384_to_mont(m, @zim[0], @zi[0]);
+                p384_fmul(m, @zi2[0], @zim[0], @zim[0]);
+                p384_fmul(m, @zi3[0], @zi2[0], @zim[0]);
+                p384_fmul(m, @x[0], @p.x[0], @zi2[0]);
+                p384_fmul(m, @y[0], @p.y[0], @zi3[0]);
+                p384_from_mont(m, ax, @x[0]);
+                p384_from_mont(m, ay, @y[0]);
+                return true;
+            };
+
+            // affine normal form to a Montgomery Jacobian point
+            def p384_from_affine(RSA_MONT* m, P384_PT* r, uint* ax, uint* ay) -> void
+            {
+                p384_to_mont(m, @r.x[0], ax);
+                p384_to_mont(m, @r.y[0], ay);
+                p384_copy(@r.z[0], @m.one[0]);
+            };
+
+            // y^2 == x^3 - 3x + b for normal form coordinates below p
+            def p384_on_curve(RSA_MONT* m, uint* ax, uint* ay, uint* bconst) -> bool
+            {
+                uint[12] x, y, y2, x2, x3, t, bm, rhs;
+                if (RSA::rsa_cmp(ax, @m.n[0], 12) >= 0) { return false; };
+                if (RSA::rsa_cmp(ay, @m.n[0], 12) >= 0) { return false; };
+                p384_to_mont(m, @x[0], ax);
+                p384_to_mont(m, @y[0], ay);
+                p384_to_mont(m, @bm[0], bconst);
+                p384_fmul(m, @y2[0], @y[0], @y[0]);
+                p384_fmul(m, @x2[0], @x[0], @x[0]);
+                p384_fmul(m, @x3[0], @x2[0], @x[0]);
+                p384_addmod(m, @t[0], @x[0], @x[0]);
+                p384_addmod(m, @t[0], @t[0], @x[0]);
+                p384_submod(m, @rhs[0], @x3[0], @t[0]);
+                p384_addmod(m, @rhs[0], @rhs[0], @bm[0]);
+                return RSA::rsa_cmp(@y2[0], @rhs[0], 12) == 0;
+            };
+
+            def p384_load(uint* out, byte* be, int nb) -> void
+            {
+                RSA::rsa_be_to_limbs(out, 12, be, nb);
+            };
+
+            def p384_store(byte* be, uint* v, int nb) -> void
+            {
+                RSA::rsa_limbs_to_be(be, nb, v, 12);
+            };
+
+            // hash to an integer below n, using the leftmost nb bytes
+            def p384_hash_to_scalar(RSA_MONT* fn, uint* out, byte* hash, int hash_len, int nb) -> void
+            {
+                byte[48] buf;
+                uint[12] tmp;
+                int i, n;
+                n = hash_len;
+                if (n > nb) { n = nb; };
+                for (i = 0; i < 48; i++) { buf[i] = (byte)0; };
+                for (i = 0; i < n; i++) { buf[nb - n + i] = hash[i]; };
+                p384_load(@tmp[0], @buf[0], nb);
+                RSA::rsa_mod(out, @tmp[0], 12, @fn.n[0], 12);
+            };
+
+            // ---- curve independent operations ----
+            // nl limbs and nb bytes per field element, with the curve constants
+
+            def p3_pubkey(int nl, int nb, uint* cp, uint* cn, uint* cgx, uint* cgy,
+                          byte* qx, byte* qy, byte* priv) -> bool
+            {
+                RSA_MONT fp, fn;
+                P384_PT g, q;
+                uint[12] d, ax, ay;
+
+                RSA::rsa_mont_init(@fp, cp, nl);
+                RSA::rsa_mont_init(@fn, cn, nl);
+                p384_load(@d[0], priv, nb);
+                if (p384_iszero(@d[0]) | RSA::rsa_cmp(@d[0], @fn.n[0], 12) >= 0) { return false; };
+
+                p384_from_affine(@fp, @g, cgx, cgy);
+                p384_mul(@fp, @q, priv, nb, @g);
+                if (!p384_to_affine(@fp, @ax[0], @ay[0], @q)) { return false; };
+                p384_store(qx, @ax[0], nb);
+                p384_store(qy, @ay[0], nb);
+                return true;
+            };
+
+            def p3_sign(int nl, int nb, uint* cp, uint* cn, uint* cgx, uint* cgy,
+                        byte* rout, byte* sout, byte* priv,
+                        byte* hash, int hash_len, byte* nonce) -> bool
+            {
+                RSA_MONT fp, fn;
+                P384_PT g, kg;
+                uint[12] d, k, e, ax, ay, rr, t, kinv, ss;
+
+                RSA::rsa_mont_init(@fp, cp, nl);
+                RSA::rsa_mont_init(@fn, cn, nl);
+                p384_load(@d[0], priv, nb);
+                p384_load(@k[0], nonce, nb);
+                if (p384_iszero(@d[0]) | RSA::rsa_cmp(@d[0], @fn.n[0], 12) >= 0) { return false; };
+                if (p384_iszero(@k[0]) | RSA::rsa_cmp(@k[0], @fn.n[0], 12) >= 0) { return false; };
+
+                p384_from_affine(@fp, @g, cgx, cgy);
+                p384_mul(@fp, @kg, nonce, nb, @g);
+                if (!p384_to_affine(@fp, @ax[0], @ay[0], @kg)) { return false; };
+
+                RSA::rsa_mod(@rr[0], @ax[0], 12, @fn.n[0], 12);
+                if (p384_iszero(@rr[0])) { return false; };
+
+                p384_hash_to_scalar(@fn, @e[0], hash, hash_len, nb);
+                p384_nmul(@fn, @t[0], @rr[0], @d[0]);
+                p384_addmod(@fn, @t[0], @t[0], @e[0]);
+                p384_inv(@fn, @kinv[0], @k[0]);
+                p384_nmul(@fn, @ss[0], @kinv[0], @t[0]);
+                if (p384_iszero(@ss[0])) { return false; };
+
+                p384_store(rout, @rr[0], nb);
+                p384_store(sout, @ss[0], nb);
+                return true;
+            };
+
+            def p3_verify(int nl, int nb, uint* cp, uint* cn, uint* cb, uint* cgx, uint* cgy,
+                          byte* rin, byte* sin, byte* qxin, byte* qyin,
+                          byte* hash, int hash_len) -> bool
+            {
+                RSA_MONT fp, fn;
+                P384_PT g, q, a, b, sum;
+                uint[12] r, s, e, w, u1, u2, qx, qy, ax, ay, xr;
+                byte[48] u1b, u2b;
+
+                RSA::rsa_mont_init(@fp, cp, nl);
+                RSA::rsa_mont_init(@fn, cn, nl);
+                p384_load(@r[0], rin, nb);
+                p384_load(@s[0], sin, nb);
+                if (p384_iszero(@r[0]) | RSA::rsa_cmp(@r[0], @fn.n[0], 12) >= 0) { return false; };
+                if (p384_iszero(@s[0]) | RSA::rsa_cmp(@s[0], @fn.n[0], 12) >= 0) { return false; };
+
+                p384_load(@qx[0], qxin, nb);
+                p384_load(@qy[0], qyin, nb);
+                if (!p384_on_curve(@fp, @qx[0], @qy[0], cb)) { return false; };
+
+                p384_hash_to_scalar(@fn, @e[0], hash, hash_len, nb);
+                p384_inv(@fn, @w[0], @s[0]);
+                p384_nmul(@fn, @u1[0], @e[0], @w[0]);
+                p384_nmul(@fn, @u2[0], @r[0], @w[0]);
+                p384_store(@u1b[0], @u1[0], nb);
+                p384_store(@u2b[0], @u2[0], nb);
+
+                p384_from_affine(@fp, @g, cgx, cgy);
+                p384_from_affine(@fp, @q, @qx[0], @qy[0]);
+                p384_mul(@fp, @a, @u1b[0], nb, @g);
+                p384_mul(@fp, @b, @u2b[0], nb, @q);
+                p384_add(@fp, @sum, @a, @b);
+                if (!p384_to_affine(@fp, @ax[0], @ay[0], @sum)) { return false; };
+
+                RSA::rsa_mod(@xr[0], @ax[0], 12, @fn.n[0], 12);
+                return RSA::rsa_cmp(@xr[0], @r[0], 12) == 0;
+            };
+
+            // ---- P-384 ----
+
+            def ecdsa_p384_pubkey(byte* qx48, byte* qy48, byte* priv48) -> bool
+            {
+                return p3_pubkey(12, 48, @P384_P[0], @P384_N[0], @P384_GX[0], @P384_GY[0], qx48, qy48, priv48);
+            };
+
+            def ecdsa_p384_sign(byte* r48, byte* s48, byte* priv48,
+                                byte* hash, int hash_len, byte* nonce48) -> bool
+            {
+                return p3_sign(12, 48, @P384_P[0], @P384_N[0], @P384_GX[0], @P384_GY[0],
+                               r48, s48, priv48, hash, hash_len, nonce48);
+            };
+
+            def ecdsa_p384_verify(byte* r48, byte* s48, byte* qx48, byte* qy48,
+                                  byte* hash, int hash_len) -> bool
+            {
+                return p3_verify(12, 48, @P384_P[0], @P384_N[0], @P384_B[0], @P384_GX[0], @P384_GY[0],
+                                 r48, s48, qx48, qy48, hash, hash_len);
+            };
+
+            // ---- P-256 (secp256r1) on the same engine ----
+
+            def ecdsa_p256n_pubkey(byte* qx32, byte* qy32, byte* priv32) -> bool
+            {
+                return p3_pubkey(8, 32, @P256N_P[0], @P256N_N[0], @P256N_GX[0], @P256N_GY[0], qx32, qy32, priv32);
+            };
+
+            def ecdsa_p256n_sign(byte* r32, byte* s32, byte* priv32,
+                                 byte* hash, int hash_len, byte* nonce32) -> bool
+            {
+                return p3_sign(8, 32, @P256N_P[0], @P256N_N[0], @P256N_GX[0], @P256N_GY[0],
+                               r32, s32, priv32, hash, hash_len, nonce32);
+            };
+
+            def ecdsa_p256n_verify(byte* r32, byte* s32, byte* qx32, byte* qy32,
+                                   byte* hash, int hash_len) -> bool
+            {
+                return p3_verify(8, 32, @P256N_P[0], @P256N_N[0], @P256N_B[0], @P256N_GX[0], @P256N_GY[0],
+                                 r32, s32, qx32, qy32, hash, hash_len);
+            };
+
+            // ---- DER signature encoding for any field size ----
+
+            // one INTEGER from nb big endian bytes, returns bytes written
+            def ecdsa_der_put_int(byte* out, byte* v, int nb) -> int
+            {
+                int start = 0, len, pos = 0, i;
+                while (start < nb - 1 & v[start] == (byte)0) { start++; };
+                len = nb - start;
+                out[pos] = (byte)2;
+                pos++;
+                if ((v[start] `& (byte)0x80) != (byte)0)
+                {
+                    out[pos] = (byte)(len + 1);
+                    pos++;
+                    out[pos] = (byte)0;
+                    pos++;
+                }
+                else
+                {
+                    out[pos] = (byte)len;
+                    pos++;
+                };
+                for (i = 0; i < len; i++) { out[pos + i] = v[start + i]; };
+                return pos + len;
+            };
+
+            def ecdsa_der_encode_n(byte* der_out, int* der_len, byte* r, byte* s, int nb) -> void
+            {
+                byte[140] body;
+                int bl, i, pos = 0;
+                bl = ecdsa_der_put_int(@body[0], r, nb);
+                bl = bl + ecdsa_der_put_int(@body[bl], s, nb);
+                der_out[pos] = (byte)0x30;
+                pos++;
+                if (bl >= 128)
+                {
+                    der_out[pos] = (byte)0x81;
+                    pos++;
+                };
+                der_out[pos] = (byte)bl;
+                pos++;
+                for (i = 0; i < bl; i++) { der_out[pos + i] = body[i]; };
+                *der_len = pos + bl;
+            };
+
+            // parse one INTEGER at der[*pos] into nb big endian bytes
+            def ecdsa_der_get_int(byte* out, int nb, byte* der, int der_len, int* pos) -> bool
+            {
+                int len, p, i, skip;
+                p = *pos;
+                if (p + 2 > der_len) { return false; };
+                if (der[p] != (byte)2) { return false; };
+                len = (int)der[p + 1];
+                p = p + 2;
+                if (len == 0 | len >= 128 | p + len > der_len) { return false; };
+                if ((der[p] `& (byte)0x80) != (byte)0) { return false; };
+                skip = 0;
+                while (skip < len - 1 & der[p + skip] == (byte)0) { skip++; };
+                if (len - skip > nb) { return false; };
+                for (i = 0; i < nb; i++) { out[i] = (byte)0; };
+                for (i = 0; i < len - skip; i++) { out[nb - (len - skip) + i] = der[p + skip + i]; };
+                *pos = p + len;
+                return true;
+            };
+
+            def ecdsa_der_decode_n(byte* r, byte* s, int nb, byte* der, int der_len) -> bool
+            {
+                int pos, total;
+                if (der_len < 8 | der[0] != (byte)0x30) { return false; };
+                pos = 2;
+                total = (int)der[1];
+                if (total == 0x81)
+                {
+                    total = (int)der[2];
+                    pos = 3;
+                }
+                else
+                {
+                    if (total >= 128) { return false; };
+                };
+                if (pos + total != der_len) { return false; };
+                if (!ecdsa_der_get_int(r, nb, der, der_len, @pos)) { return false; };
+                if (!ecdsa_der_get_int(s, nb, der, der_len, @pos)) { return false; };
+                return pos == der_len;
+            };
+
+        }; // P384
+
+        namespace X509
+        {
+            // =========================================================================
+            // ASN.1 DER reader, X.509 certificate parsing, PEM bundle loading, hostname
+            // matching and chain validation.
+            //
+            // A parsed X509_CERT holds pointers into the DER buffer it was parsed from,
+            // so that buffer must stay alive and unmodified while the certificate is used.
+            //
+            // Supported signatures: RSA PKCS#1 v1.5 and ECDSA with SHA-256/384/512.
+            // Supported keys: RSA, EC P-256, EC P-384. RSASSA-PSS signed certificates are
+            // reported as unsupported. Names are compared as raw DER bytes.
+            //
+            // Public API:
+            //   x509_parse(X509_CERT* c, byte* der, int der_len) -> bool
+            //   x509_load_pem_bundle(pem, pem_len, der_out, der_cap, certs, max) -> int
+            //   x509_check_sig(X509_CERT* c, X509_CERT* issuer) -> int
+            //   x509_match_host(X509_CERT* c, byte* host, int host_len) -> bool
+            //   x509_verify_chain(chain, n, roots, nroots, now, host, host_len) -> int
+            //
+            // x509_verify_chain error codes:
+            //   0 ok, 2 expired or not yet valid, 3 bad signature, 4 issuer is not a CA,
+            //   5 no trusted root, 6 hostname mismatch, 7 unsupported algorithm,
+            //   8 path length exceeded, 9 key usage forbids certificate signing
+            // `now` is unix time in seconds supplied by the caller.
+            // =========================================================================
+
+            global byte[9] X509_OID_RSA    = [42,134,72,134,247,13,1,1,1];
+            global byte[9] X509_OID_SHA256_RSA = [42,134,72,134,247,13,1,1,11];
+            global byte[9] X509_OID_SHA384_RSA = [42,134,72,134,247,13,1,1,12];
+            global byte[9] X509_OID_SHA512_RSA = [42,134,72,134,247,13,1,1,13];
+            global byte[8] X509_OID_ECDSA_SHA256 = [42,134,72,206,61,4,3,2];
+            global byte[8] X509_OID_ECDSA_SHA384 = [42,134,72,206,61,4,3,3];
+            global byte[8] X509_OID_ECDSA_SHA512 = [42,134,72,206,61,4,3,4];
+            global byte[7] X509_OID_EC_KEY = [42,134,72,206,61,2,1];
+            global byte[8] X509_OID_P256 = [42,134,72,206,61,3,1,7];
+            global byte[5] X509_OID_P384 = [43,129,4,0,34];
+            global byte[3] X509_OID_BASIC = [85,29,19];
+            global byte[3] X509_OID_KEYUSE = [85,29,15];
+            global byte[3] X509_OID_SAN = [85,29,17];
+            global byte[3] X509_OID_CN = [85,4,3];
+
+            global const int X509_KEY_RSA = 1, X509_KEY_P256 = 2, X509_KEY_P384 = 3;
+
+            struct X509_CERT
+            {
+                byte* der;
+                int der_len;
+                byte* tbs;
+                int tbs_len;
+                int sig_alg;        // 1..3 RSA sha256/384/512, 4..6 ECDSA sha256/384/512, 0 unsupported
+                byte* sig;
+                int sig_len;
+                byte* issuer;
+                int issuer_len;
+                byte* subject;
+                int subject_len;
+                i64 not_before;
+                i64 not_after;
+                int key_type;
+                byte* rsa_n;
+                int rsa_n_len;
+                byte* rsa_e;
+                int rsa_e_len;
+                byte* ec_point;     // uncompressed point 04 || X || Y
+                int ec_len;
+                byte* san;          // content of the GeneralNames sequence
+                int san_len;
+                byte* cn;
+                int cn_len;
+                bool has_bc;
+                bool is_ca;
+                int path_len;       // -1 when absent
+                bool has_ku;
+                int ku;             // first key usage byte
+            };
+
+            // ---- DER reader ----
+
+            // Reads the header at pos. cstart is the content offset, clen its length.
+            def asn1_hdr(byte* b, int len, int pos, int* tag, int* cstart, int* clen) -> bool
+            {
+                int l, p, nb, i;
+                if (pos < 0 | pos + 2 > len) { return false; };
+                if (((int)b[pos] `& 31) == 31) { return false; };
+                *tag = (int)b[pos];
+                l = (int)b[pos + 1];
+                p = pos + 2;
+                if ((l `& 128) != 0)
+                {
+                    nb = l `& 127;
+                    if (nb == 0 | nb > 3 | p + nb > len) { return false; };
+                    l = 0;
+                    for (i = 0; i < nb; i++) { l = l * 256 + (int)b[p + i]; };
+                    p = p + nb;
+                };
+                if (l < 0 | p + l > len) { return false; };
+                *cstart = p;
+                *clen = l;
+                return true;
+            };
+
+            def x509_oid_is(byte* d, int off, int len, byte* oid, int n) -> bool
+            {
+                int i;
+                if (len != n) { return false; };
+                for (i = 0; i < n; i++) { if (d[off + i] != oid[i]) { return false; }; };
+                return true;
+            };
+
+            // ---- time ----
+
+            def x509_days_from_civil(int y, int m, int d) -> i64
+            {
+                int era, yoe, doy, doe, mp;
+                if (m <= 2) { y = y - 1; };
+                era = y / 400;
+                yoe = y - era * 400;
+                mp = m + 9;
+                if (m > 2) { mp = m - 3; };
+                doy = (153 * mp + 2) / 5 + d - 1;
+                doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+                return (i64)era * (i64)146097 + (i64)doe - (i64)719468;
+            };
+
+            def x509_digits(byte* b, int off, int n) -> int
+            {
+                int i, v = 0;
+                for (i = 0; i < n; i++) { v = v * 10 + ((int)b[off + i] - 48); };
+                return v;
+            };
+
+            // UTCTime (tag 23) or GeneralizedTime (tag 24) to unix seconds
+            def x509_parse_time(byte* b, int off, int len, int tag, i64* out) -> bool
+            {
+                int y, mo, d, h, mi, s, p;
+                if (tag == 23)
+                {
+                    if (len != 13) { return false; };
+                    y = x509_digits(b, off, 2);
+                    if (y < 50) { y = y + 2000; } else { y = y + 1900; };
+                    p = off + 2;
+                }
+                else
+                {
+                    if (len != 15) { return false; };
+                    y = x509_digits(b, off, 4);
+                    p = off + 4;
+                };
+                mo = x509_digits(b, p, 2);
+                d = x509_digits(b, p + 2, 2);
+                h = x509_digits(b, p + 4, 2);
+                mi = x509_digits(b, p + 6, 2);
+                s = x509_digits(b, p + 8, 2);
+                *out = x509_days_from_civil(y, mo, d) * (i64)86400 + (i64)(h * 3600 + mi * 60 + s);
+                return true;
+            };
+
+            // ---- certificate parsing ----
+
+            def x509_sig_alg(byte* d, int off, int len) -> int
+            {
+                if (x509_oid_is(d, off, len, @X509_OID_SHA256_RSA[0], 9)) { return 1; };
+                if (x509_oid_is(d, off, len, @X509_OID_SHA384_RSA[0], 9)) { return 2; };
+                if (x509_oid_is(d, off, len, @X509_OID_SHA512_RSA[0], 9)) { return 3; };
+                if (x509_oid_is(d, off, len, @X509_OID_ECDSA_SHA256[0], 8)) { return 4; };
+                if (x509_oid_is(d, off, len, @X509_OID_ECDSA_SHA384[0], 8)) { return 5; };
+                if (x509_oid_is(d, off, len, @X509_OID_ECDSA_SHA512[0], 8)) { return 6; };
+                return 0;
+            };
+
+            def x509_parse_extensions(X509_CERT* c, byte* d, int start, int len) -> void
+            {
+                int pos, end, tag, cs, cl, ep, eend, os, ol, vs, vl, ip, itag, ics, icl, bs, bl;
+                pos = start;
+                end = start + len;
+                while (pos < end)
+                {
+                    if (!asn1_hdr(d, end, pos, @tag, @cs, @cl)) { return; };
+                    ep = cs;
+                    eend = cs + cl;
+                    pos = cs + cl;
+                    if (tag != 48) { continue; };
+                    if (!asn1_hdr(d, eend, ep, @tag, @os, @ol)) { return; };
+                    ep = os + ol;
+                    if (ep < eend)
+                    {
+                        if (d[ep] == (byte)1)
+                        {
+                            if (!asn1_hdr(d, eend, ep, @itag, @ics, @icl)) { return; };
+                            ep = ics + icl;
+                        };
+                    };
+                    if (!asn1_hdr(d, eend, ep, @itag, @vs, @vl)) { return; };
+                    if (itag != 4) { continue; };
+
+                    if (x509_oid_is(d, os, ol, @X509_OID_BASIC[0], 3))
+                    {
+                        c.has_bc = true;
+                        c.is_ca = false;
+                        c.path_len = 0 - 1;
+                        if (asn1_hdr(d, vs + vl, vs, @itag, @ics, @icl))
+                        {
+                            ip = ics;
+                            if (ip < ics + icl)
+                            {
+                                if (d[ip] == (byte)1)
+                                {
+                                    if (asn1_hdr(d, ics + icl, ip, @itag, @bs, @bl))
+                                    {
+                                        if (bl == 1 & d[bs] != (byte)0) { c.is_ca = true; };
+                                        ip = bs + bl;
+                                    };
+                                };
+                            };
+                            if (ip < ics + icl)
+                            {
+                                if (d[ip] == (byte)2)
+                                {
+                                    if (asn1_hdr(d, ics + icl, ip, @itag, @bs, @bl))
+                                    {
+                                        if (bl == 1) { c.path_len = (int)d[bs]; };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                    if (x509_oid_is(d, os, ol, @X509_OID_KEYUSE[0], 3))
+                    {
+                        if (asn1_hdr(d, vs + vl, vs, @itag, @ics, @icl))
+                        {
+                            if (itag == 3 & icl >= 2)
+                            {
+                                c.has_ku = true;
+                                c.ku = (int)d[ics + 1];
+                            };
+                        };
+                    };
+                    if (x509_oid_is(d, os, ol, @X509_OID_SAN[0], 3))
+                    {
+                        if (asn1_hdr(d, vs + vl, vs, @itag, @ics, @icl))
+                        {
+                            c.san = d + ics;
+                            c.san_len = icl;
+                        };
+                    };
+                };
+            };
+
+            // Finds the commonName in a Name (SEQUENCE of SET of SEQUENCE)
+            def x509_find_cn(X509_CERT* c, byte* d, int start, int len) -> void
+            {
+                int pos, end, tag, cs, cl, sp, send, qs, ql, qpos, qend, os, ol, vs, vl, vtag;
+                pos = start;
+                end = start + len;
+                while (pos < end)
+                {
+                    if (!asn1_hdr(d, end, pos, @tag, @cs, @cl)) { return; };
+                    sp = cs;
+                    send = cs + cl;
+                    pos = cs + cl;
+                    while (sp < send)
+                    {
+                        if (!asn1_hdr(d, send, sp, @tag, @qs, @ql)) { return; };
+                        sp = qs + ql;
+                        qpos = qs;
+                        qend = qs + ql;
+                        if (!asn1_hdr(d, qend, qpos, @tag, @os, @ol)) { return; };
+                        qpos = os + ol;
+                        if (!asn1_hdr(d, qend, qpos, @vtag, @vs, @vl)) { return; };
+                        if (x509_oid_is(d, os, ol, @X509_OID_CN[0], 3))
+                        {
+                            c.cn = d + vs;
+                            c.cn_len = vl;
+                        };
+                    };
+                };
+            };
+
+            def x509_parse(X509_CERT* c, byte* der, int der_len) -> bool
+            {
+                int tag, cs, cl, pos, tend, certend, ts, tl, ot, os, ol, bits;
+                int spos, send, kt, ks, kl, ao, al, kp, pos2, t2, cs2, cl2;
+                int tbs_start;
+
+                c.der = der;
+                c.der_len = der_len;
+                c.sig_alg = 0;
+                c.key_type = 0;
+                c.san = (byte*)0;
+                c.san_len = 0;
+                c.cn = (byte*)0;
+                c.cn_len = 0;
+                c.has_bc = false;
+                c.is_ca = false;
+                c.path_len = 0 - 1;
+                c.has_ku = false;
+                c.ku = 0;
+                c.rsa_n = (byte*)0;
+                c.rsa_e = (byte*)0;
+                c.ec_point = (byte*)0;
+
+                // Certificate ::= SEQUENCE { tbs, sigAlg, sigValue }
+                if (!asn1_hdr(der, der_len, 0, @tag, @cs, @cl) | tag != 48) { return false; };
+                certend = cs + cl;
+                tbs_start = cs;
+                if (!asn1_hdr(der, certend, cs, @tag, @ts, @tl) | tag != 48) { return false; };
+                c.tbs = der + tbs_start;
+                c.tbs_len = (ts + tl) - tbs_start;
+                pos = ts + tl;
+
+                // outer signatureAlgorithm
+                if (!asn1_hdr(der, certend, pos, @tag, @os, @ol) | tag != 48) { return false; };
+                if (asn1_hdr(der, os + ol, os, @ot, @ks, @kl))
+                {
+                    c.sig_alg = x509_sig_alg(der, ks, kl);
+                };
+                pos = os + ol;
+
+                // signatureValue BIT STRING
+                if (!asn1_hdr(der, certend, pos, @tag, @os, @ol) | tag != 3 | ol < 1) { return false; };
+                c.sig = der + os + 1;
+                c.sig_len = ol - 1;
+
+                // ---- TBSCertificate ----
+                pos = ts;
+                tend = ts + tl;
+                if (pos < tend)
+                {
+                    if (der[pos] == (byte)160)
+                    {
+                        if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl)) { return false; };
+                        pos = cs + cl;
+                    };
+                };
+                // serial
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 2) { return false; };
+                pos = cs + cl;
+                // inner signature algorithm
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 48) { return false; };
+                pos = cs + cl;
+                // issuer
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 48) { return false; };
+                c.issuer = der + pos;
+                c.issuer_len = (cs + cl) - pos;
+                pos = cs + cl;
+                // validity
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 48) { return false; };
+                pos2 = cs;
+                if (!asn1_hdr(der, cs + cl, pos2, @t2, @cs2, @cl2)) { return false; };
+                if (!x509_parse_time(der, cs2, cl2, t2, @c.not_before)) { return false; };
+                pos2 = cs2 + cl2;
+                if (!asn1_hdr(der, cs + cl, pos2, @t2, @cs2, @cl2)) { return false; };
+                if (!x509_parse_time(der, cs2, cl2, t2, @c.not_after)) { return false; };
+                pos = cs + cl;
+                // subject
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 48) { return false; };
+                c.subject = der + pos;
+                c.subject_len = (cs + cl) - pos;
+                x509_find_cn(c, der, cs, cl);
+                pos = cs + cl;
+                // SubjectPublicKeyInfo
+                if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl) | tag != 48) { return false; };
+                spos = cs;
+                send = cs + cl;
+                pos = cs + cl;
+                if (!asn1_hdr(der, send, spos, @tag, @os, @ol) | tag != 48) { return false; };
+                // algorithm OID
+                if (!asn1_hdr(der, os + ol, os, @ot, @ao, @al) | ot != 6) { return false; };
+                kp = ao + al;       // start of parameters
+                spos = os + ol;
+                // subjectPublicKey BIT STRING
+                if (!asn1_hdr(der, send, spos, @tag, @ks, @kl) | tag != 3 | kl < 2) { return false; };
+                if (x509_oid_is(der, ao, al, @X509_OID_RSA[0], 9))
+                {
+                    // RSAPublicKey ::= SEQUENCE { n INTEGER, e INTEGER }
+                    if (!asn1_hdr(der, ks + kl, ks + 1, @tag, @cs, @cl) | tag != 48) { return false; };
+                    pos2 = cs;
+                    if (!asn1_hdr(der, cs + cl, pos2, @t2, @cs2, @cl2) | t2 != 2) { return false; };
+                    c.rsa_n = der + cs2;
+                    c.rsa_n_len = cl2;
+                    pos2 = cs2 + cl2;
+                    if (!asn1_hdr(der, cs + cl, pos2, @t2, @cs2, @cl2) | t2 != 2) { return false; };
+                    c.rsa_e = der + cs2;
+                    c.rsa_e_len = cl2;
+                    c.key_type = 1;
+                };
+                if (x509_oid_is(der, ao, al, @X509_OID_EC_KEY[0], 7))
+                {
+                    if (!asn1_hdr(der, os + ol, kp, @tag, @cs, @cl) | tag != 6) { return false; };
+                    if (x509_oid_is(der, cs, cl, @X509_OID_P256[0], 8) & kl == 66)
+                    {
+                        c.key_type = 2;
+                    };
+                    if (x509_oid_is(der, cs, cl, @X509_OID_P384[0], 5) & kl == 98)
+                    {
+                        c.key_type = 3;
+                    };
+                    c.ec_point = der + ks + 1;
+                    c.ec_len = kl - 1;
+                    if (c.key_type != 0 & der[ks + 1] != (byte)4) { c.key_type = 0; };
+                };
+
+                // optional [1] [2] [3]
+                while (pos < tend)
+                {
+                    if (!asn1_hdr(der, tend, pos, @tag, @cs, @cl)) { return false; };
+                    if (tag == 163)
+                    {
+                        // extensions: EXPLICIT SEQUENCE OF Extension
+                        if (asn1_hdr(der, cs + cl, cs, @t2, @cs2, @cl2))
+                        {
+                            x509_parse_extensions(c, der, cs2, cl2);
+                        };
+                    };
+                    pos = cs + cl;
+                };
+                return true;
+            };
+
+            // ---- PEM ----
+
+            def x509_b64val(byte ch) -> int
+            {
+                if (ch >= (byte)65 & ch <= (byte)90) { return (int)ch - 65; };
+                if (ch >= (byte)97 & ch <= (byte)122) { return (int)ch - 71; };
+                if (ch >= (byte)48 & ch <= (byte)57) { return (int)ch + 4; };
+                if (ch == (byte)43) { return 62; };
+                if (ch == (byte)47) { return 63; };
+                return 0 - 1;
+            };
+
+            // true when the zero terminated literal appears at buf[pos]
+            def x509_match_at(byte* buf, int len, int pos, byte* lit) -> bool
+            {
+                int i = 0;
+                while (lit[i] != (byte)0)
+                {
+                    if (pos + i >= len) { return false; };
+                    if (buf[pos + i] != lit[i]) { return false; };
+                    i++;
+                };
+                return true;
+            };
+
+            // Decodes every CERTIFICATE block of a PEM bundle. DER bytes are written back
+            // to back into der_out and each certificate that parses is stored in certs.
+            // Returns the number of certificates stored.
+            def x509_load_pem_bundle(byte* pem, int pem_len, byte* der_out, int der_cap,
+                                     X509_CERT* certs, int max) -> int
+            {
+                byte* begin_lit = "-----BEGIN CERTIFICATE-----\0";
+                byte* end_lit = "-----END CERTIFICATE-----\0";
+                int pos = 0, count = 0, used = 0, start, acc, nbits, v, outpos;
+                byte ch;
+
+                while (pos < pem_len & count < max)
+                {
+                    if (!x509_match_at(pem, pem_len, pos, begin_lit)) { pos++; continue; };
+                    pos = pos + 27;
+                    start = used;
+                    acc = 0;
+                    nbits = 0;
+                    outpos = used;
+                    while (pos < pem_len & !x509_match_at(pem, pem_len, pos, end_lit))
+                    {
+                        ch = pem[pos];
+                        pos++;
+                        v = x509_b64val(ch);
+                        if (v < 0) { continue; };
+                        acc = (acc << 6) `| v;
+                        nbits = nbits + 6;
+                        if (nbits >= 8)
+                        {
+                            nbits = nbits - 8;
+                            if (outpos >= der_cap) { return count; };
+                            der_out[outpos] = (byte)((acc >> nbits) `& 255);
+                            outpos++;
+                            acc = acc `& ((1 << nbits) - 1);
+                        };
+                    };
+                    used = outpos;
+                    if (x509_parse(@certs[count], der_out + start, used - start)) { count++; };
+                };
+                return count;
+            };
+
+            // ---- signature check ----
+
+            def x509_check_sig(X509_CERT* c, X509_CERT* issuer) -> int
+            {
+                byte[64] digest;
+                byte[48] r, s;
+                int hash_id, hl, nb;
+                bool ok;
+
+                if (c.sig_alg == 0) { return 7; };
+                hash_id = ((c.sig_alg - 1) % 3) + 1;
+                hl = RSA::rsa_hash_len(hash_id);
+                RSA::rsa_hash2(hash_id, c.tbs, c.tbs_len, (byte*)0, 0, @digest[0]);
+
+                if (c.sig_alg <= 3)
+                {
+                    if (issuer.key_type != 1) { return 3; };
+                    ok = RSA::rsa_pkcs1_verify(issuer.rsa_n, issuer.rsa_n_len,
+                                               issuer.rsa_e, issuer.rsa_e_len,
+                                               hash_id, @digest[0], c.sig, c.sig_len);
+                    if (ok) { return 0; };
+                    return 3;
+                };
+
+                if (issuer.key_type == 2)
+                {
+                    nb = 32;
+                    if (!P384::ecdsa_der_decode_n(@r[0], @s[0], nb, c.sig, c.sig_len)) { return 3; };
+                    ok = P384::ecdsa_p256n_verify(@r[0], @s[0], issuer.ec_point + 1,
+                                                  issuer.ec_point + 33, @digest[0], hl);
+                    if (ok) { return 0; };
+                    return 3;
+                };
+                if (issuer.key_type == 3)
+                {
+                    nb = 48;
+                    if (!P384::ecdsa_der_decode_n(@r[0], @s[0], nb, c.sig, c.sig_len)) { return 3; };
+                    ok = P384::ecdsa_p384_verify(@r[0], @s[0], issuer.ec_point + 1,
+                                                 issuer.ec_point + 49, @digest[0], hl);
+                    if (ok) { return 0; };
+                    return 3;
+                };
+                return 3;
+            };
+
+            // ---- names ----
+
+            def x509_lower(byte ch) -> byte
+            {
+                if (ch >= (byte)65 & ch <= (byte)90) { return ch + (byte)32; };
+                return ch;
+            };
+
+            // case insensitive pattern match with an optional leading "*." wildcard
+            def x509_host_matches(byte* pat, int plen, byte* host, int hlen) -> bool
+            {
+                int i, dot, off;
+                if (plen > 2 & pat[0] == (byte)42 & pat[1] == (byte)46)
+                {
+                    // wildcard covers exactly one non empty leftmost label
+                    dot = 0;
+                    while (dot < hlen & host[dot] != (byte)46) { dot++; };
+                    if (dot == 0 | dot >= hlen) { return false; };
+                    off = dot;
+                    if (hlen - off != plen - 1) { return false; };
+                    for (i = 0; i < plen - 1; i++)
+                    {
+                        if (x509_lower(pat[1 + i]) != x509_lower(host[off + i])) { return false; };
+                    };
+                    return true;
+                };
+                if (plen != hlen) { return false; };
+                for (i = 0; i < plen; i++)
+                {
+                    if (x509_lower(pat[i]) != x509_lower(host[i])) { return false; };
+                };
+                return true;
+            };
+
+            def x509_match_host(X509_CERT* c, byte* host, int host_len) -> bool
+            {
+                int pos, tag, cs, cl;
+                bool any_dns = false;
+                if (c.san_len > 0)
+                {
+                    pos = 0;
+                    while (pos < c.san_len)
+                    {
+                        if (!asn1_hdr(c.san, c.san_len, pos, @tag, @cs, @cl)) { break; };
+                        pos = cs + cl;
+                        if (tag == 130)
+                        {
+                            any_dns = true;
+                            if (x509_host_matches(c.san + cs, cl, host, host_len)) { return true; };
+                        };
+                    };
+                };
+                if (any_dns) { return false; };
+                if (c.cn_len > 0) { return x509_host_matches(c.cn, c.cn_len, host, host_len); };
+                return false;
+            };
+
+            // ---- chain ----
+
+            def x509_bytes_eq(byte* a, int alen, byte* b, int blen) -> bool
+            {
+                int i;
+                if (alen != blen) { return false; };
+                for (i = 0; i < alen; i++) { if (a[i] != b[i]) { return false; }; };
+                return true;
+            };
+
+            def x509_valid_at(X509_CERT* c, i64 now) -> bool
+            {
+                return now >= c.not_before & now <= c.not_after;
+            };
+
+            // may this certificate sign others? returns 0 or an error code
+            def x509_ca_ok(X509_CERT* c) -> int
+            {
+                if (!c.has_bc | !c.is_ca) { return 4; };
+                if (c.has_ku)
+                {
+                    if ((c.ku `& 4) == 0) { return 9; };
+                };
+                return 0;
+            };
+
+            // chain[0] is the leaf, chain[n-1] the last intermediate or the root itself.
+            // host may be null to skip the hostname check.
+            def x509_verify_chain(X509_CERT* chain, int n, X509_CERT* roots, int nroots,
+                                  i64 now, byte* host, int host_len) -> int
+            {
+                int i, j, rc, anchored;
+                X509_CERT* last;
+
+                if (n < 1) { return 5; };
+                if (host != (byte*)0)
+                {
+                    if (!x509_match_host(@chain[0], host, host_len)) { return 6; };
+                };
+                for (i = 0; i < n; i++)
+                {
+                    if (!x509_valid_at(@chain[i], now)) { return 2; };
+                };
+                for (i = 0; i + 1 < n; i++)
+                {
+                    if (!x509_bytes_eq(chain[i].issuer, chain[i].issuer_len,
+                                       chain[i + 1].subject, chain[i + 1].subject_len)) { return 5; };
+                    rc = x509_ca_ok(@chain[i + 1]);
+                    if (rc != 0) { return rc; };
+                    if (chain[i + 1].path_len >= 0)
+                    {
+                        if (i > chain[i + 1].path_len) { return 8; };
+                    };
+                    rc = x509_check_sig(@chain[i], @chain[i + 1]);
+                    if (rc != 0) { return rc; };
+                };
+
+                last = @chain[n - 1];
+                anchored = 0;
+                for (j = 0; j < nroots; j++)
+                {
+                    if (x509_bytes_eq(last.der, last.der_len, roots[j].der, roots[j].der_len))
+                    {
+                        if (x509_valid_at(@roots[j], now)) { anchored = 1; };
+                        break;
+                    };
+                };
+                if (anchored == 0)
+                {
+                    for (j = 0; j < nroots; j++)
+                    {
+                        if (!x509_bytes_eq(last.issuer, last.issuer_len,
+                                           roots[j].subject, roots[j].subject_len)) { continue; };
+                        if (!x509_valid_at(@roots[j], now)) { continue; };
+                        if (x509_ca_ok(@roots[j]) != 0) { continue; };
+                        if (x509_check_sig(last, @roots[j]) == 0) { anchored = 1; break; };
+                    };
+                };
+                if (anchored == 0) { return 5; };
+                return 0;
+            };
+
+        }; // X509
     };
 };
 

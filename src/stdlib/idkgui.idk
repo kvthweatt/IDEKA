@@ -1,0 +1,679 @@
+// Author: Karac V. Thweatt
+
+// IDEKA GUI
+// One window API that delegates to the GUI platform code of the target:
+//   Windows -> standard::system::windows (Win32 window, DIB blit to the window)
+//   Linux   -> standard::system::x11     (X11 wire protocol, PutImage)
+//
+// Both backends give the program the same thing: a software framebuffer of
+// 0x00RRGGBB pixels (row 0 is the top) plus polled keyboard and mouse state.
+// Draw into the framebuffer with the GuiWindow methods or directly through
+// GuiWindow.pixels, call present() to show it, and call process_messages()
+// once per frame. It returns false once the window has been closed.
+//
+// Input:
+//   mouse_x, mouse_y            client coordinates, y grows downward
+//   mouse_buttons               held buttons, GUI_BUTTON_* bits
+//   button_pressed(mask)        true on the frame a button went down
+//   button_released(mask)       true on the frame a button went up
+//   key_held(code)              true while a key is down
+//   key_pressed(code)           true on the frame a key went down
+// Key codes are the Win32 virtual key scheme: ASCII upper case for letters and
+// digits, plus the GUI_KEY_* values below. The pressed and released queries are
+// valid until the next process_messages().
+//
+//   #import <standard.idk>, <idkgui.idk>;
+//   using standard::system::idkgui;
+//
+//   GuiWindow win;
+//   win.__init("Title\0", 800, 600);
+//   while (win.running)
+//   {
+//       win.clear(0x00101010);
+//       win.fill_circle(win.mouse_x, win.mouse_y, 10, 0x00FFFFFF);
+//       win.present();
+//       win.running = win.process_messages();
+//   };
+//   win.__exit();
+
+#ifndef IDEKA_STANDARD_TYPES
+#import <types.idk>;
+#endif;
+
+#ifdef __WINDOWS__
+#ifndef __WIN32_INTERFACE__
+#import <windows.idk>;
+#endif;
+#ifndef __OPENGL__
+#import <opengl.idk>;
+#endif;
+using standard::system::windows,
+      OpenGL;
+
+extern
+{
+    def !!
+        SetDIBitsToDevice(void*, int, int, u32, u32, int, int, u32, u32, void*, void*, u32) -> int,
+        GetForegroundWindow() -> void*;
+};
+#endif;
+
+#ifdef __LINUX__
+#ifndef __X11_CLIENT__
+#import <x11.idk>;
+#endif;
+#endif;
+
+#ifndef __IDKGUI__
+#def __IDKGUI__ 1;
+
+namespace standard
+{
+    namespace system
+    {
+        namespace idkgui
+        {
+            // Mouse button bits
+            enum IdkGuiButton
+            {
+                GUI_BUTTON_LEFT   = 1,
+                GUI_BUTTON_RIGHT  = 2,
+                GUI_BUTTON_MIDDLE = 4
+            };
+
+            // Key codes besides ASCII upper case letters and digits
+            enum IdkGuiKey
+            {
+                GUI_KEY_BACKSPACE = 8,
+                GUI_KEY_TAB       = 9,
+                GUI_KEY_ENTER     = 13,
+                GUI_KEY_SHIFT     = 16,
+                GUI_KEY_CONTROL   = 17,
+                GUI_KEY_ALT       = 18,
+                GUI_KEY_ESCAPE    = 27,
+                GUI_KEY_SPACE     = 32,
+                GUI_KEY_PAGEUP    = 33,
+                GUI_KEY_PAGEDOWN  = 34,
+                GUI_KEY_END       = 35,
+                GUI_KEY_HOME      = 36,
+                GUI_KEY_LEFT      = 37,
+                GUI_KEY_UP        = 38,
+                GUI_KEY_RIGHT     = 39,
+                GUI_KEY_DOWN      = 40,
+                GUI_KEY_INSERT    = 45,
+                GUI_KEY_DELETE    = 46,
+                GUI_KEY_F1        = 112
+            };
+
+            // String literals are local to the function that makes them, so the names live in globals
+            #ifdef __LINUX__
+            global byte* GUI_BACKEND_NAME = "x11\0";
+            #endif;
+            #ifdef __WINDOWS__
+            global byte* GUI_BACKEND_NAME = "win32\0";
+            #endif;
+
+            // Name of the GUI backend compiled in
+            def backend_name() -> byte*
+            {
+                return GUI_BACKEND_NAME;
+            };
+
+            // ============================================================
+            // SOFTWARE RASTER ROUTINES over a 0x00RRGGBB buffer
+            // ============================================================
+
+            def gui_clear(u32* px, int w, int h, u32 color) -> void
+            {
+                int total = w * h;
+                int i = 0;
+                while (i < total)
+                {
+                    px[i] = color;
+                    i++;
+                };
+                return;
+            };
+
+            def gui_pixel(u32* px, int w, int h, int x, int y, u32 color) -> void
+            {
+                if (x >= 0 & y >= 0 & x < w & y < h)
+                {
+                    px[y * w + x] = color;
+                };
+                return;
+            };
+
+            // Source over blend with alpha 0 to 255
+            def gui_blend(u32* px, int w, int h, int x, int y, u32 color, int a) -> void
+            {
+                u32 d, r, g, b;
+                int ia;
+                if (x < 0 | y < 0 | x >= w | y >= h) { return; };
+                if (a <= 0) { return; };
+                if (a >= 255)
+                {
+                    px[y * w + x] = color;
+                    return;
+                };
+                ia = 255 - a;
+                d  = px[y * w + x];
+                r  = (((color >> 16) `& (u32)0xFF) * (u32)a + ((d >> 16) `& (u32)0xFF) * (u32)ia) / (u32)255;
+                g  = (((color >> 8)  `& (u32)0xFF) * (u32)a + ((d >> 8)  `& (u32)0xFF) * (u32)ia) / (u32)255;
+                b  = ((color `& (u32)0xFF) * (u32)a + (d `& (u32)0xFF) * (u32)ia) / (u32)255;
+                px[y * w + x] = (r << 16) `| (g << 8) `| b;
+                return;
+            };
+
+            // Additive blend: destination plus source scaled by alpha, clamped
+            def gui_add(u32* px, int w, int h, int x, int y, u32 color, int a) -> void
+            {
+                u32 d, r, g, b;
+                if (x < 0 | y < 0 | x >= w | y >= h) { return; };
+                if (a <= 0) { return; };
+                d = px[y * w + x];
+                r = ((d >> 16) `& (u32)0xFF) + (((color >> 16) `& (u32)0xFF) * (u32)a) / (u32)255;
+                g = ((d >> 8)  `& (u32)0xFF) + (((color >> 8)  `& (u32)0xFF) * (u32)a) / (u32)255;
+                b = (d `& (u32)0xFF) + ((color `& (u32)0xFF) * (u32)a) / (u32)255;
+                if (r > (u32)255) { r = (u32)255; };
+                if (g > (u32)255) { g = (u32)255; };
+                if (b > (u32)255) { b = (u32)255; };
+                px[y * w + x] = (r << 16) `| (g << 8) `| b;
+                return;
+            };
+
+            def gui_fill_rect(u32* px, int w, int h, int x1, int y1, int x2, int y2, u32 color) -> void
+            {
+                int t, x, y;
+                if (x1 > x2) { t = x1; x1 = x2; x2 = t; };
+                if (y1 > y2) { t = y1; y1 = y2; y2 = t; };
+                if (x1 < 0) { x1 = 0; };
+                if (y1 < 0) { y1 = 0; };
+                if (x2 > w) { x2 = w; };
+                if (y2 > h) { y2 = h; };
+                for (y = y1; y < y2; y++)
+                {
+                    for (x = x1; x < x2; x++)
+                    {
+                        px[y * w + x] = color;
+                    };
+                };
+                return;
+            };
+
+            // Bresenham line
+            def gui_line(u32* px, int w, int h, int x1, int y1, int x2, int y2, u32 color) -> void
+            {
+                int dx = x2 - x1;
+                int dy = y2 - y1;
+                int sx = 1;
+                int sy = 1;
+                int err, e2;
+                if (dx < 0) { dx = -dx; sx = -1; };
+                if (dy < 0) { dy = -dy; sy = -1; };
+                err = dx - dy;
+                while (true)
+                {
+                    gui_pixel(px, w, h, x1, y1, color);
+                    if (x1 == x2 & y1 == y2) { break; };
+                    e2 = err * 2;
+                    if (e2 > -dy) { err = err - dy; x1 = x1 + sx; };
+                    if (e2 < dx)  { err = err + dx; y1 = y1 + sy; };
+                };
+                return;
+            };
+
+            def gui_rect(u32* px, int w, int h, int x1, int y1, int x2, int y2, u32 color) -> void
+            {
+                gui_line(px, w, h, x1, y1, x2 - 1, y1, color);
+                gui_line(px, w, h, x2 - 1, y1, x2 - 1, y2 - 1, color);
+                gui_line(px, w, h, x2 - 1, y2 - 1, x1, y2 - 1, color);
+                gui_line(px, w, h, x1, y2 - 1, x1, y1, color);
+                return;
+            };
+
+            // Midpoint circle outline
+            def gui_circle(u32* px, int w, int h, int cx, int cy, int r, u32 color) -> void
+            {
+                int x = r;
+                int y = 0;
+                int err = 1 - r;
+                while (x >= y)
+                {
+                    gui_pixel(px, w, h, cx + x, cy + y, color);
+                    gui_pixel(px, w, h, cx + y, cy + x, color);
+                    gui_pixel(px, w, h, cx - y, cy + x, color);
+                    gui_pixel(px, w, h, cx - x, cy + y, color);
+                    gui_pixel(px, w, h, cx - x, cy - y, color);
+                    gui_pixel(px, w, h, cx - y, cy - x, color);
+                    gui_pixel(px, w, h, cx + y, cy - x, color);
+                    gui_pixel(px, w, h, cx + x, cy - y, color);
+                    y++;
+                    if (err < 0)
+                    {
+                        err = err + 2 * y + 1;
+                    }
+                    else
+                    {
+                        x--;
+                        err = err + 2 * (y - x) + 1;
+                    };
+                };
+                return;
+            };
+
+            def gui_fill_circle(u32* px, int w, int h, int cx, int cy, int r, u32 color) -> void
+            {
+                int y, x, rr;
+                rr = r * r;
+                for (y = -r; y <= r; y++)
+                {
+                    for (x = -r; x <= r; x++)
+                    {
+                        if (x * x + y * y <= rr)
+                        {
+                            gui_pixel(px, w, h, cx + x, cy + y, color);
+                        };
+                    };
+                };
+                return;
+            };
+
+            // ============================================================
+            // GUI WINDOW
+            // ============================================================
+
+            object GuiWindow
+            {
+                #ifdef __LINUX__
+                standard::system::x11::Window backend;
+                #endif;
+                #ifdef __WINDOWS__
+                standard::system::windows::Window backend;
+                #endif;
+                u32* pixels;                 // framebuffer, 0x00RRGGBB, row 0 at the top
+                int  width,
+                     height,
+                     mouse_x,
+                     mouse_y,
+                     last_key;
+                u32  mouse_buttons,
+                     mouse_hit,
+                     mouse_released;
+                bool running,
+                     resized,
+                     key_down,
+                     gl_mode;          // true after init_gl() succeeded, present() then swaps GL buffers
+                void* gl_rc;           // GL rendering context (Windows)
+                byte[256] key_state;
+                byte[256] key_hit;
+
+                // ============================================================
+                // LIFETIME
+                // ============================================================
+
+                def __init(byte* title, int w, int h) -> this
+                {
+                    this.pixels         = (u32*)0;
+                    this.width          = w;
+                    this.height         = h;
+                    this.mouse_x        = 0;
+                    this.mouse_y        = 0;
+                    this.last_key       = 0;
+                    this.mouse_buttons  = (u32)0;
+                    this.mouse_hit      = (u32)0;
+                    this.mouse_released = (u32)0;
+                    this.resized        = false;
+                    this.key_down       = false;
+                    this.gl_mode        = false;
+                    this.gl_rc          = (void*)0;
+                    this.running        = false;
+                    memset((void*)this.key_state, 0, (size_t)256);
+                    memset((void*)this.key_hit, 0, (size_t)256);
+
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    b.__init(title, w, h);
+                    this.running = b.running;
+                    this.sync();
+                    #endif;
+
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    standard::system::windows::RECT rc;
+                    b.__init(title, w, h, 100, 100);
+                    GetClientRect(b.handle, @rc);
+                    this.width  = rc.right - rc.left;
+                    this.height = rc.bottom - rc.top;
+                    if (this.width < 1)  { this.width = 1; };
+                    if (this.height < 1) { this.height = 1; };
+                    this.alloc_pixels(this.width, this.height);
+                    this.running = true;
+                    #endif;
+
+                    return this;
+                };
+
+                def __exit() -> void
+                {
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    b.__exit();
+                    this.pixels = (u32*)0;
+                    #endif;
+
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    if (this.gl_rc != (void*)0)
+                    {
+                        wglMakeCurrent((HDC)0, (HGLRC)0);
+                        wglDeleteContext((HGLRC)this.gl_rc);
+                        this.gl_rc = (void*)0;
+                        this.gl_mode = false;
+                    };
+                    b.__exit();
+                    if (this.pixels != (u32*)0)
+                    {
+                        ffree((u64)this.pixels);
+                        this.pixels = (u32*)0;
+                    };
+                    #endif;
+
+                    this.running = false;
+                    return;
+                };
+
+                def __expr() -> bool
+                {
+                    return this.running;
+                };
+
+                // Windows owns the framebuffer here, X11 owns it inside the backend
+                def alloc_pixels(int w, int h) -> void
+                {
+                    #ifdef __WINDOWS__
+                    size_t bytes = (size_t)(w * h * 4);
+                    if (this.pixels != (u32*)0)
+                    {
+                        ffree((u64)this.pixels);
+                    };
+                    this.pixels = (u32*)fmalloc(bytes);
+                    memset((void*)this.pixels, 0, bytes);
+                    this.width  = w;
+                    this.height = h;
+                    #endif;
+                    return;
+                };
+
+                // Copies the backend state into the public fields (X11)
+                def sync() -> void
+                {
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    int i;
+                    this.pixels         = b.pixels;
+                    this.width          = b.width;
+                    this.height         = b.height;
+                    this.mouse_x        = b.mouse_x;
+                    this.mouse_y        = b.mouse_y;
+                    this.mouse_buttons  = b.mouse_buttons;
+                    this.mouse_hit      = b.mouse_hit;
+                    this.mouse_released = b.mouse_released;
+                    this.last_key       = b.last_key;
+                    this.key_down       = b.key_down;
+                    this.resized        = b.resized;
+                    this.running        = b.running;
+                    for (i = 0; i < 256; i++)
+                    {
+                        this.key_state[i] = b.key_state[i];
+                        this.key_hit[i]   = b.key_hit[i];
+                    };
+                    #endif;
+                    return;
+                };
+
+                // ============================================================
+                // EVENTS
+                // ============================================================
+
+                def process_messages() -> bool
+                {
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    bool alive = b.process_messages();
+                    this.sync();
+                    return alive;
+                    #endif;
+
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    standard::system::windows::RECT rc;
+                    POINT pt;
+                    bool alive = b.process_messages();
+                    bool focus;
+                    u32  now, prev;
+                    int  k, nw, nh, down;
+
+                    this.resized        = false;
+                    this.mouse_hit      = (u32)0;
+                    this.mouse_released = (u32)0;
+                    memset((void*)this.key_hit, 0, (size_t)256);
+
+                    // A destroyed window has no client rectangle
+                    if (!GetClientRect(b.handle, @rc))
+                    {
+                        alive = false;
+                    };
+                    if (alive)
+                    {
+                        nw = rc.right - rc.left;
+                        nh = rc.bottom - rc.top;
+                        if (nw > 0 & nh > 0 & (nw != this.width | nh != this.height))
+                        {
+                            this.alloc_pixels(nw, nh);
+                            this.resized = true;
+                        };
+
+                        GetCursorPos(@pt);
+                        ScreenToClient((void*)b.handle, @pt);
+                        this.mouse_x = pt.x;
+                        this.mouse_y = pt.y;
+
+                        // Global key state only counts while this window has the focus
+                        focus = GetForegroundWindow() == (void*)b.handle;
+                        prev  = this.mouse_buttons;
+                        now   = (u32)0;
+                        if (focus)
+                        {
+                            if ((GetAsyncKeyState(1) `& (WORD)0x8000) != (WORD)0) { now = now `| (u32)1; };
+                            if ((GetAsyncKeyState(2) `& (WORD)0x8000) != (WORD)0) { now = now `| (u32)2; };
+                            if ((GetAsyncKeyState(4) `& (WORD)0x8000) != (WORD)0) { now = now `| (u32)4; };
+                        };
+                        this.mouse_buttons  = now;
+                        this.mouse_hit      = now `& (prev `^| now);
+                        this.mouse_released = prev `& (prev `^| now);
+
+                        this.key_down = false;
+                        for (k = 8; k < 256; k++)
+                        {
+                            down = 0;
+                            if (focus)
+                            {
+                                if ((GetAsyncKeyState(k) `& (WORD)0x8000) != (WORD)0) { down = 1; };
+                            };
+                            if (down == 1 & this.key_state[k] == 0)
+                            {
+                                this.key_hit[k] = 1;
+                                this.last_key   = k;
+                            };
+                            if (down == 1) { this.key_down = true; };
+                            this.key_state[k] = (byte)down;
+                        };
+                    };
+                    this.running = alive;
+                    return alive;
+                    #endif;
+                };
+
+                def set_title(byte* title) -> void
+                {
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    b.set_title(title);
+                    #endif;
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    b.set_title(title);
+                    #endif;
+                    return;
+                };
+
+                // ============================================================
+                // INPUT QUERIES
+                // ============================================================
+
+                def key_held(int code) -> bool
+                {
+                    if (code < 0 | code > 255) { return false; };
+                    return this.key_state[code] != 0;
+                };
+
+                def key_pressed(int code) -> bool
+                {
+                    if (code < 0 | code > 255) { return false; };
+                    return this.key_hit[code] != 0;
+                };
+
+                def button_held(u32 mask) -> bool
+                {
+                    return (this.mouse_buttons `& mask) != (u32)0;
+                };
+
+                def button_pressed(u32 mask) -> bool
+                {
+                    return (this.mouse_hit `& mask) != (u32)0;
+                };
+
+                def button_released(u32 mask) -> bool
+                {
+                    return (this.mouse_released `& mask) != (u32)0;
+                };
+
+                // ============================================================
+                // DRAWING (framebuffer, 0x00RRGGBB)
+                // ============================================================
+
+                def clear(u32 color) -> void
+                {
+                    gui_clear(this.pixels, this.width, this.height, color);
+                    return;
+                };
+
+                def pixel(int x, int y, u32 color) -> void
+                {
+                    gui_pixel(this.pixels, this.width, this.height, x, y, color);
+                    return;
+                };
+
+                // alpha 0 to 255, source over
+                def blend(int x, int y, u32 color, int a) -> void
+                {
+                    gui_blend(this.pixels, this.width, this.height, x, y, color, a);
+                    return;
+                };
+
+                // alpha 0 to 255, added to the destination and clamped
+                def add(int x, int y, u32 color, int a) -> void
+                {
+                    gui_add(this.pixels, this.width, this.height, x, y, color, a);
+                    return;
+                };
+
+                def line(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    gui_line(this.pixels, this.width, this.height, x1, y1, x2, y2, color);
+                    return;
+                };
+
+                def rect(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    gui_rect(this.pixels, this.width, this.height, x1, y1, x2, y2, color);
+                    return;
+                };
+
+                def fill_rect(int x1, int y1, int x2, int y2, u32 color) -> void
+                {
+                    gui_fill_rect(this.pixels, this.width, this.height, x1, y1, x2, y2, color);
+                    return;
+                };
+
+                def circle(int cx, int cy, int r, u32 color) -> void
+                {
+                    gui_circle(this.pixels, this.width, this.height, cx, cy, r, color);
+                    return;
+                };
+
+                def fill_circle(int cx, int cy, int r, u32 color) -> void
+                {
+                    gui_fill_circle(this.pixels, this.width, this.height, cx, cy, r, color);
+                    return;
+                };
+
+                // ============================================================
+                // PRESENT
+                // ============================================================
+
+                // Switches the window to OpenGL rendering. Returns false when the
+                // platform backend has no GL support, in which case the software
+                // framebuffer stays in use. After success, present() swaps the GL
+                // buffers and the software drawing methods no longer show.
+                def init_gl() -> bool
+                {
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    this.gl_rc = (void*)OpenGL::setup_opengl((HDC)b.device_context);
+                    if (this.gl_rc == (void*)0) { return false; };
+                    OpenGL::gl_load_extensions();
+                    this.gl_mode = true;
+                    return true;
+                    #endif;
+                    return false;
+                };
+
+                def present() -> void
+                {
+                    #ifdef __WINDOWS__
+                    if (this.gl_mode)
+                    {
+                        standard::system::windows::Window* gb = @this.backend;
+                        OpenGL::swap_buffers((HDC)gb.device_context);
+                        return;
+                    };
+                    #endif;
+                    #ifdef __LINUX__
+                    standard::system::x11::Window* b = @this.backend;
+                    b.present();
+                    #endif;
+
+                    #ifdef __WINDOWS__
+                    standard::system::windows::Window* b = @this.backend;
+                    byte[40] bmi;
+                    u32* h32 = (u32*)@bmi;
+                    memset((void*)bmi, 0, (size_t)40);
+                    // BITMAPINFOHEADER: 32 bit, top down, BI_RGB
+                    h32[0] = (u32)40;
+                    h32[1] = (u32)this.width;
+                    h32[2] = (u32)(0 - this.height);
+                    bmi[12] = 1;
+                    bmi[14] = 32;
+                    SetDIBitsToDevice((void*)b.device_context, 0, 0, (u32)this.width, (u32)this.height,
+                                      0, 0, (u32)0, (u32)this.height, (void*)this.pixels, (void*)bmi, (u32)0);
+                    #endif;
+                    return;
+                };
+            };
+        };
+    };
+};
+
+#endif;

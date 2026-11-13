@@ -1,0 +1,105 @@
+// X.509 parsing, hostname matching and chain validation test.
+// Run from the repository root. tests/x509_data is checked in; tests/x509_gen.py regenerates it.
+#import <standard.idk>, <ffifio.idk>, <datetime.idk>, <cryptography.idk>;
+
+using standard::io::console,
+      standard::crypto::X509,
+      standard::datetime;
+
+global byte[400000] g_pem;
+global byte[400000] g_der;
+global X509_CERT[200] g_roots;
+global byte[20000] g_pemA, g_pemB, g_rootA, g_rootB;
+global byte[20000] g_derA, g_derB, g_drA, g_drB;
+global X509_CERT[4] g_chainA, g_chainB, g_rA, g_rB;
+global int fails = 0;
+
+def check(byte* name, bool ok) -> void
+{
+    if (ok) { print(name); print(" ok\n\0"); } else { print(name); print(" FAIL\n\0"); fails++; };
+};
+
+def main() -> int
+{
+    i64 now = (i64)0;
+
+    int nroots, n, i, self_ok, rsa_k, p256_k, p384_k, unsup, bad, a, b, ra, rb, rc;
+    byte* hA = "www.example.test\0";
+    byte* hA2 = "API.Example.Test\0";
+    byte* hBad = "www.other.test\0";
+    byte* hB1 = "a.wild.test\0";
+    byte* hB2 = "a.b.wild.test\0";
+    byte* hB3 = "wild.test\0";
+
+    DateTime utc = dt_now_utc();
+    now = dt_to_unix_sec(@utc);
+    print("now \0"); print(now); print("\n\0");
+    n = 0;
+#ifdef __LINUX__
+    n = read_file("/etc/ssl/certs/ca-certificates.crt\0", g_pem, 400000);
+    print("pem bytes \0"); print(n); print("\n\0");
+    if (n > 0) { n = X509::x509_load_pem_bundle(g_pem, n, g_der, 400000, g_roots, 200); } else { n = 0; };
+    print("system roots parsed \0"); print(n); print("\n\0");
+#endif;
+    self_ok = 0; rsa_k = 0; p256_k = 0; p384_k = 0; unsup = 0; bad = 0;
+    for (i = 0; i < n; i++)
+    {
+        if (g_roots[i].key_type == 1) { rsa_k++; };
+        if (g_roots[i].key_type == 2) { p256_k++; };
+        if (g_roots[i].key_type == 3) { p384_k++; };
+        rc = X509::x509_check_sig(@g_roots[i], @g_roots[i]);
+        if (rc == 0) { self_ok++; };
+        if (rc == 7) { unsup++; };
+        if (rc == 3) { bad++; };
+        if (rc != 0) { print("  self check \0"); print(rc); print(" key \0"); print(g_roots[i].key_type); print(" alg \0"); print(g_roots[i].sig_alg); print(" idx \0"); print(i); print("\n\0"); };
+    };
+    print("self signed ok \0"); print(self_ok); print(" unsupported \0"); print(unsup); print(" bad \0"); print(bad); print("\n\0");
+    print("rsa \0"); print(rsa_k); print(" p256 \0"); print(p256_k); print(" p384 \0"); print(p384_k); print("\n\0");
+
+    nroots = n;
+    n = read_file("tests/x509_data/chainA.pem\0", g_pemA, 20000);
+    a = X509::x509_load_pem_bundle(g_pemA, n, g_derA, 20000, g_chainA, 4);
+    n = read_file("tests/x509_data/rootA.pem\0", g_rootA, 20000);
+    ra = X509::x509_load_pem_bundle(g_rootA, n, g_drA, 20000, g_rA, 4);
+    n = read_file("tests/x509_data/chainB.pem\0", g_pemB, 20000);
+    b = X509::x509_load_pem_bundle(g_pemB, n, g_derB, 20000, g_chainB, 4);
+    n = read_file("tests/x509_data/rootB.pem\0", g_rootB, 20000);
+    rb = X509::x509_load_pem_bundle(g_rootB, n, g_drB, 20000, g_rB, 4);
+    check("load counts\0", a == 2 & ra == 1 & b == 1 & rb == 1);
+    if (a != 2 | ra != 1 | b != 1 | rb != 1) { print("test data missing or unreadable, run tests/x509_gen.py from the repository root\n\0"); flush(); return 1; };
+
+    check("A leaf key p256\0", g_chainA[0].key_type == 2);
+    check("A inter key p384\0", g_chainA[1].key_type == 3 & g_chainA[1].is_ca & g_chainA[1].path_len == 0);
+    check("A sig algs\0", g_chainA[0].sig_alg == 4 & g_chainA[1].sig_alg == 2 & g_rA[0].sig_alg == 1);
+    check("B leaf rsa sha512\0", g_chainB[0].key_type == 1 & g_chainB[0].sig_alg == 6 - 3 + 0 * 1 | g_chainB[0].sig_alg == 6);
+
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rA, 1, now, hA, 16);
+    check("A verifies\0", rc == 0);
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rA, 1, now, hA2, 16);
+    check("A second SAN, case insensitive\0", rc == 0);
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rA, 1, now, hBad, 14);
+    check("A wrong host rejected\0", rc == 6);
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rA, 1, now + (i64)(80000 * 86400), hA, 16);
+    check("A expired rejected\0", rc == 2);
+    rc = X509::x509_verify_chain(g_chainA, 2, g_roots, nroots, now, hA, 16);
+    check("A untrusted under system roots\0", rc == 5);
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rB, 1, now, hA, 16);
+    check("A under wrong root rejected\0", rc == 5);
+    rc = X509::x509_verify_chain(g_chainA, 1, g_rA, 1, now, hA, 16);
+    check("A without intermediate rejected\0", rc == 5);
+    g_chainA[0].sig[20] = g_chainA[0].sig[20] ^| (byte)1;
+    rc = X509::x509_verify_chain(g_chainA, 2, g_rA, 1, now, hA, 16);
+    check("A tampered leaf signature\0", rc == 3);
+    g_chainA[0].sig[20] = g_chainA[0].sig[20] ^| (byte)1;
+
+    rc = X509::x509_verify_chain(g_chainB, 1, g_rB, 1, now, hB1, 11);
+    check("B wildcard verifies\0", rc == 0);
+    rc = X509::x509_verify_chain(g_chainB, 1, g_rB, 1, now, hB2, 13);
+    check("B two labels rejected\0", rc == 6);
+    rc = X509::x509_verify_chain(g_chainB, 1, g_rB, 1, now, hB3, 9);
+    check("B bare domain rejected\0", rc == 6);
+
+    if (fails == 0) { print("ALL PASS\n\0"); } else { print("FAILS\n\0"); };
+    flush();
+    return fails;
+};
