@@ -2,22 +2,32 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "IDEKA",
   "scopeName": "source.IDEKA",
-  "fileTypes": ["fx"],
+  "fileTypes": ["idk"],
   "patterns": [
     { "include": "#multiline_comment" },
     { "include": "#line_comment" },
     { "include": "#preprocessor" },
+    { "include": "#preprocessor_attribute" },
     { "include": "#i_string" },
     { "include": "#f_string" },
+    { "include": "#g_string" },
     { "include": "#regular_string" },
     { "include": "#char_literal" },
+    { "include": "#inline_assembly" },
+    { "include": "#idkvm_block" },
     { "include": "#namespace_access" },
+    { "include": "#namespace_declaration" },
+    { "include": "#type_declaration" },
     { "include": "#primitive_types" },
     { "include": "#storage_types" },
     { "include": "#calling_convention_def" },
+    { "include": "#async_function_def" },
+    { "include": "#function_pointer" },
     { "include": "#special_methods" },
-    { "include": "#keywords" },
+    { "include": "#compile_time_keywords" },
     { "include": "#type_modifiers" },
+    { "include": "#constants" },
+    { "include": "#keywords" },
     { "include": "#function_calls" },
     { "include": "#numbers" },
     { "include": "#operators" },
@@ -43,12 +53,56 @@
     },
     "preprocessor": {
       "name": "meta.preprocessor.IDEKA",
-      "match": "^\\s*(#)(import|def|dir|ifdef|ifndef|else|endif|warn|stop)\\b",
+      "match": "^\\s*(#\\s*)(import|package|def|psub|dir|ifdef|ifndef|ifpsub|ifnpsub|elif|if|else|endif|warn|stop|build)\\b",
       "captures": {
         "1": { "name": "punctuation.definition.preprocessor.IDEKA" },
         "2": { "name": "keyword.control.preprocessor.IDEKA" }
       },
       "comment": "Preprocessor directives"
+    },
+    "preprocessor_attribute": {
+      "name": "meta.preprocessor.attribute.IDEKA",
+      "match": "#\\[[^\\]]+\\]",
+      "captures": {
+        "0": { "name": "entity.name.tag.IDEKA" }
+      },
+      "comment": "Module build attributes"
+    },
+    "inline_assembly": {
+      "name": "meta.embedded.block.assembly.IDEKA",
+      "begin": "\\b(?:volatile\\s+)?asm\\s*(\\{)",
+      "beginCaptures": {
+        "0": { "name": "keyword.control.assembly.IDEKA" },
+        "1": { "name": "punctuation.section.block.begin.IDEKA" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.block.end.IDEKA" }
+      },
+      "patterns": [
+        { "include": "#line_comment" }
+      ],
+      "comment": "Inline assembly blocks"
+    },
+    "idkvm_block": {
+      "name": "meta.embedded.block.idkvm.IDEKA",
+      "begin": "\\bidkvm\\s*(\\{)",
+      "beginCaptures": {
+        "0": { "name": "keyword.control.idkvm.IDEKA" },
+        "1": { "name": "punctuation.section.block.begin.IDEKA" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.block.end.IDEKA" }
+      },
+      "patterns": [
+        {
+          "name": "keyword.other.idkvm.IDEKA",
+          "match": "\\b[A-Z][A-Z0-9_]*\\b"
+        },
+        { "include": "#line_comment" }
+      ],
+      "comment": "IDEKA VM instruction block"
     },
     "i_string": {
       "name": "string.quoted.double.IDEKA",
@@ -94,6 +148,24 @@
       ],
       "comment": "f-strings (formatted)"
     },
+    "g_string": {
+      "name": "string.quoted.double.IDEKA",
+      "begin": "g\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.IDEKA" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.IDEKA" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.IDEKA",
+          "match": "\\\\[\\\\\"nrt0]"
+        }
+      ],
+      "comment": "Global strings"
+    },
     "regular_string": {
       "name": "string.quoted.double.IDEKA",
       "begin": "\"",
@@ -138,6 +210,22 @@
       },
       "comment": "Namespace / scope resolution — must precede keywords"
     },
+    "namespace_declaration": {
+      "match": "\\b(namespace|module)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.IDEKA" },
+        "2": { "name": "entity.name.namespace.IDEKA" }
+      },
+      "comment": "Namespace and module declarations"
+    },
+    "type_declaration": {
+      "match": "\\b(struct|cstruct|object|enum|union|trait|interface|dict)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.IDEKA" },
+        "2": { "name": "entity.name.type.IDEKA" }
+      },
+      "comment": "Composite type declarations"
+    },
     "primitive_types": {
       "name": "storage.type.primitive.IDEKA",
       "match": "\\b(bool|byte|char|data|double|float|int|long|uint|ulong|void)\\b",
@@ -145,7 +233,7 @@
     },
     "storage_types": {
       "name": "storage.type.IDEKA",
-      "match": "\\b(enum|object|struct|trait|union)\\b",
+      "match": "\\b(cstruct|dict|enum|interface|object|struct|trait|union)\\b",
       "comment": "Composite / user-defined type keywords"
     },
     "calling_convention_def": {
@@ -157,19 +245,47 @@
       },
       "comment": "Function definitions with optional calling convention and template params"
     },
+    "async_function_def": {
+      "match": "\\b(async\\s+)(?:(def|cdecl|fastcall|stdcall|thiscall|vectorcall)\\s+)?([a-zA-Z_][a-zA-Z0-9_]*)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "storage.modifier.IDEKA" },
+        "2": { "name": "keyword.control.IDEKA" },
+        "3": { "name": "entity.name.function.IDEKA" }
+      },
+      "comment": "Async function declarations"
+    },
+    "function_pointer": {
+      "match": "\\b(def|cdecl|fastcall|stdcall|thiscall|vectorcall)(\\s*\\{\\}\\*)\\s*([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.IDEKA" },
+        "2": { "name": "storage.type.function-pointer.IDEKA" },
+        "3": { "name": "variable.other.function-pointer.IDEKA" }
+      },
+      "comment": "Function pointer declarations"
+    },
     "special_methods": {
       "name": "entity.name.function.special.IDEKA",
       "match": "\\b__[a-z]+__\\b",
       "comment": "Dunder / special methods"
     },
+    "compile_time_keywords": {
+      "name": "keyword.control.comptime.IDEKA",
+      "match": "\\b(comptime|emitideka|idkvm)\\b",
+      "comment": "Compile-time execution and code-generation keywords"
+    },
+    "constants": {
+      "name": "constant.language.boolean.IDEKA",
+      "match": "\\b(true|false)\\b",
+      "comment": "Boolean literals"
+    },
     "keywords": {
       "name": "keyword.control.IDEKA",
-      "match": "\\b(alignof|and|as|asm|assert|auto|break|case|catch|compt|const|continue|defer|default|deprecate|do|elif|else|extern|false|for|from|global|goto|heap|if|in|is|jump|label|local|namespace|noinit|noreturn|not|operator|or|private|public|register|return|signed|singinit|sizeof|stack|super|switch|this|throw|true|try|typeof|union|unsigned|using|volatile|while|xor)\\b",
+      "match": "\\b(alignof|and|as|asm|assert|auto|break|case|catch|constraint|continue|defer|default|deprecate|do|elif|else|endianof|error|export|extern|fastnode|for|from|global|goto|has|if|in|inline|is|jump|label|local|module|namespace|noreturn|not|operator|or|private|public|return|sizeof|super|switch|this|throw|true|false|try|typeof|using|vector|while|xor)\\b",
       "comment": "All non-type, non-calling-convention keywords"
     },
     "type_modifiers": {
       "name": "storage.modifier.IDEKA",
-      "match": "\\b(const|contract|escape|heap|macro|noinit|register|signed|singinit|stack|unsigned|volatile)\\b",
+      "match": "\\b(async|attenuate|binding|compt|const|contract|effect|escape|heap|inline|local|macro|naked|noinit|register|signed|singinit|stack|unsigned|volatile)\\b",
       "comment": "Type / storage modifiers"
     },
     "function_calls": {
@@ -181,32 +297,32 @@
       "patterns": [
         {
           "name": "constant.numeric.duotrigesimal.IDEKA",
-          "match": "\\b0d[0-9A-V]+u?\\b",
+          "match": "\\b0d[0-9A-V]+(?:ul|u|l|b)?\\b",
           "comment": "Base-32 literals"
         },
         {
           "name": "constant.numeric.hex.IDEKA",
-          "match": "\\b0x[0-9a-fA-F]+u?\\b",
+          "match": "\\b0x[0-9a-fA-F]+(?:ul|u|l|b)?\\b",
           "comment": "Hex literals"
         },
         {
           "name": "constant.numeric.octal.IDEKA",
-          "match": "\\b0o[0-7]+u?\\b",
+          "match": "\\b0o[0-7]+(?:ul|u|l|b)?\\b",
           "comment": "Octal literals"
         },
         {
           "name": "constant.numeric.binary.IDEKA",
-          "match": "\\b0b[01]+u?\\b",
+          "match": "\\b0b[01]+(?:ul|u|l)?\\b",
           "comment": "Binary literals"
         },
         {
           "name": "constant.numeric.float.IDEKA",
-          "match": "\\b\\d+(\\.\\d+)?[fd]\\b",
-          "comment": "Float / double literals with suffix"
+          "match": "\\b\\d+(?:\\.\\d+)?[eE][+-]?\\d+(?:[fd])?\\b|\\b\\d+\\.\\d+(?:[fd])?\\b|\\b\\d+[fd]\\b",
+          "comment": "Floating-point literals"
         },
         {
           "name": "constant.numeric.integer.IDEKA",
-          "match": "\\b\\d+u?\\b",
+          "match": "\\b\\d+(?:ul|u|l|b|c)?\\b",
           "comment": "Integer literals"
         }
       ]
@@ -219,18 +335,28 @@
           "comment": "Custom operator definitions"
         },
         {
-          "name": "keyword.operator.custom.IDEKA",
-          "match": "(``|`!&=|`!\\|=|`\\^\\^=|`&=|`\\|=|<<=|>>=|!&|!\\||<->|\\^\\^=|&=|\\|=|%=|\\^=|\\+=|-=|\\*=|/=|`!&|`!\\||`\\^\\^|\\+\\+|--)",
-          "comment": "Compound and special assignment operators"
+          "name": "keyword.operator.assignment.compound.IDEKA",
+          "match": "(`\\^\\|!&=|`\\^\\|!\\|=|`\\^\\|!=|`!&=|`!\\|=|`\\^\\|=|<<=|>>=|\\^\\|=|`&=|`\\|=|\\+=|-=|\\*=|/=|%=|\\^=|&=|\\|=)",
+          "comment": "Compound assignment operators"
+        },
+        {
+          "name": "keyword.operator.special.IDEKA",
+          "match": "(#\\\"|\\{\\}\\*|\\(@\\)|\\.\\.\\.|~\\$|\\bd\\{|``|\\+\\+|--|!!|\\?\\?|\\?=|!\\?|@=|`|\\\\)",
+          "comment": "Multi-character operators and special tokens"
+        },
+        {
+          "name": "keyword.operator.tag.IDEKA",
+          "match": "#",
+          "comment": "Union tags and preprocessor marker"
         },
         {
           "name": "keyword.operator.comparison.IDEKA",
-          "match": "(==|!=|>=|<=|>|<)"
+          "match": "(>=|<=|==|!=|>|<)"
         },
         {
           "name": "keyword.operator.arrow.IDEKA",
           "match": "(->|<-|<~)",
-          "comment": "Arrow operators (return type, chain, tail-recurse)"
+          "comment": "Return, chain, and strict-recursion arrows"
         },
         {
           "name": "keyword.operator.address.IDEKA",
@@ -239,8 +365,22 @@
         },
         {
           "name": "keyword.operator.stringify.IDEKA",
-          "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
-          "comment": "Stringify operator"
+          "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*|\\$",
+          "comment": "Stringification"
+        },
+        {
+          "name": "keyword.operator.tie.IDEKA",
+          "match": "~",
+          "comment": "Ownership tie"
+        },
+        {
+          "name": "keyword.operator.bitwise.IDEKA",
+          "match": "(`\\^\\|!&|`\\^\\|!\\||`\\^\\|!|`!&|`!\\||`\\^\\||`\\*|`!|`&|`\\||`\\^|<<|>>)"
+        },
+        {
+          "name": "keyword.operator.logical.IDEKA",
+          "match": "(!&|!\\||\\^\\||&|\\||!)",
+          "comment": "Logical operators"
         },
         {
           "name": "keyword.operator.dereference.IDEKA",
@@ -248,16 +388,8 @@
           "comment": "Pointer dereference"
         },
         {
-          "name": "keyword.operator.bitwise.IDEKA",
-          "match": "(`!|`&|`\\||`\\^\\^|<<|>>)"
-        },
-        {
           "name": "keyword.operator.arithmetic.IDEKA",
-          "match": "(\\*\\*|\\+|-|\\*|/|%|\\^)"
-        },
-        {
-          "name": "keyword.operator.logical.IDEKA",
-          "match": "(&|\\||!)"
+          "match": "(\\+|-|\\*|/|%|\\^)"
         },
         {
           "name": "keyword.operator.range.IDEKA",
@@ -281,7 +413,7 @@
         },
         {
           "name": "keyword.operator.assignment.IDEKA",
-          "match": "="
+          "match": "=|\\?|:"
         }
       ]
     },
