@@ -2,58 +2,39 @@
   "name": "IDEKA.lang",
   "publisher": "IDEKA",
   "displayName": "IDEKA Language Support",
-  "description": "IDEKA syntax, snippets, and language server integration",
+  "description": "IDEKA syntax highlighting, editor configuration, and snippets",
   "version": "1.0.0",
-  "main": "./extension.js",
   "engines": {
     "vscode": "^1.82.0"
   },
-  "activationEvents": [
-    "onLanguage:IDEKA"
-  ],
   "categories": [
     "Programming Languages"
   ],
   "contributes": {
-    "languages": [{
-      "id": "IDEKA",
-      "aliases": ["IDEKA"],
-      "extensions": [".idk"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "IDEKA",
-      "scopeName": "source.IDEKA",
-      "path": "./syntaxes/IDEKA.tmLanguage.json"
-    }],
+    "languages": [
+      {
+        "id": "IDEKA",
+        "aliases": [
+          "IDEKA"
+        ],
+        "extensions": [
+          ".idk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "IDEKA",
+        "scopeName": "source.IDEKA",
+        "path": "./syntaxes/IDEKA.tmLanguage.json"
+      }
+    ],
     "snippets": [
       {
         "language": "IDEKA",
         "path": "./snippets/IDEKA.snippet.lang-1.0.0.json"
       }
-    ],
-    "configuration": {
-      "title": "IDEKA",
-      "properties": {
-        "ideka.pythonPath": {
-          "type": "string",
-          "default": "python3",
-          "description": "Python executable used to start the IDEKA language server."
-        },
-        "ideka.serverPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to scripts/flsp.py. If empty, the extension searches the workspace and its parent folders for an IDEKA repository."
-        },
-        "ideka.sourcePath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to the IDEKA repository containing src/compiler and src/stdlib. If empty, the extension discovers it from the workspace."
-        }
-      }
-    }
-  },
-  "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    ]
   }
 }
