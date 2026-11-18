@@ -1,0 +1,706 @@
+{
+  "Import standard library": {
+    "prefix": "#import-standard",
+    "body": [
+      "#import <standard.idk>;"
+    ],
+    "description": "Import the IDEKA standard library"
+  },
+  "Import standard library and module": {
+    "prefix": "#import-module",
+    "body": [
+      "#import <standard.idk>, <${1:math.idk}>;"
+    ],
+    "description": "Import the standard library and another library"
+  },
+  "Import local source": {
+    "prefix": "#import-local",
+    "body": [
+      "#import \"${1:local.idk}\";"
+    ],
+    "description": "Import a source file relative to this file"
+  },
+  "Import package": {
+    "prefix": "#package",
+    "body": [
+      "#package ${1:package_name};"
+    ],
+    "description": "Import a registered IDEKA package"
+  },
+  "Preprocessor definition": {
+    "prefix": "#def",
+    "body": [
+      "#def ${1:NAME} ${2:value};"
+    ],
+    "description": "Define a preprocessor substitution"
+  },
+  "Preprocessor conditional": {
+    "prefix": "#ifdef",
+    "body": [
+      "#ifdef ${1:__WINDOWS__}",
+      "\t$0",
+      "#elif ${2:__LINUX__}",
+      "\t",
+      "#else",
+      "\t",
+      "#endif;"
+    ],
+    "description": "Create a platform or macro conditional"
+  },
+  "Parameterized substitution": {
+    "prefix": "#psub",
+    "body": [
+      "#psub ${1:NAME}(${2:args}) ${3:replacement};"
+    ],
+    "description": "Define a parameterized preprocessor substitution"
+  },
+  "Function definition": {
+    "prefix": "def",
+    "body": [
+      "def ${1:name}(${2:int value}) -> ${3:int}",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define an IDEKA function"
+  },
+  "Function prototype": {
+    "prefix": "def-prototype",
+    "body": [
+      "def ${1:name}(${2:int}) -> ${3:void};"
+    ],
+    "description": "Declare a function signature"
+  },
+  "Main function": {
+    "prefix": "def-main",
+    "body": [
+      "def main() -> int",
+      "{",
+      "\t$0",
+      "\treturn 0;",
+      "};"
+    ],
+    "description": "Define the program entry point"
+  },
+  "Variadic function": {
+    "prefix": "def-variadic",
+    "body": [
+      "def ${1:name}(...) -> ${2:void}",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define a function with variadic arguments"
+  },
+  "Function pointer": {
+    "prefix": "def-pointer",
+    "body": [
+      "def{}* ${1:callback}(${2:int}) -> ${3:int} = @${4:function};"
+    ],
+    "description": "Declare and initialize a function pointer"
+  },
+  "Generic function": {
+    "prefix": "def-generic",
+    "body": [
+      "def ${1:identity}<${2:T}>(${2:T} ${3:value}) -> ${2:T}",
+      "{",
+      "\treturn ${3:value};",
+      "};"
+    ],
+    "description": "Define a function parameterized by a type"
+  },
+  "Calling convention function": {
+    "prefix": "cdecl",
+    "body": [
+      "${1|cdecl,stdcall,fastcall,thiscall,vectorcall|} ${2:name}(${3:int value}) -> ${4:int}",
+      "{",
+      "\treturn ${5:value};",
+      "};"
+    ],
+    "description": "Define a function with an explicit ABI calling convention"
+  },
+  "External function declarations": {
+    "prefix": "extern",
+    "body": [
+      "extern",
+      "{",
+      "\tdef !!${1:external_name}(${2:void*}) -> ${3:int};",
+      "\t$0",
+      "};"
+    ],
+    "description": "Declare foreign functions without name mangling"
+  },
+  "Exported functions": {
+    "prefix": "export",
+    "body": [
+      "export",
+      "{",
+      "\tdef !!${1:public_name}() -> ${3:void}",
+      "\t{",
+      "\t\t$0",
+      "\t};",
+      "};"
+    ],
+    "description": "Export functions from a library"
+  },
+  "Namespace": {
+    "prefix": "namespace",
+    "body": [
+      "namespace ${1:name}",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Declare an IDEKA namespace"
+  },
+  "Use namespace": {
+    "prefix": "using",
+    "body": [
+      "using ${1:standard::io::console};"
+    ],
+    "description": "Bring a namespace into the current scope"
+  },
+  "Exclude namespace": {
+    "prefix": "not-using",
+    "body": [
+      "not using ${1:standard::namespace};"
+    ],
+    "description": "Remove a namespace from the current compilation"
+  },
+  "Struct definition": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name}",
+      "{",
+      "\t${2:int value;}",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define a packed IDEKA struct"
+  },
+  "C-compatible struct": {
+    "prefix": "cstruct",
+    "body": [
+      "cstruct ${1:Name}",
+      "{",
+      "\t${2:int value;}",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define a C-compatible struct"
+  },
+  "Object definition": {
+    "prefix": "object",
+    "body": [
+      "object ${1:Name}",
+      "{",
+      "\t${2:int value;}",
+      "",
+      "\tdef __init(${3:int value}) -> this",
+      "\t{",
+      "\t\tthis.value = value;",
+      "\t\treturn this;",
+      "\t};",
+      "",
+      "\tdef __exit() -> void",
+      "\t{",
+      "\t\t$0",
+      "\t};",
+      "",
+      "\tdef __expr() -> int { return this.value; };",
+      "};"
+    ],
+    "description": "Define an object with initializer, cleanup, and expression methods"
+  },
+  "Enum definition": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name}",
+      "{",
+      "\t${2:First},",
+      "\t${3:Second}",
+      "};"
+    ],
+    "description": "Define an enumeration"
+  },
+  "Tagged union": {
+    "prefix": "enum-tagged",
+    "body": [
+      "enum ${1:ValueTag} { ${2:INT_VALUE}, ${3:FLOAT_VALUE} };",
+      "",
+      "union ${4:Value}",
+      "{",
+      "\tint i;",
+      "\tfloat f;",
+      "} # ${1:ValueTag};"
+    ],
+    "description": "Define a tagged union and its tag enum"
+  },
+  "Trait declaration": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:Drawable}",
+      "{",
+      "\tdef ${2:draw}() -> ${4:void};",
+      "};"
+    ],
+    "description": "Declare a trait contract"
+  },
+  "Interface declaration": {
+    "prefix": "interface",
+    "body": [
+      "interface ${1:Database}(${2:A}: ${3:Connectable}, ${4:B}: ${5:Queryable})",
+      "{",
+      "\t${2:A} : ${4:B} { ${6:connect}() -> ${7:bool} };",
+      "};"
+    ],
+    "description": "Declare an interface with role traits and required methods"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition})",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Create a conditional block"
+  },
+  "If / elif / else chain": {
+    "prefix": "if-elif",
+    "body": [
+      "if (${1:condition})",
+      "{",
+      "\t${2:}",
+      "}",
+      "elif (${3:other_condition})",
+      "{",
+      "\t${4:}",
+      "}",
+      "else",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Create an if / elif / else chain"
+  },
+  "Switch statement": {
+    "prefix": "switch",
+    "body": [
+      "switch (${1:value})",
+      "{",
+      "\tcase (${2:0})",
+      "\t{",
+      "\t\t${3:}",
+      "\t}",
+      "\tdefault",
+      "\t{",
+      "\t\t$0",
+      "\t};",
+      "};"
+    ],
+    "description": "Create a switch with a default case"
+  },
+  "C-style for loop": {
+    "prefix": "for",
+    "body": [
+      "for (int ${1:i} = 0; ${1:i} < ${2:count}; ${1:i}++)",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Iterate with an initializer, condition, and step"
+  },
+  "For-in loop": {
+    "prefix": "for-in",
+    "body": [
+      "for (${1:int} ${2:item} in ${3:items})",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Iterate over an IDEKA array or collection"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while (${1:condition})",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Create a while loop"
+  },
+  "Do-while loop": {
+    "prefix": "do",
+    "body": [
+      "do",
+      "{",
+      "\t$0",
+      "} while (${1:condition});"
+    ],
+    "description": "Create a do-while loop"
+  },
+  "Try and catch": {
+    "prefix": "try",
+    "body": [
+      "try",
+      "{",
+      "\t${1:work();}",
+      "}",
+      "catch (${2:auto} ${3:error})",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Handle an exception with a typed catch"
+  },
+  "Deferred cleanup": {
+    "prefix": "defer",
+    "body": [
+      "defer ${1:cleanup}();"
+    ],
+    "description": "Schedule a call when the current scope exits"
+  },
+  "Label and goto": {
+    "prefix": "label-goto",
+    "body": [
+      "label ${1:retry}:",
+      "$0",
+      "goto ${1:retry};"
+    ],
+    "description": "Declare a label and jump to it"
+  },
+  "Fixed-size array": {
+    "prefix": "int-array",
+    "body": [
+      "${1:int}[${2:4}] ${3:values} = [${4:1, 2, 3, 4}];"
+    ],
+    "description": "Declare and initialize a fixed-size array"
+  },
+  "Array comprehension": {
+    "prefix": "int-array-comprehension",
+    "body": [
+      "${1:int}[${2:count}] ${3:values} = [${4:x ^ 2} for (${1:int} ${5:x} in ${6:1..count})];"
+    ],
+    "description": "Build an array from an inclusive range or iterable"
+  },
+  "Array block assignment": {
+    "prefix": "items-block",
+    "body": [
+      "${1:items}",
+      "{",
+      "\t[${2:0}] = ${3:value};",
+      "\t$0",
+      "};"
+    ],
+    "description": "Initialize or update array elements in a block"
+  },
+  "Dictionary": {
+    "prefix": "dict",
+    "body": [
+      "dict{\"\":\"\"} ${1:values}",
+      "{",
+      "\t\"${2:key}\": \"${3:value}\"",
+      "};"
+    ],
+    "description": "Declare and initialize a typed dictionary"
+  },
+  "Inline dictionary expression": {
+    "prefix": "d-literal",
+    "body": [
+      "d{true: \"${1:yes}\", false: \"${2:no}\"}[${3:condition}]"
+    ],
+    "description": "Use an inline dictionary expression"
+  },
+  "Address and dereference": {
+    "prefix": "int-pointer",
+    "body": [
+      "${1:int} ${2:value} = ${3:0};",
+      "${1:int}* ${4:pointer} = @${2:value};",
+      "${1:int} ${5:copy} = *${4:pointer};"
+    ],
+    "description": "Take and dereference a value's address"
+  },
+  "Heap allocation": {
+    "prefix": "heap",
+    "body": [
+      "heap ${1:int} ${2:value} = ${3:0};"
+    ],
+    "description": "Allocate a value on the heap"
+  },
+  "Local variable": {
+    "prefix": "local",
+    "body": [
+      "local ${1:int} ${2:value} = ${3:0};"
+    ],
+    "description": "Declare a scope-bound local value"
+  },
+  "Singleton initialization": {
+    "prefix": "singinit",
+    "body": [
+      "singinit ${1:int} ${2:value} = ${3:0};"
+    ],
+    "description": "Initialize a function-scoped value once"
+  },
+  "Raw bit-width type alias": {
+    "prefix": "unsigned-data",
+    "body": [
+      "${1:unsigned} data{${2:32}} as ${3:u32};"
+    ],
+    "description": "Define a signed or unsigned raw-width type"
+  },
+  "Aligned raw bit-width type": {
+    "prefix": "aligned-data",
+    "body": [
+      "data{${1:32}:${2:64}} as ${3:u32_a64};"
+    ],
+    "description": "Define a raw-width type with explicit alignment"
+  },
+  "Endian-specific raw bit-width type": {
+    "prefix": "unsigned-data-endian",
+    "body": [
+      "unsigned data{${1:32}::${2|0,1|}} as ${3:u32_le};"
+    ],
+    "description": "Define a raw-width type with explicit byte order (0 little-endian, 1 big-endian)"
+  },
+  "Error-return function": {
+    "prefix": "def-error",
+    "body": [
+      "def ${1:parse}(${2:byte* input}) -> ${3:int} ^| ${4:Error}",
+      "{",
+      "\tif (${5:failed})",
+      "\t{",
+      "\t\t${6:Error err;}",
+      "\t\terror -> ${7:err};",
+      "\t};",
+      "\t-> ${8:0};",
+      "};"
+    ],
+    "description": "Return either a value or an error type"
+  },
+  "Throw exception": {
+    "prefix": "throw",
+    "body": [
+      "throw(${1:error_value});"
+    ],
+    "description": "Throw a value for a surrounding try block"
+  },
+  "Formatted string": {
+    "prefix": "println-fstring",
+    "body": [
+      "println(f\"${1:value}: {${2:value}}\\n\");"
+    ],
+    "description": "Interpolate expressions into a formatted string"
+  },
+  "Print line": {
+    "prefix": "println",
+    "body": [
+      "println(\"${1:value}\");"
+    ],
+    "description": "Print a regular string followed by a newline"
+  },
+  "Statement-interpolated string": {
+    "prefix": "println-istring",
+    "body": [
+      "println(i\"${1:value}: {}\":{${2:value};});"
+    ],
+    "description": "Interpolate statement results into an i-string"
+  },
+  "Format specification string": {
+    "prefix": "format-gstring",
+    "body": [
+      "format(${1:value}, @${2:buffer}[0], g\"${3:.2f}\");"
+    ],
+    "description": "Pass a global format specification string"
+  },
+  "Assertion": {
+    "prefix": "assert",
+    "body": [
+      "assert(${1:condition}, \"${2:message}\");"
+    ],
+    "description": "Assert a condition with a diagnostic message"
+  },
+  "Expression macro": {
+    "prefix": "macro",
+    "body": [
+      "macro ${1:name}(${2:arguments})",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define a parameterized expression macro"
+  },
+  "Contract and contracted function": {
+    "prefix": "contract",
+    "body": [
+      "contract ${1:Positive}(value)",
+      "{",
+      "\tassert(value > 0, \"value must be positive\");",
+      "};",
+      "",
+      "def ${2:use_value}(int value) -> int : ${1:Positive}(value)",
+      "{",
+      "\treturn value;",
+      "};"
+    ],
+    "description": "Declare a contract and attach it to a function"
+  },
+  "Template constraint set": {
+    "prefix": "constraint",
+    "body": [
+      "constraint ${1:NoTruncation}(${2:T})",
+      "{",
+      "\t${2:T} !`< ${2:T}",
+      "};"
+    ],
+    "description": "Define a named type-relationship constraint"
+  },
+  "Custom binary operator": {
+    "prefix": "operator",
+    "body": [
+      "operator (${1:MyType} left, ${2:MyType} right) [${3:+++}] -> ${4:MyType}",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define an IDEKA operator overload"
+  },
+  "Bound unary operator": {
+    "prefix": "operator-unary",
+    "body": [
+      "operator (${1:MyType} value) [${2:!}] -> ${3:MyType}",
+      "{",
+      "\t$0",
+      "} # binding {this:};"
+    ],
+    "description": "Define a prefix unary operator overload"
+  },
+  "Compile-time block": {
+    "prefix": "comptime",
+    "body": [
+      "comptime",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Run IDEKA code during compilation"
+  },
+  "Emit generated IDEKA": {
+    "prefix": "emitideka",
+    "body": [
+      "emitideka",
+      "{",
+      "\tdef ${1:generated}() -> void",
+      "\t{",
+      "\t\t${2:}",
+      "\t};",
+      "\t$0",
+      "};"
+    ],
+    "description": "Generate IDEKA declarations from a comptime block"
+  },
+  "IDEKA VM instructions": {
+    "prefix": "idkvm",
+    "body": [
+      "idkvm",
+      "{",
+      "\t${1:LOCAL_GET value}",
+      "\t$0",
+      "};"
+    ],
+    "description": "Write IDEKA VM assembly inside comptime"
+  },
+  "Inline assembly": {
+    "prefix": "volatile-asm",
+    "body": [
+      "volatile asm",
+      "{",
+      "\t$0",
+      "} : : : \"memory\";"
+    ],
+    "description": "Embed volatile inline assembly with constraints"
+  },
+  "Async function": {
+    "prefix": "async",
+    "body": [
+      "#import <standard.idk>, <threading.idk>;",
+      "",
+      "async ${1:work}(i32* ${2:items}, i32 ${3:start}, i32 ${4:end}) -> void",
+      "{",
+      "\t$0",
+      "};"
+    ],
+    "description": "Define an async function (requires the threading library)"
+  },
+  "Async relation tag": {
+    "prefix": "async-tag",
+    "body": [
+      "async ${1:Disjoint}(${2:a})",
+      "{",
+      "\t${2:a} # ${2:a};",
+      "};",
+      "",
+      "async ${3:work}(i32* items, i32 start, i32 end) -> void",
+      "{",
+      "\t$0",
+      "} #<${1:Disjoint}>(this);"
+    ],
+    "description": "Declare an async relation tag and attach it to a function"
+  },
+  "Module definition and build block": {
+    "prefix": "module",
+    "body": [
+      "module ${1:App}",
+      "{",
+      "\tmain() -> int",
+      "\t{",
+      "\t\t$0",
+      "\t\treturn 0;",
+      "\t};",
+      "}",
+      "# build",
+      "{",
+      "\t#[entrypoint] = this,",
+      "\t#[name] = \"${2:program}\",",
+      "\t#[requires] = {${3:Logging}}",
+      "};"
+    ],
+    "description": "Define a module and configure its build"
+  },
+  "Module reference": {
+    "prefix": "module-from",
+    "body": [
+      "module ${1:Logging} from \"${2:logging.idk}\";"
+    ],
+    "description": "Reference a module from a source file"
+  },
+  "Struct view from bytes": {
+    "prefix": "header-from",
+    "body": [
+      "${1:Header} ${2:header} from ${3:buffer}!;"
+    ],
+    "description": "Reinterpret an addressable byte buffer as a struct"
+  },
+  "Bit-slice access": {
+    "prefix": "value-bitslice",
+    "body": [
+      "${1:value}[${2:high}``${3:low}]"
+    ],
+    "description": "Read or assign a bit slice"
+  },
+  "Function chain": {
+    "prefix": "transform-chain",
+    "body": [
+      "${1:transform}() <- ${2:source}();"
+    ],
+    "description": "Pass a function result through the chain operator"
+  },
+  "Address cast": {
+    "prefix": "address-cast",
+    "body": [
+      "(@)${1:address}"
+    ],
+    "description": "Cast an integer or address to a pointer"
+  }
+}

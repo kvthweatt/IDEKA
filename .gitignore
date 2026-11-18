@@ -188,3 +188,7 @@ uv.lock
 
 # Project-specific
 /promptstests/discord_token.txt
+
+
+# For the vs-code editor
+node_modules/
