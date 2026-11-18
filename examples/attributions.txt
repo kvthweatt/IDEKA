@@ -1,2 +1,20 @@
-bugatti.obj sourced from https://free3d.com/3d-model/bugatti-chiron-2017-model-31847.html
-Lowpoly_Notebook_2.obj sourced from https://free3d.com/3d-model/notebook-low-poly-version-57341.html
+================================================================
+ATTRIBUTIONS — Third-party 3D assets
+================================================================
+
+1) bugatti.obj
+   Title:    Bugatti Chiron 2017
+   Author:   <nombre del autor en Free3D>
+   Source:   https://free3d.com/3d-model/bugatti-chiron-2017-model-31847.html
+   License:  <CC-BY 4.0 / Free3D Standard / etc.>
+   Downloaded: 2026-XX-XX
+   Modifications: <ninguna / escalado / etc.>
+
+2) Lowpoly_Notebook_2.obj
+   Title:    Notebook Low Poly Version
+   Author:   <nombre del autor>
+   Source:   https://free3d.com/3d-model/notebook-low-poly-version-57341.html
+   License:  <...>
+   Downloaded: 2026-XX-XX
+   Modifications: <...>
+================================================================
