@@ -1,0 +1,41 @@
+// Summarize a batch of integer readings without allocating memory.
+#import <standard.idk>;
+using standard::io::console;
+
+struct Summary
+{
+    int lowest, highest, total, above_limit;
+};
+
+def summarize(int* readings, int count, int limit, Summary* result) -> bool
+{
+    if (count <= 0) { return false; };
+
+    result.lowest = readings[0];
+    result.highest = readings[0];
+    result.total = 0;
+    result.above_limit = 0;
+    for (int i = 0; i < count; i++)
+    {
+        int reading = readings[i];
+        if (reading < result.lowest) { result.lowest = reading; };
+        if (reading > result.highest) { result.highest = reading; };
+        result.total += reading;
+        if (reading > limit) { result.above_limit++; };
+    };
+    return true;
+};
+
+def main() -> int
+{
+    int[5] readings = [18, 22, 19, 25, 21];
+    Summary batch;
+    if (summarize(@readings[0], 0, 20, @batch)) { return 1; };
+    if (!summarize(@readings[0], 5, 20, @batch)) { return 2; };
+    if (batch.lowest != 18 | batch.highest != 25 | batch.total != 105 | batch.above_limit != 3)
+    {
+        return 3;
+    };
+    println(f"min {batch.lowest}, max {batch.highest}, total {batch.total}, above limit {batch.above_limit}");
+    return 0;
+};

@@ -66,7 +66,7 @@ IDEKA was designed primarily for reverse engineering and secondarily for general
   - [Heap allocation](#heap-allocation)
   - [Freeing from the heap](#freeing-from-the-heap)
   - [Custom operators and overloading](#custom-operators-and-overloading)
-  - [Variadic Operators](#variadic-operator)
+  - [Variadic Operators](#variadic-operators)
   - [Functions and `contract`](#functions-and-contract)
   - [Contract `# binding`](#contract-binding)
   - [Contracts on operators](#contracts-on-operators)

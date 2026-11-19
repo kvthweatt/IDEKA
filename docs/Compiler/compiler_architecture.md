@@ -1,5 +1,7 @@
 # IDEKA Compiler Architecture
 
+> This page describes the older Python/LLVM pipeline and uses historical filenames. For the native pipeline in this checkout, start with the [developer workflow](../developer_workflow.md) and [source map](../../.agents/SOURCE_MAP.md#find-the-owning-code).
+
 ## Compilation Pipeline
 
 Generally,
