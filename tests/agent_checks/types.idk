@@ -1,0 +1,22 @@
+#import <standard.idk>;
+using standard::io::console;
+
+def main() -> int
+{
+    bool flag = true;
+    byte octet = 0xA5;
+    char letter = 'A';
+    int signed_value = -17;
+    uint unsigned_value = 17;
+    float single = 1.5;
+    double wide = 2.25;
+    long large_signed = -4294967296;
+    ulong large_unsigned = 4294967296u;
+
+    if (!flag | letter != 'A' | signed_value + (int)unsigned_value != 0) { return 1; };
+    if (single >= wide | single + wide != 3.75d) { return 2; };
+    if ((octet `& 0x0F) != 5 | (octet `| 0x08) != 0xAD) { return 3; };
+    if (large_signed >= 0 | large_unsigned <= 0xFFFFFFFFu) { return 4; };
+    println("primitive and bitwise checks passed");
+    return 0;
+};

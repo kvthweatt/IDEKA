@@ -1,0 +1,10 @@
+#import <standard.idk>;
+
+def main() -> int
+{
+    int value = 2;
+    int* first = @value;
+    int* second = @value;
+    *first = *first + 1;
+    return *second - 3;
+};

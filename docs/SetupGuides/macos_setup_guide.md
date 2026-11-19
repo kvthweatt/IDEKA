@@ -1,5 +1,7 @@
 # IDEKA on macOS - Setup Guide
 
+> Historical setup notes; not validated for this checkout. In particular, the referenced `src/compiler/v1.5.4/` snapshot is not present. See the [checkout-specific workflow](../developer_workflow.md) for the verified Linux x86-64 path.
+
 IDEKA on macOS needs Python, LLVM from Homebrew (it supplies `llc`), and the Xcode command line tools (Apple's `clang` is used as the linker). The steps are the same on Apple Silicon and Intel.
 
 ## Toolchain
