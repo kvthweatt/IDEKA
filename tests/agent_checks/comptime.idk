@@ -1,0 +1,22 @@
+#import <standard.idk>;
+using standard::io::console;
+
+comptime
+{
+    int total = 0;
+    for (int i = 1; i <= 6; i++)
+    {
+        total += i;
+    };
+    emitideka
+    {
+        def generated_total() -> int { return ~$f"{total}"; };
+    };
+};
+
+def main() -> int
+{
+    if (generated_total() != 21) { return 1; };
+    println("comptime: 21");
+    return 0;
+};

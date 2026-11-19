@@ -1,3 +1,5 @@
+> Historical tree. For the inventory of this checkout and current entry points, use the [source map](.agents/SOURCE_MAP.md).
+
 ```
 root dir  
 |  
@@ -36,5 +38,5 @@ root dir
 `--> idkvm_test.py        // Tests the FVM
 `--> frepl.py           // REPL for IDEKA, uses the FVM
 `--> tg.py              // Type geometry visualizer
-`--> cft.py             // C->IDEKA translation utility
+`--> scripts/cit.py     // C->IDEKA translation utility
 ```

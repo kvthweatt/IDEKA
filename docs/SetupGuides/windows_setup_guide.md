@@ -1,5 +1,7 @@
 # IDEKA on Windows - Setup Guide
 
+> Historical setup notes; not validated for this checkout. In particular, the referenced `src/compiler/v1.5.4/` snapshot is not present. See the [checkout-specific workflow](../developer_workflow.md) for the verified Linux x86-64 path.
+
 IDEKA on Windows needs Python (runs the compiler), LLVM 21+ with `llc` and `opt`, and the MSVC build tools plus Windows SDK (the libraries `lld-link` links against). There are two ways to set up: run `setup.py` for an automated install, or follow the manual steps below.
 
 ## Automated Setup

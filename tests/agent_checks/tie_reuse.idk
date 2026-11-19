@@ -1,0 +1,14 @@
+#import <standard.idk>;
+
+def take(~int value) -> int
+{
+    return value;
+};
+
+def main() -> int
+{
+    ~int value = 5;
+    int first = take(~value);
+    int second = take(~value);
+    return first + second - 10;
+};

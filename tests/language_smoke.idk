@@ -1,0 +1,39 @@
+// Self-checking language example used by scripts/smoke_native.sh.
+#import <standard.idk>;
+
+using standard::io::console;
+
+unsigned data{16::0} as SmokeWord;
+
+def increment(int* value) -> int
+{
+    *value = *value + 1;
+    return *value;
+};
+
+def main() -> int
+{
+    int value = 4;
+    int* pointer @= value;
+    SmokeWord mask = 0x106;
+
+    if (increment(pointer) != 5 | value != 5)
+    {
+        return 1;
+    };
+    bool present = pointer!?;
+    if (present == false | (mask `& 0x103) != 0x102)
+    {
+        return 2;
+    };
+
+    int fallback = 0;
+    int result = fallback ?? value;
+    if (result != 5)
+    {
+        return 3;
+    };
+
+    println("IDEKA language smoke passed");
+    return 0;
+};

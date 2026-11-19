@@ -1,0 +1,11 @@
+#import <standard.idk>;
+
+extern def !!puts(byte*) -> int;
+extern def !!abs(int) -> int;
+
+def main() -> int
+{
+    if (abs(-37) != 37) { return 1; };
+    if (puts(g"C ABI: 37\0") < 0) { return 2; };
+    return 0;
+};

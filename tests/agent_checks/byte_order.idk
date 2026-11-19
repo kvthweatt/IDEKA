@@ -1,0 +1,23 @@
+#import <standard.idk>;
+using standard::io::console;
+
+unsigned data{16::0} as ExplicitZero;
+unsigned data{16::1} as ExplicitOne;
+unsigned data{16} as DefaultWord;
+
+def show_bytes(byte* address) -> void
+{
+    println((uint)address[0]);
+    println((uint)address[1]);
+};
+
+def main() -> int
+{
+    ExplicitZero a = 0x1234;
+    ExplicitOne b = 0x1234;
+    DefaultWord c = 0x1234;
+    show_bytes((byte*)@a);
+    show_bytes((byte*)@b);
+    show_bytes((byte*)@c);
+    return 0;
+};
