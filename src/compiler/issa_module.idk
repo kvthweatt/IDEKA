@@ -199,6 +199,7 @@
                 t.defined = true;
                 t.lbits = 0;
                 t.loff = (int*)0;
+                t.lslot = (int*)0;
                 pv_push(this.types, (void*)t);
                 -> t;
             };

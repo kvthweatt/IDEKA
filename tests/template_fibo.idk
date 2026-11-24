@@ -1,20 +1,16 @@
-#import <standard.idk>, <math.idk>, <format.idk>;
+#import <standard.idk>, <math.idk>;
 
-using standard::io::console,
-      standard::format;
+using standard::io::console;
 
 def fibonacci<T>(T n) -> T
 {
-    if (n <= (T)1)
-    {
-        return n;
-    };
+    if (n <= 1) -> n;
 
     int test;
 
-    T a = (T)0,
-      b = (T)1,
-      c = (T)2,
+    T a = test++,
+      b = #",
+      c = #",
       temp;
     
     while (c <= n)
@@ -22,27 +18,22 @@ def fibonacci<T>(T n) -> T
         temp = a + b;
         a = b;
         b = temp;
-        c = c + (T)1;
+        c++;
     };
     
-    return b;
+    -> b;
 };
 
 def main() -> int
 {
-    println_colored("Fibonacci Calculator\0", colors::YELLOW);
-    hline_heavy(30);
-    u64 x;
+    println("Fibonacci Calculator");
+    u64 x,i;
     
-    for (u64 i = 0; i <= 93; i++)
+    for (i; i <= 93; i++)
     {
-        print_cyan("fib(\0");
-        print(i);
-        print_cyan(") = \0");
         x = fibonacci(i);
-        print(x);
-        print("\n\0");
+        println(f"fib({i}) = {x}");
     };
     
-    return 0;
+    -> 0;
 };

@@ -36,6 +36,8 @@ module IDEKA_Compiler_Entrypoint
     #import "src/compiler/iasm_a64.idk";
     #import "src/compiler/ilink_elf.idk";
     #import "src/compiler/ilink_pe.idk";
+    #import "src/compiler/ilink_macho.idk";
+    #import "src/compiler/iasm_macho.idk";
 
     using standard::io::console;
     using standard::io::file;
@@ -633,6 +635,10 @@ module IDEKA_Compiler_Entrypoint
         #ifdef __WINDOWS__
         println("Target platform: Windows\0");
         println("Module triple: x86_64-pc-windows-msvc\0");
+        #elif __MACOS__
+        println("Target platform: Darwin\0");
+        if (A64_BACKEND) { println("Module triple: arm64-apple-macosx11.0.0\0"); }
+        else { println("Module triple: x86_64-apple-macosx10.15.0\0"); };
         #else
         println("Target platform: Linux\0");
         if (A64_BACKEND) { println("Module triple: aarch64-unknown-linux-gnu\0"); }
@@ -940,8 +946,12 @@ module IDEKA_Compiler_Entrypoint
             -> false;
         };
         bool wrote;
+        #ifdef __MACOS__
+        wrote = iasm_write_macho(a, dst);
+        #else
         if (X64_ABI == 1) { wrote = iasm_write_coff(a, dst); }
         else { wrote = iasm_write_elf(a, dst); };
+        #endif;
         if (!wrote)
         {
             print("iasm: \0");
@@ -963,7 +973,13 @@ module IDEKA_Compiler_Entrypoint
             println(a.err);
             -> false;
         };
-        if (!a6_write_elf(a, dst))
+        bool wrote64;
+        #ifdef __MACOS__
+        wrote64 = a6_write_macho(a, dst);
+        #else
+        wrote64 = a6_write_elf(a, dst);
+        #endif;
+        if (!wrote64)
         {
             print("iasm: \0");
             println(a.err);
@@ -1051,9 +1067,31 @@ module IDEKA_Compiler_Entrypoint
         ->;
     };
 
+    // Links one Mach-O object into a Darwin executable with ilink
+    native_link_macho(byte* obj, byte* exe, int* rc) -> void
+    {
+        byte** objs = (byte**)fmalloc(8 * 2);
+        byte* lkerr;
+        objs[0] = obj;
+        lkerr = lk_macho_link(objs, 1, "_main\0", exe);
+        if (lkerr == (byte*)0) { *rc = 0; }
+        else
+        {
+            *rc = 1;
+            print("ilink: \0");
+            println(lkerr);
+        };
+        ffree((byte*)objs);
+        ->;
+    };
+
     // Links one ELF object into an executable with ilink. The libc import library is the dynamic libc.
     native_link_elf(byte* obj, byte* exe, byte* errpath, int* rc) -> void
     {
+        #ifdef __MACOS__
+        native_link_macho(obj, exe, rc);
+        ->;
+        #endif;
         byte** objs = (byte**)fmalloc(8 * 2);
         byte** libs = (byte**)fmalloc(8 * 2);
         byte** dirs = (byte**)fmalloc(8 * 5);
@@ -1082,6 +1120,10 @@ module IDEKA_Compiler_Entrypoint
     // Links one AArch64 ELF object into an executable with ilink. musl or glibc is chosen by what the system has installed.
     native_link_elf_a64(byte* obj, byte* exe, byte* errpath, int* rc) -> void
     {
+        #ifdef __MACOS__
+        native_link_macho(obj, exe, rc);
+        ->;
+        #endif;
         byte** objs = (byte**)fmalloc(8 * 2);
         byte** libs = (byte**)fmalloc(8 * 2);
         byte** dirs = (byte**)fmalloc(8 * 8);
@@ -1550,9 +1592,16 @@ module IDEKA_Compiler_Entrypoint
         #ifdef __WINDOWS__
         X64_BACKEND = true;
         #endif;
+        #ifdef __MACOS__
+        X64_BACKEND = true;
+        #endif;
         #endif;
         #ifdef __ARCH_ARM64__
         #ifdef __LINUX__
+        X64_BACKEND = true;
+        A64_BACKEND = true;
+        #endif;
+        #ifdef __MACOS__
         X64_BACKEND = true;
         A64_BACKEND = true;
         #endif;

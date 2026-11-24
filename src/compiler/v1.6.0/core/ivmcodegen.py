@@ -3328,33 +3328,48 @@ class FVMCodegen:
         """
         if getattr(node, 'is_bit', False):
             raise FVMCodegenError('idkvmcodegen: bit iteration is not supported in comptime', node)
-        self._visit_expr(node.iterable)
-        iter_slot = self._alloc_local('__forin_iter__')
-        self._emit(_instr(Op.LOCAL_SET, iter_slot))
+        is_range = isinstance(node.iterable, RangeExpression)
+        # slot names carry the loop's own position so nested loops do not share slots
+        uid = self._current_ip()
+        if is_range:
+            # a counted loop: x runs from start to end, both included, no array behind it
+            self._visit_expr(node.iterable.start)
+            idx_slot = self._alloc_local(f'__forin_idx_{uid}__')
+            self._emit(_instr(Op.LOCAL_SET, idx_slot))
+            self._visit_expr(node.iterable.end)
+            len_slot = self._alloc_local(f'__forin_len_{uid}__')
+            self._emit(_instr(Op.LOCAL_SET, len_slot))
+        else:
+            self._visit_expr(node.iterable)
+            iter_slot = self._alloc_local(f'__forin_iter_{uid}__')
+            self._emit(_instr(Op.LOCAL_SET, iter_slot))
 
-        self._emit(_instr(Op.LOCAL_GET, iter_slot))
-        self._emit(_instr(Op.ARRAY_LEN))
-        len_slot = self._alloc_local('__forin_len__')
-        self._emit(_instr(Op.LOCAL_SET, len_slot))
+            self._emit(_instr(Op.LOCAL_GET, iter_slot))
+            self._emit(_instr(Op.ARRAY_LEN))
+            len_slot = self._alloc_local(f'__forin_len_{uid}__')
+            self._emit(_instr(Op.LOCAL_SET, len_slot))
 
-        self._emit(_instr(Op.PUSH, Val(TTag.INT, 0)))
-        idx_slot = self._alloc_local('__forin_idx__')
-        self._emit(_instr(Op.LOCAL_SET, idx_slot))
+            self._emit(_instr(Op.PUSH, Val(TTag.INT, 0)))
+            idx_slot = self._alloc_local(f'__forin_idx_{uid}__')
+            self._emit(_instr(Op.LOCAL_SET, idx_slot))
 
         var_slots = [self._alloc_local(v) for v in node.variables]
 
         loop_start = self._current_ip()
         self._emit(_instr(Op.LOCAL_GET, idx_slot))
         self._emit(_instr(Op.LOCAL_GET, len_slot))
-        self._emit(_instr(Op.CMP_LT))
+        self._emit(_instr(Op.CMP_LE if is_range else Op.CMP_LT))
         exit_patch = self._emit(_instr(Op.JNF, 0))
 
         self._break_stack.append([])
         self._continue_stack.append([])
 
-        self._emit(_instr(Op.LOCAL_GET, iter_slot))
-        self._emit(_instr(Op.LOCAL_GET, idx_slot))
-        self._emit(_instr(Op.ARRAY_LOAD))
+        if is_range:
+            self._emit(_instr(Op.LOCAL_GET, idx_slot))
+        else:
+            self._emit(_instr(Op.LOCAL_GET, iter_slot))
+            self._emit(_instr(Op.LOCAL_GET, idx_slot))
+            self._emit(_instr(Op.ARRAY_LOAD))
         self._emit(_instr(Op.LOCAL_SET, var_slots[0]))
 
         body_stmts = (

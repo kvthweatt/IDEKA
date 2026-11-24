@@ -181,9 +181,10 @@
             {
                 int k = t.kind;
                 int sz = this.a_size(t);
-                int i, off, a, c, cnt, hi, lo;
+                int i, off, a, c, cnt, hi, lo, bo, pmin, pmax, wd, slot, pos;
                 u64 bits;
                 byte* sym;
+                byte* pend;
                 i64 so;
                 while (s[*p] == ' ') { *p = *p + 1; };
                 if (this.a_pre(s + *p, g"zeroinitializer\0"))
@@ -294,6 +295,97 @@
                         i++;
                     };
                     if (s[*p] == ']') { *p = *p + 1; };
+                    ->;
+                };
+                if ((k == LK.STRUCT | k == LK.ISTRUCT) & t.lbits > 0 & t.loff != (int*)0)
+                {
+                    // A packed layout. Bits are numbered from the most significant bit of a byte, as in
+                    // x[5``7]. A member occupies its slot, the data is the rightmost bits of the slot and
+                    // the bits left of it are null. Members that are not whole bytes are gathered into
+                    // bytes, the others are emitted where they start.
+                    *p = *p + 1;
+                    pend = (byte*)fmalloc((u64)(sz + 8));
+                    i = 0;
+                    while (i < sz + 8) { pend[i] = 0; i++; };
+                    pmin = 0 - 1;
+                    pmax = 0 - 1;
+                    i = 0;
+                    while (i < t.nitems)
+                    {
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        this.a_skiptype(s, p);
+                        while (s[*p] == ' ') { *p = *p + 1; };
+                        bo = t.loff[i];
+                        if (this.a_bitw(t.items[i]) | bo % 8 != 0)
+                        {
+                            if (this.a_pre(s + *p, g"true\0")) { bits = (u64)1; *p = *p + 4; }
+                            else
+                            {
+                                if (this.a_pre(s + *p, g"false\0")) { bits = (u64)0; *p = *p + 5; }
+                                else
+                                {
+                                    bits = this.a_num(s + *p);
+                                    if (s[*p] == '-') { *p = *p + 1; };
+                                    while (s[*p] >= 48 & s[*p] <= 57) { *p = *p + 1; };
+                                };
+                            };
+                            wd = t.items[i].width;
+                            slot = wd;
+                            if (t.lslot != (int*)0) { if (t.lslot[i] > slot) { slot = t.lslot[i]; }; };
+                            bits = this.a_mask(bits, wd);
+                            // bit hi of the value (0 is the least significant) sits at position bo + slot - 1 - hi
+                            hi = 0;
+                            while (hi < wd)
+                            {
+                                if (((bits >> (u64)hi) `& (u64)1) != (u64)0)
+                                {
+                                    pos = bo + slot - 1 - hi;
+                                    lo = pos / 8;
+                                    pend[lo] = (byte)((int)pend[lo] `| (1 << (7 - pos % 8)));
+                                };
+                                hi++;
+                            };
+                            if (pmin < 0 | bo / 8 < pmin) { pmin = bo / 8; };
+                            if ((bo + slot - 1) / 8 > pmax) { pmax = (bo + slot - 1) / 8; };
+                        }
+                        else
+                        {
+                            if (pmin >= 0)
+                            {
+                                this.a_zero(o, pmin - off);
+                                lo = pmin;
+                                while (lo <= pmax)
+                                {
+                                    this.a_emit_int(o, 1, (u64)pend[lo]);
+                                    lo++;
+                                };
+                                off = pmax + 1;
+                                pmin = 0 - 1;
+                                pmax = 0 - 1;
+                            };
+                            a = bo / 8;
+                            this.a_zero(o, a - off);
+                            off = a;
+                            this.a_dat(t.items[i], s, p, o);
+                            off = off + this.a_size(t.items[i]);
+                        };
+                        while (s[*p] == ',' | s[*p] == ' ') { *p = *p + 1; };
+                        i++;
+                    };
+                    if (pmin >= 0)
+                    {
+                        this.a_zero(o, pmin - off);
+                        lo = pmin;
+                        while (lo <= pmax)
+                        {
+                            this.a_emit_int(o, 1, (u64)pend[lo]);
+                            lo++;
+                        };
+                        off = pmax + 1;
+                    };
+                    this.a_zero(o, sz - off);
+                    if (s[*p] == '}') { *p = *p + 1; };
+                    ffree((byte*)pend);
                     ->;
                 };
                 if (k == LK.STRUCT | k == LK.ISTRUCT)

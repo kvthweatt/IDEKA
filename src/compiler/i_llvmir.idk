@@ -207,6 +207,7 @@ namespace IDEKA
                 t.name = (byte*)0;
                 t.vararg = false;
                 t.defined = true;
+                t.lslot = (int*)0;
                 pv_push(this.types, (void*)t);
                 -> t;
             };

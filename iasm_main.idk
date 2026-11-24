@@ -15,6 +15,7 @@ module IDEKA_Assembler_Entrypoint
     #import "src/compiler/iasm_elf.idk";
     #import "src/compiler/iasm_coff.idk";
     #import "src/compiler/iasm_a64.idk";
+    #import "src/compiler/iasm_macho.idk";
 
     using standard::io::console;
     using standard::io::file;
@@ -119,7 +120,7 @@ module IDEKA_Assembler_Entrypoint
     };
 
     // AArch64 text to an EM_AARCH64 object
-    iasm_assemble_a64(byte* src, byte* dst) -> int
+    iasm_assemble_a64(byte* src, byte* dst, bool macho) -> int
     {
         int len;
         byte* text = iasm_read_file(src, @len);
@@ -140,7 +141,10 @@ module IDEKA_Assembler_Entrypoint
             println(a.err);
             -> 1;
         };
-        if (!a6_write_elf(a, dst))
+        bool ok64 = false;
+        if (macho) { ok64 = a6_write_macho(a, dst); }
+        else { ok64 = a6_write_elf(a, dst); };
+        if (!ok64)
         {
             print("iasm: \0");
             println(a.err);
@@ -177,7 +181,8 @@ module IDEKA_Assembler_Entrypoint
             -> 1;
         };
         bool wrote = false;
-        if (fmt == IA_FMT_COFF) { wrote = iasm_write_coff(a, dst); }
+        if (fmt == 2) { wrote = iasm_write_macho(a, dst); }
+        elif (fmt == IA_FMT_COFF) { wrote = iasm_write_coff(a, dst); }
         else { wrote = iasm_write_elf(a, dst); };
         if (!wrote)
         {
@@ -214,6 +219,7 @@ module IDEKA_Assembler_Entrypoint
                 i++;
                 if (i >= argc) { iasm_usage(); -> 1; };
                 if (ia_streq(argv[i], "coff\0")) { fmt = IA_FMT_COFF; }
+                elif (ia_streq(argv[i], "macho\0")) { fmt = 2; }
                 else
                 {
                     if (!ia_streq(argv[i], "elf\0")) { iasm_usage(); -> 1; };
@@ -234,7 +240,7 @@ module IDEKA_Assembler_Entrypoint
         if (src == (byte*)0) { iasm_usage(); -> 1; };
         if (enc) { -> iasm_encode_file(src); };
         if (dst == (byte*)0) { iasm_usage(); -> 1; };
-        if (a64) { -> iasm_assemble_a64(src, dst); };
+        if (a64) { -> iasm_assemble_a64(src, dst, fmt == 2); };
         -> iasm_assemble_file(src, dst, fmt);
     };
 

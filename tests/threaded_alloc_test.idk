@@ -66,6 +66,19 @@ def churn(void* arg) -> void*
     return (void*)0;
 };
 
+IDKC_SYMTABLE st;
+
+comptime
+{
+    st = compiler.symbol_table;
+
+    for (x in st.entry)
+    {
+        if (x.kind == "variable") print(f"{x.name}, ");
+    };
+    flush();
+};
+
 def main() -> int
 {
     Thread[4] t;
@@ -77,8 +90,8 @@ def main() -> int
     for (i = 0; i < 4; i++) { thread_create(@churn, (void*)(i + 1), @t[i]); };
     for (i = 0; i < 4; i++) { thread_join(@t[i]); };
 
-    print("threads done: \0"); print(g_done); print("\n\0");
-    print("corrupt blocks: \0"); print(g_bad); print("\n\0");
+    println(f"threads done: {g_done}");
+    println(f"corrupt blocks: {g_bad}");
 
     z = tfcalloc((size_t)100, (size_t)8);
     zb = (byte*)z;

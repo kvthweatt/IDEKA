@@ -5,7 +5,7 @@
 // Usage:
 //     ilink [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] obj...
 //
-// Links ELF64 x86-64 objects into an executable (see ilink_elf.idk).
+// Links ELF64, PE32+ and Mach-O objects into an executable (see ilink_elf.idk, ilink_pe.idk, ilink_macho.idk).
 
 module IDEKA_Linker_Entrypoint
 {
@@ -13,14 +13,15 @@ module IDEKA_Linker_Entrypoint
     #import <runtime/ffifio.idk>;
     #import "src/compiler/ilink_elf.idk";
     #import "src/compiler/ilink_pe.idk";
+    #import "src/compiler/ilink_macho.idk";
 
     using standard::io::console;
     using IDEKA::ilink;
 
     ilink_usage() -> void
     {
-        println("IDEKA linker (ELF64 x86-64 and AArch64, PE32+ x86-64)\0");
-        println("Usage: ilink [-t elf|pe] [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] [-subsystem n] [-stack bytes] obj...\0");
+        println("IDEKA linker (ELF64 x86-64 and AArch64, PE32+ x86-64, Mach-O x86-64 and arm64)\0");
+        println("Usage: ilink [-t elf|pe|macho] [-o out] [-e entry] [-l lib]... [-L dir]... [-I interp] [-subsystem n] [-stack bytes] obj...\0");
         println("  ELF: -l libc.so.6 binds dynamically. PE: -l kernel32.lib (or a .dll) imports through the library.\0");
         ->;
     };
@@ -39,6 +40,7 @@ module IDEKA_Linker_Entrypoint
         byte* err;
         int i = 1;
         int pe = -1;
+        bool macho = false;
         int subsystem = 3;
         i64 stack_size = 67108864;
         bool entry_set = false;
@@ -50,7 +52,7 @@ module IDEKA_Linker_Entrypoint
         {
             if (lk_streq(argv[i], "-o\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; out = argv[i]; }
             else if (lk_streq(argv[i], "-e\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; entry = argv[i]; entry_set = true; }
-            else if (lk_streq(argv[i], "-t\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; if (lk_streq(argv[i], "pe\0")) { pe = 1; } else { pe = 0; }; }
+            else if (lk_streq(argv[i], "-t\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; if (lk_streq(argv[i], "pe\0")) { pe = 1; } elif (lk_streq(argv[i], "macho\0")) { macho = true; pe = 0; } else { pe = 0; }; }
             else if (lk_streq(argv[i], "-subsystem\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; subsystem = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { subsystem = subsystem * 10 + (tv[di] - 48); di++; }; }
             else if (lk_streq(argv[i], "-stack\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; stack_size = 0; tv = argv[i]; di = 0; while (tv[di] >= 48 & tv[di] <= 57) { stack_size = stack_size * 10 + (tv[di] - 48); di++; }; }
             else if (lk_streq(argv[i], "-I\0")) { i++; if (i >= argc) { ilink_usage(); -> 1; }; interp = argv[i]; interp_set = true; }
@@ -60,6 +62,25 @@ module IDEKA_Linker_Entrypoint
             i++;
         };
         if (nobj == 0) { ilink_usage(); -> 1; };
+        if (!macho & pe < 0)
+        {
+            // Mach-O 64 bit objects start with 0xfeedfacf
+            sv = 0;
+            tv = lk_read_file(objs[0], @sv);
+            if (tv != (byte*)0 & sv > 4 & lk_r32(tv, 0) == 4277009103) { macho = true; };
+        };
+        if (macho)
+        {
+            if (!entry_set) { entry = "_main\0"; };
+            err = lk_macho_link(objs, nobj, entry, out);
+            if (err != (byte*)0)
+            {
+                print("ilink: \0");
+                println(err);
+                -> 1;
+            };
+            -> 0;
+        };
         if (pe < 0)
         {
             // the first object tells the target: COFF objects start with the machine type 0x8664

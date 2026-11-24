@@ -57,12 +57,12 @@ const int    WIN_W        = 1024,
 // FIELD STORAGE
 // ============================================================================
 
-heap double* g_dens      = (double*)0,
-             g_dens_prev = (double*)0,
-             g_vx        = (double*)0,
-             g_vy        = (double*)0,
-             g_vx_prev   = (double*)0,
-             g_vy_prev   = (double*)0;
+heap double* g_dens      = 0,
+             g_dens_prev = 0,
+             g_vx        = 0,
+             g_vy        = 0,
+             g_vx_prev   = 0,
+             g_vy_prev   = 0;
 
 // Upload buffers - floats for GL texture upload (solver uses double internally)
 // g_dens_tex: 1 float per cell for GL_LUMINANCE upload

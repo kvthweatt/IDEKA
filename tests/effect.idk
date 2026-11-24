@@ -27,7 +27,10 @@ effect ExclusiveIO { IO.Console ^| IO.File };
 
 // IO
 leaf_console(byte* msg) -> void # effect {*IO.Console};
-leaf_console(byte* msg) -> void {};
+leaf_console(byte* msg) -> void
+{
+    println(msg);
+};
 
 leaf_file(byte* path) -> void # effect {*IO.File};
 leaf_file(byte* path) -> void {};

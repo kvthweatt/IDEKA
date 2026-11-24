@@ -6916,7 +6916,8 @@ namespace IDEKA
             // IDKVMCodegen._visit_for_in: iterates an array
             visit_for_in(Node* n) -> bool
             {
-                int it, ln, ix, vs, start, exit_patch, update_ip, after;
+                int it, ln, ix, vs, start, exit_patch, update_ip, after, uid;
+                bool rng;
                 switch ((n.flags `& NF_BIT_ITER) != 0)
                 {
                     case (true)
@@ -6926,16 +6927,35 @@ namespace IDEKA
                     }
                     default {};
                 };
-                this.visit_expr(n.a);
-                it = this.alloc_local(g"__forin_iter__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)it);
-                this.emit1(IDKVM_LOCAL_GET, (i64)it);
-                this.emit0(IDKVM_ARRAY_LEN);
-                ln = this.alloc_local(g"__forin_len__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)ln);
-                this.emit_push(IDKVM_T_INT, 0);
-                ix = this.alloc_local(g"__forin_idx__\0");
-                this.emit1(IDKVM_LOCAL_SET, (i64)ix);
+                // slot names carry the loop's own position so nested loops do not share slots
+                uid = this.ip();
+                rng = n.a.kind == NodeKind.RANGE_EXPRESSION;
+                switch (rng)
+                {
+                    case (true)
+                    {
+                        // a counted loop: x runs from start to end, both included, no array behind it
+                        this.visit_expr(n.a.a);
+                        ix = this.numbered_slot(g"__forin_idx_\0", uid, g"__\0");
+                        this.emit1(IDKVM_LOCAL_SET, (i64)ix);
+                        this.visit_expr(n.a.b);
+                        ln = this.numbered_slot(g"__forin_len_\0", uid, g"__\0");
+                        this.emit1(IDKVM_LOCAL_SET, (i64)ln);
+                    }
+                    default
+                    {
+                        this.visit_expr(n.a);
+                        it = this.numbered_slot(g"__forin_iter_\0", uid, g"__\0");
+                        this.emit1(IDKVM_LOCAL_SET, (i64)it);
+                        this.emit1(IDKVM_LOCAL_GET, (i64)it);
+                        this.emit0(IDKVM_ARRAY_LEN);
+                        ln = this.numbered_slot(g"__forin_len_\0", uid, g"__\0");
+                        this.emit1(IDKVM_LOCAL_SET, (i64)ln);
+                        this.emit_push(IDKVM_T_INT, 0);
+                        ix = this.numbered_slot(g"__forin_idx_\0", uid, g"__\0");
+                        this.emit1(IDKVM_LOCAL_SET, (i64)ix);
+                    };
+                };
                 vs = this.alloc_local(node_child(n, 0, 0).text);
                 // the other variables take their slots too, only the first one is assigned
                 ln = 1;
@@ -6944,16 +6964,27 @@ namespace IDEKA
                     this.alloc_local(node_child(n, 0, ln).text);
                     ln++;
                 };
-                ln = this.alloc_local(g"__forin_len__\0");
+                ln = this.numbered_slot(g"__forin_len_\0", uid, g"__\0");
                 start = this.ip();
                 this.emit1(IDKVM_LOCAL_GET, (i64)ix);
                 this.emit1(IDKVM_LOCAL_GET, (i64)ln);
-                this.emit0(IDKVM_CMP_LT);
+                switch (rng)
+                {
+                    case (true) { this.emit0(IDKVM_CMP_LE); }
+                    default { this.emit0(IDKVM_CMP_LT); };
+                };
                 exit_patch = this.emit1(IDKVM_JNF, 0);
                 this.loop_push();
-                this.emit1(IDKVM_LOCAL_GET, (i64)it);
-                this.emit1(IDKVM_LOCAL_GET, (i64)ix);
-                this.emit0(IDKVM_ARRAY_LOAD);
+                switch (rng)
+                {
+                    case (true) { this.emit1(IDKVM_LOCAL_GET, (i64)ix); }
+                    default
+                    {
+                        this.emit1(IDKVM_LOCAL_GET, (i64)it);
+                        this.emit1(IDKVM_LOCAL_GET, (i64)ix);
+                        this.emit0(IDKVM_ARRAY_LOAD);
+                    };
+                };
                 this.emit1(IDKVM_LOCAL_SET, (i64)vs);
                 this.visit_stmts_direct(n.b);
                 update_ip = this.ip();

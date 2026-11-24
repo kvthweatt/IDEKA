@@ -1,0 +1,13 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    for (x in 0..99)
+    {
+        println("even" if (x % 2 == 0) else "odd");
+    };
+
+	-> 0;
+};

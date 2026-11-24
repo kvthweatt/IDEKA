@@ -476,6 +476,11 @@ namespace IDEKA
             PtrVec* ct_lex;         // Lexer* made for emitted text, nodes borrow their strings
             PtrVec* ct_par;         // Parser* made for emitted text
             PtrVec* ct_persist;     // FvmCap* of locals kept for later blocks
+            PtrVec* ct_back;        // FvmCap* of block values passed back to the globals of the program
+            int ct_gseq;            // number of data globals made for passed back values
+            Buf ctp;                // path of the member being passed back, e.g. st.entry
+            bool ctp_on;
+            PtrVec* ct_lens;        // FvmCap* (name = path, d = count) of arrays passed back behind a pointer
             NameMap* ct_pidx;       // name to FvmCap*
             PtrVec* ct_nodes;       // emitted statements visited in a function body, freed on exit
             int ct_runs;
@@ -663,6 +668,11 @@ namespace IDEKA
                 this.ct_lex = pv_new();
                 this.ct_par = pv_new();
                 this.ct_persist = pv_new();
+                this.ct_back = pv_new();
+                this.ct_gseq = 0;
+                this.ctp.__init();
+                this.ctp_on = false;
+                this.ct_lens = pv_new();
                 this.ct_pidx = nm_new();
                 this.ct_nodes = pv_new();
                 this.ct_runs = 0;
@@ -2023,6 +2033,16 @@ namespace IDEKA
                         si.total_bits = off;
                         si.ty.lbits = off;
                         si.ty.loff = si.offs;
+                        // the bits each member occupies: its width, or its alignment when that is larger
+                        si.ty.lslot = (int*)fmalloc((u64)(4 * (si.n + 1)));
+                        this.keep((void*)si.ty.lslot);
+                        i = 0;
+                        while (i < si.n)
+                        {
+                            si.ty.lslot[i] = si.bits[i];
+                            if (si.aligns[i] > si.bits[i]) { si.ty.lslot[i] = si.aligns[i]; };
+                            i++;
+                        };
                         this.mod.set_body(si.ty, si.ftys, si.n);
                         this.tld_global(si);
 
@@ -4128,6 +4148,71 @@ namespace IDEKA
                 };
             };
 
+            // create_global_initializer for a struct literal that initializes one global of a struct type:
+            // named members by name, positional ones in order, the rest zero. Null when a member has no
+            // constant form, the caller then falls back as it does for the other kinds.
+            global_struct_init(Node* e, IRType* lt) -> byte*
+            {
+                SInfo* si = this.sinfo_of(lt);
+                int k, f, nf, np, nn;
+                byte* fv;
+                Node** ex;
+                Buf ab;
+                if (si == (SInfo*)0) { -> (byte*)0; };
+                nf = si.n;
+                np = node_count(e, 2);
+                nn = node_count(e, 0);
+                if (np > nf) { -> (byte*)0; };
+                ex = (Node**)this.zbuf(nf + 1);
+                while (k < nn)
+                {
+                    f = this.sidx(si, node_child(e, 0, k).text);
+                    if (f < 0) { -> (byte*)0; };
+                    ex[f] = node_child(e, 1, k);
+                    k++;
+                };
+                k = 0;
+                while (k < np)
+                {
+                    ex[k] = node_child(e, 2, k);
+                    k++;
+                };
+                ab.__init();
+                ab.put(123);
+                k = 0;
+                while (k < nf)
+                {
+                    if (k > 0) { ab.put_str(g", \0"); };
+                    if (ex[k] != (Node*)0)
+                    {
+                        fv = this.global_member_value(ex[k], si.ftys[k]);
+                        if (fv == (byte*)0)
+                        {
+                            ab.__exit();
+                            -> (byte*)0;
+                        };
+                        // a value that carries its own type (a string global) is written as it is
+                        if (!this.gmv_full)
+                        {
+                            lt_text(@ab, si.ftys[k]);
+                            ab.put(32);
+                        };
+                        ab.put_str(fv);
+                    }
+                    else
+                    {
+                        lt_text(@ab, si.ftys[k]);
+                        ab.put(32);
+                        ab.put_str(this.mod.c_null(si.ftys[k]).text);
+                    };
+                    k++;
+                };
+                ab.put(125);
+                fv = this.mod.own(ab.mem);
+                ab.__exit();
+                -> fv;
+            };
+
             global_init(Node* n, IRType* lt) -> byte*
             {
                 Node* ini = n.a;
@@ -4136,6 +4221,11 @@ namespace IDEKA
                 int w;
                 byte* r;
                 bool neg = false;
+                if (ini != (Node*)0 & ini.kind == NodeKind.STRUCT_LITERAL & lt.kind == LK.ISTRUCT)
+                {
+                    r = this.global_struct_init(ini, lt);
+                    if (r != (byte*)0) { -> r; };
+                };
                 switch (ini == (Node*)0)
                 {
                     case (true) { -> this.mod.c_null(lt).text; }
@@ -5797,6 +5887,15 @@ namespace IDEKA
                                                             default
                                                             {
                                                                 it = this.global_init(n, lt);
+                                                                // a value a comptime block left in the global is its initial value
+                                                                if (ns[0] == 0 & this.ct_back_find(n.text) != (FvmCap*)0)
+                                                                {
+                                                                    it = this.ct_back_init(n, this.ct_back_find(n.text), lt);
+                                                                }
+                                                                elif (it != (byte*)0)
+                                                                {
+                                                                    it = this.ct_endian_agg(it, ts, lt);
+                                                                };
                                                                 switch (it == (byte*)0)
                                                                 {
                                                                     case (true) {
@@ -14725,7 +14824,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp\0");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -17702,12 +17801,44 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 this.mod.position(this.fn, end_b);
             };
 
+            // Appends the dotted path of a member chain rooted at a global, false when it is not one
+            forin_path(Node* e, Buf* pb) -> bool
+            {
+                if (e.kind == NodeKind.IDENTIFIER)
+                {
+                    if (this.find_local(e.text) != (LVar*)0) { -> false; };
+                    pb.put_str(e.text);
+                    -> true;
+                };
+                if (e.kind != NodeKind.MEMBER_ACCESS) { -> false; };
+                if (!this.forin_path(e.a, pb)) { -> false; };
+                pb.put('.');
+                pb.put_str(e.text);
+                -> true;
+            };
+
+            // Count behind a member chain rooted at a global that comptime filled, -1 when unknown
+            forin_member_len(Node* e) -> int
+            {
+                Buf pb;
+                int r = -1;
+                pb.__init();
+                if (this.forin_path(e, @pb)) { r = this.ct_len_find(pb.mem); };
+                pb.__exit();
+                -> r;
+            };
+
             s_forin(Node* n) -> void
             {
                 switch ((n.flags `& NF_BIT_ITER) != 0)
                 {
                     case (true) { this.s_bititer(n); ->; }
                     default {};
+                };
+                if (n.a.kind == NodeKind.RANGE_EXPRESSION)
+                {
+                    this.s_forrange(n);
+                    ->;
                 };
                 IRValue* coll = this.visit(n.a);
                 IRType* ct, et;
@@ -17824,7 +17955,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             this.define_var(vn.text, vp, this.forin_spec(n.a, et));
                                                         }
                                                             default {
-                                                                switch (et.kind != LK.INT)
+                                                                switch (et.kind != LK.INT & et.kind != LK.ISTRUCT & et.kind != LK.STRUCT)
                                                                 {
                                                                     case (true) { -> this.unsup(n, g"for-in collection type\0"); }
                                                                     default
@@ -17875,6 +18006,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                                 default {};
                                                                             };
                                                                         }
+                                                                            default {};
+                                                                        };
+                                                                        // A member whose array came back from comptime: the count was kept by path
+                                                                        switch (size < 0 & n.a.kind == NodeKind.MEMBER_ACCESS)
+                                                                        {
+                                                                            case (true) { size = this.forin_member_len(n.a); }
                                                                             default {};
                                                                         };
                                                                         switch (size < 0)
@@ -17961,6 +18098,84 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         };
                     };
                 };
+            };
+
+            // for (x in a..b): x takes every value from a to b, both ends included. A counted loop, so
+            // the range needs no array behind it. The end is tested before the increment, so a range that
+            // ends at the largest value of its type terminates.
+            s_forrange(Node* n) -> void
+            {
+                IRValue* sv = this.visit(n.a.a);
+                IRValue* ev;
+                IRValue* idxp, endp, cur, last, cv, vp, nxt, atend;
+                IRType* it;
+                IRBlock* cond_b, body_b, latch_b, step_b, end_b, ob, oc;
+                Node* vn;
+                TypeSpec* rs;
+                int w;
+                if (this.bad) { ->; };
+                ev = this.visit(n.a.b);
+                if (this.bad) { ->; };
+                if (sv == (IRValue*)0 | ev == (IRValue*)0)
+                {
+                    -> this.unsup(n, g"void range bound\0");
+                };
+                if (sv.ty.kind != LK.INT | ev.ty.kind != LK.INT)
+                {
+                    -> this.unsup(n, g"the bounds of a range must be integers\0");
+                };
+                w = sv.ty.width;
+                if (ev.ty.width > w) { w = ev.ty.width; };
+                if (w < 32) { w = 32; };
+                it = this.mod.t_int(w);
+                if (w == 32) { it = this.t_i32; };
+                if (w == 64) { it = this.t_i64; };
+                sv = this.int_resize(sv, it, false);
+                ev = this.int_resize(ev, it, false);
+                cond_b = this.mod.append_block(this.fn, g"forrange.cond\0");
+                body_b = this.mod.append_block(this.fn, g"forrange.body\0");
+                latch_b = this.mod.append_block(this.fn, g"forrange.latch\0");
+                step_b = this.mod.append_block(this.fn, g"forrange.step\0");
+                end_b = this.mod.append_block(this.fn, g"forrange.end\0");
+                idxp = this.mod.alloca_here(it, g"forrange.idx\0");
+                endp = this.mod.alloca_here(it, g"forrange.end\0");
+                this.mod.store(sv, idxp);
+                this.mod.store(ev, endp);
+                this.mod.br(cond_b);
+                this.mod.position(this.fn, cond_b);
+                cur = this.mod.load(idxp, g"idx\0");
+                last = this.mod.load(endp, g"last\0");
+                cv = this.mod.icmp(g"sle\0", cur, last, g"loop.cond\0");
+                this.mod.cbr(cv, body_b, end_b);
+                this.mod.position(this.fn, body_b);
+                vn = node_child(n, 0, 0);
+                vp = this.mod.alloca_here(it, vn.text);
+                this.mod.store(this.mod.load(idxp, g"elem\0"), vp);
+                rs = typespec_new();
+                rs.base_type = DataType.SINT;
+                rs.bit_width = w;
+                this.keep((void*)rs);
+                this.define_var(vn.text, vp, rs);
+                ob = this.brk;
+                oc = this.cont;
+                this.brk = end_b;
+                this.cont = latch_b;
+                this.visit(n.b);
+                if (!this.bad & !this.mod.is_terminated())
+                {
+                    this.mod.br(latch_b);
+                };
+                this.mod.position(this.fn, latch_b);
+                cur = this.mod.load(idxp, g"idx.latch\0");
+                atend = this.mod.icmp(g"eq\0", cur, this.mod.load(endp, g"last.latch\0"), g"at.end\0");
+                this.mod.cbr(atend, end_b, step_b);
+                this.mod.position(this.fn, step_b);
+                nxt = this.mod.binop(g"add\0", cur, this.mod.c_int(it, (i64)1), g"next.idx\0");
+                this.mod.store(nxt, idxp);
+                this.mod.br(cond_b);
+                this.brk = ob;
+                this.cont = oc;
+                -> this.mod.position(this.fn, end_b);
             };
 
             s_for(Node* n) -> void
@@ -24745,6 +24960,23 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     ffree((byte*)this.ct_persist.items[i]);
                     i++;
                 };
+                i = 0;
+                while (i < this.ct_back.len)
+                {
+                    ffree(((FvmCap*)this.ct_back.items[i]).name);
+                    ffree((byte*)this.ct_back.items[i]);
+                    i++;
+                };
+                pv_free(this.ct_back);
+                this.ctp.__exit();
+                i = 0;
+                while (i < this.ct_lens.len)
+                {
+                    ffree(((FvmCap*)this.ct_lens.items[i]).name);
+                    ffree((byte*)this.ct_lens.items[i]);
+                    i++;
+                };
+                pv_free(this.ct_lens);
                 pv_free(this.ct_persist);
                 nm_free(this.ct_pidx);
                 this.refl_drop();
@@ -25125,6 +25357,548 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     i++;
                 };
                 ->;
+            };
+
+
+            // ---- comptime cleanup: the state of a block is passed back to the globals ----
+
+            // Collects the names the block declares itself (variables and loop variables). They
+            // are locals of the block and never name a global of the program.
+            ct_declared(Node* n, NameMap* out) -> void
+            {
+                int s, i;
+                NodeVec* v;
+                if (n == (Node*)0) { ->; };
+                if (n.kind == NodeKind.FUNCTION_DEF | n.kind == NodeKind.FUNCTION_DEF_STATEMENT) { ->; };
+                if (n.kind == NodeKind.VARIABLE_DECLARATION & n.text != (byte*)0) { nm_put(out, n.text, (void*)out); };
+                if (n.kind == NodeKind.FOR_IN_LOOP)
+                {
+                    while (i < node_count(n, 0))
+                    {
+                        if (node_child(n, 0, i).text != (byte*)0) { nm_put(out, node_child(n, 0, i).text, (void*)out); };
+                        i++;
+                    };
+                };
+                this.ct_declared(n.a, out);
+                this.ct_declared(n.b, out);
+                this.ct_declared(n.c, out);
+                this.ct_declared(n.d, out);
+                this.ct_declared(n.e, out);
+                while (s < 6)
+                {
+                    if (s == 0) { v = n.l0; }
+                    elif (s == 1) { v = n.l1; }
+                    elif (s == 2) { v = n.l2; }
+                    elif (s == 3) { v = n.l3; }
+                    elif (s == 4) { v = n.l4; }
+                    else { v = n.l5; };
+                    if (v != (NodeVec*)0)
+                    {
+                        i = 0;
+                        while (i < v.len)
+                        {
+                            this.ct_declared(v.items[i], out);
+                            i++;
+                        };
+                    };
+                    s++;
+                };
+                ->;
+            };
+
+            // A top level variable declared before the statement number bound
+            ct_is_global(int bound, byte* name) -> bool
+            {
+                int i;
+                Node* s;
+                if (this.ct_pstmts == (NodeVec*)0) { -> false; };
+                while (i < bound & i < this.ct_pstmts.len)
+                {
+                    s = this.ct_pstmts.items[i];
+                    if (s.kind == NodeKind.VARIABLE_DECLARATION & s.text != (byte*)0)
+                    {
+                        if (cstr_eq(s.text, name)) { -> true; };
+                    };
+                    i++;
+                };
+                -> false;
+            };
+
+            // Keeps the value of a global for its declaration, a later block overrides an earlier one
+            ct_back_put(byte* name, int tag, i64 d, i64 m) -> void
+            {
+                int i;
+                FvmCap* c;
+                while (i < this.ct_back.len)
+                {
+                    c = (FvmCap*)this.ct_back.items[i];
+                    if (cstr_eq(c.name, name))
+                    {
+                        c.tag = tag;
+                        c.d = d;
+                        c.m = m;
+                        ->;
+                    };
+                    i++;
+                };
+                c = (FvmCap*)fmalloc((u64)((sizeof(FvmCap) + 7) / 8));
+                c.name = ts_dup(name);
+                c.tag = tag;
+                c.d = d;
+                c.m = m;
+                pv_push(this.ct_back, (void*)c);
+                ->;
+            };
+
+            ct_len_put(byte* path, int cnt) -> void
+            {
+                FvmCap* c = (FvmCap*)fmalloc((u64)((sizeof(FvmCap) + 7) / 8));
+                c.name = ts_dup(path);
+                c.d = (i64)cnt;
+                pv_push(this.ct_lens, (void*)c);
+                ->;
+            };
+
+            // Count of the array that was passed back behind the pointer at path, -1 when none
+            ct_len_find(byte* path) -> int
+            {
+                int i = this.ct_lens.len - 1;
+                while (i >= 0)
+                {
+                    if (cstr_eq(((FvmCap*)this.ct_lens.items[i]).name, path)) { -> (int)((FvmCap*)this.ct_lens.items[i]).d; };
+                    i--;
+                };
+                -> -1;
+            };
+
+            ct_back_find(byte* name) -> FvmCap*
+            {
+                int i;
+                while (i < this.ct_back.len)
+                {
+                    if (cstr_eq(((FvmCap*)this.ct_back.items[i]).name, name)) { -> (FvmCap*)this.ct_back.items[i]; };
+                    i++;
+                };
+                -> (FvmCap*)0;
+            };
+
+            // comptime cleanup, run after a block executed: every name the block assigns that is a
+            // global of the program gives its final value to that global as initial value. A value
+            // that is the one the block started with is not a change and is left alone.
+            ct_back_collect(Node* n, IDKVMCodegen* c, IDEKAVM* vm) -> void
+            {
+                int i, slot, tag;
+                byte* nm;
+                i64* sbox;
+                FvmCap* cap;
+                NameMap* dn = nm_new();
+                this.ct_declared(n, dn);
+                while (i < c.lnames.len)
+                {
+                    nm = (byte*)c.lnames.items[i];
+                    sbox = (i64*)nm_get(c.locals, nm);
+                    if (!(nm[0] == '_' & nm[1] == '_') & sbox != (i64*)0)
+                    {
+                        if (nm_get(dn, nm) == (void*)0 & this.ct_is_global(c.pbound, nm))
+                        {
+                            slot = (int)*sbox;
+                            tag = vm.lc_tag[slot];
+                            cap = (FvmCap*)nm_get(this.ct_pidx, nm);
+                            if (!(cap != (FvmCap*)0 & cap.tag == tag & cap.d == vm.lc_data[slot] & cap.m == vm.lc_meta[slot]))
+                            {
+                                this.ct_back_put(nm, tag, vm.lc_data[slot], vm.lc_meta[slot]);
+                            };
+                        };
+                    };
+                    i++;
+                };
+                nm_free(dn);
+                ->;
+            };
+
+            // Text of the constant of type ty that the VM value (tag, d, m) stands for, appended to
+            // ob without its type. Names the failure at the node and answers false when the value
+            // does not fit the type.
+            ct_const(int tag, i64 d, i64 m, IRType* ty, TypeSpec* sp, Buf* ob, Node* n, byte* what) -> bool
+            {
+                Buf eb;
+                byte* r;
+                byte* src;
+                byte* buf;
+                i64* b;
+                i64 v, pw, half;
+                double dv;
+                int i, w, cnt, li, k, j, f, pl;
+                bool isint, isflt, found, okp, okm, pon;
+                IRType* aty;
+                IRGlobal* gl;
+                SInfo* si;
+                Buf gn;
+                isint = tag == IDKVM_T_INT | tag == IDKVM_T_UINT | tag == IDKVM_T_LONG | tag == IDKVM_T_ULONG | tag == IDKVM_T_BOOL | tag == IDKVM_T_BYTE | tag == IDKVM_T_CHAR | tag == IDKVM_T_DATA | tag == IDKVM_T_ENUM;
+                isflt = tag == IDKVM_T_FLOAT | tag == IDKVM_T_DOUBLE;
+                if (ty.kind == LK.INT)
+                {
+                    if (isint) { v = d; }
+                    elif (isflt) { v = idkvm_trunc(idkvm_dv(tag, d, m)); }
+                    elif (tag == IDKVM_T_PTR & d == (i64)0) { v = 0; }
+                    else
+                    {
+                        this.ct_fail(n, g"comptime value cannot be passed back: \0", what);
+                        -> false;
+                    };
+                    w = ty.width;
+                    // a type tagged little-endian holds bswap(logical), the rule every store of it follows
+                    if (this.ct_le_swappable(sp, ty)) { v = this.ct_bswap(v, w); };
+                    if (w > 1 & w < 64)
+                    {
+                        pw = 1;
+                        i = 0;
+                        while (i < w) { pw = pw * 2; i++; };
+                        half = pw / 2;
+                        v = v % pw;
+                        if (v < 0) { v = v + pw; };
+                        if (v >= half) { v = v - pw; };
+                    };
+                    ob.put_str(this.mod.c_int(ty, v).text);
+                    -> true;
+                };
+                if (ty.kind == LK.FLOAT | ty.kind == LK.DOUBLE)
+                {
+                    if (!(isint | isflt))
+                    {
+                        this.ct_fail(n, g"comptime value cannot be passed back: \0", what);
+                        -> false;
+                    };
+                    dv = idkvm_dv(tag, d, m);
+                    ob.put_str(this.mod.c_fp(ty, dv).text);
+                    -> true;
+                };
+                if (ty.kind == LK.PTR)
+                {
+                    if ((isint | tag == IDKVM_T_PTR) & d == (i64)0)
+                    {
+                        ob.put_str(g"null\0");
+                        -> true;
+                    };
+                    if (tag == IDKVM_T_BYTES)
+                    {
+                        if (!(ty.elem.kind == LK.INT & ty.elem.width == 8)) { ob.put_str(g"bitcast (\0"); };
+                        this.gsi_ref(idkvm_i2p(d), (int)m, ob, false);
+                        if (!(ty.elem.kind == LK.INT & ty.elem.width == 8))
+                        {
+                            ob.put_str(g" to \0");
+                            lt_text(ob, ty);
+                            ob.put(')');
+                        };
+                        -> true;
+                    };
+                    if (tag == IDKVM_T_ARRAY | tag == IDKVM_T_STRUCT)
+                    {
+                        b = (i64*)d;
+                        cnt = 1;
+                        if (tag == IDKVM_T_ARRAY)
+                        {
+                            cnt = (int)b[0];
+                            if (cnt < 1) { cnt = 1; };
+                            aty = this.mod.t_array(ty.elem, cnt);
+                        }
+                        else { aty = ty.elem; };
+                        eb.__init();
+                        okp = true;
+                        pon = this.ctp_on;
+                        if (tag == IDKVM_T_ARRAY)
+                        {
+                            if (pon) { this.ct_len_put(this.ctp.mem, cnt); };
+                            this.ctp_on = false;
+                            eb.put('[');
+                            i = 0;
+                            while (i < cnt & okp)
+                            {
+                                if (i > 0) { eb.put_str(g", \0"); };
+                                lt_text(@eb, ty.elem);
+                                eb.put(' ');
+                                if (i < (int)b[0])
+                                {
+                                    okp = this.ct_const((int)b[2 + i * 3], b[3 + i * 3], b[4 + i * 3], ty.elem, (TypeSpec*)0, @eb, n, what);
+                                }
+                                else { eb.put_str(this.mod.c_null(ty.elem).text); };
+                                i++;
+                            };
+                            eb.put(']');
+                        }
+                        else
+                        {
+                            this.ctp_on = false;
+                            okp = this.ct_const(tag, d, m, ty.elem, (TypeSpec*)0, @eb, n, what);
+                        };
+                        this.ctp_on = pon;
+                        if (!okp)
+                        {
+                            eb.__exit();
+                            -> false;
+                        };
+                        gn.__init();
+                        gn.put_str(g".comptime.data.\0");
+                        put_i64(@gn, (i64)this.ct_gseq);
+                        this.ct_gseq++;
+                        gl = this.mod.add_global(aty, gn.mem, eb.mem);
+                        gl.linkage = this.mod.own(g"internal\0");
+                        gn.__exit();
+                        eb.__exit();
+                        if (tag == IDKVM_T_ARRAY)
+                        {
+                            this.mark_arr_ptr(gl.self.ty);
+                            ob.put_str(g"getelementptr (\0");
+                            lt_text(ob, aty);
+                            ob.put_str(g", \0");
+                            lt_text(ob, aty);
+                            ob.put_str(f"* {gl.self.text}, i32 0, i32 0)\0");
+                        }
+                        else { ob.put_str(gl.self.text); };
+                        -> true;
+                    };
+                    this.ct_fail(n, g"comptime value cannot be passed back: \0", what);
+                    -> false;
+                };
+                if (ty.kind == LK.ARRAY)
+                {
+                    if (tag == IDKVM_T_BYTES & ty.elem.kind == LK.INT & ty.elem.width == 8)
+                    {
+                        buf = (byte*)this.zbuf(ty.count / 8 + 2);
+                        src = idkvm_i2p(d);
+                        i = 0;
+                        while (i < (int)m & i < ty.count)
+                        {
+                            buf[i] = src[i];
+                            i++;
+                        };
+                        ob.put_str(this.mod.c_bytes(ty, buf, ty.count).text);
+                        -> true;
+                    };
+                    if (tag == IDKVM_T_ARRAY)
+                    {
+                        b = (i64*)d;
+                        ob.put('[');
+                        i = 0;
+                        while (i < ty.count)
+                        {
+                            if (i > 0) { ob.put_str(g", \0"); };
+                            lt_text(ob, ty.elem);
+                            ob.put(' ');
+                            if (i < (int)b[0])
+                            {
+                                if (!this.ct_const((int)b[2 + i * 3], b[3 + i * 3], b[4 + i * 3], ty.elem, sp, ob, n, what)) { -> false; };
+                            }
+                            else { ob.put_str(this.mod.c_null(ty.elem).text); };
+                            i++;
+                        };
+                        ob.put(']');
+                        -> true;
+                    };
+                    this.ct_fail(n, g"comptime value cannot be passed back: \0", what);
+                    -> false;
+                };
+                if (ty.kind == LK.ISTRUCT & tag == IDKVM_T_STRUCT)
+                {
+                    si = this.sinfo_of(ty);
+                    if (si != (SInfo*)0)
+                    {
+                        b = (i64*)d;
+                        li = (int)b[1];
+                        ob.put('{');
+                        k = 0;
+                        while (k < si.n)
+                        {
+                            if (k > 0) { ob.put_str(g", \0"); };
+                            lt_text(ob, si.ftys[k]);
+                            ob.put(' ');
+                            // the VM layout of the struct names its fields, a field it does not know stays zero
+                            found = false;
+                            j = 0;
+                            while (j < this.ct_vm.layouts.scount[li] & !found)
+                            {
+                                f = this.ct_vm.layouts.sfirst[li] + j;
+                                if (cstr_eq(this.ct_vm.layouts.fname[f], si.names[k])) { found = true; } else { j++; };
+                            };
+                            if (found)
+                            {
+                                pl = this.ctp.len;
+                                if (this.ctp_on) { this.ctp.put('.'); this.ctp.put_str(si.names[k]); };
+                                okm = this.ct_const((int)b[2 + j * 3], b[3 + j * 3], b[4 + j * 3], si.ftys[k], si.specs[k], ob, n, what);
+                                this.ctp.len = pl;
+                                this.ctp.mem[pl] = 0;
+                                if (!okm) { -> false; };
+                            }
+                            else { ob.put_str(this.mod.c_null(si.ftys[k]).text); };
+                            k++;
+                        };
+                        ob.put('}');
+                        -> true;
+                    };
+                };
+                this.ct_fail(n, g"comptime value cannot be passed back: \0", what);
+                -> false;
+            };
+
+            // the bytes of the low w bits of v in reverse order
+            ct_bswap(i64 v, int w) -> i64
+            {
+                u64 uv = (u64)v;
+                u64 r;
+                int i;
+                int nb = w / 8;
+                if (w < 64) { uv = uv `& (((u64)1 << (u64)w) - (u64)1); };
+                while (i < nb)
+                {
+                    r = (r << (u64)8) `| (uv `& (u64)255);
+                    uv = uv >> (u64)8;
+                    i++;
+                };
+                -> (i64)r;
+            };
+
+            // An integer of a type tagged little-endian that has a byte order (whole 16 bit units)
+            ct_le_swappable(TypeSpec* sp, IRType* ty) -> bool
+            {
+                if (sp == (TypeSpec*)0) { -> false; };
+                if (ty.kind != LK.INT) { -> false; };
+                -> sp.endianness == 0 & ty.width >= 16 & ty.width % 16 == 0;
+            };
+
+            // The initializer text it of a global of integer type lt, swapped when the type is tagged
+            // little-endian. Text that is not a plain number is left as it is.
+            ct_endian_text(byte* it, TypeSpec* sp, IRType* lt) -> byte*
+            {
+                int i;
+                i64 v;
+                bool neg;
+                if (!this.ct_le_swappable(sp, lt)) { -> it; };
+                if (it[0] == '-') { neg = true; i = 1; };
+                if (it[i] < 48 | it[i] > 57) { -> it; };
+                while (it[i] != 0)
+                {
+                    if (it[i] < 48 | it[i] > 57) { -> it; };
+                    v = v * 10 + (i64)(it[i] - 48);
+                    i++;
+                };
+                if (neg) { v = 0 - v; };
+                v = this.ct_bswap(v, lt.width);
+                if (lt.width < 64)
+                {
+                    if (v >= ((i64)1 << (i64)(lt.width - 1))) { v = v - ((i64)1 << (i64)lt.width); };
+                };
+                -> this.mod.c_int(lt, v).text;
+            };
+
+            // True when a constant of type lt holds an integer whose type is tagged little-endian
+            ct_agg_le(TypeSpec* sp, IRType* lt) -> bool
+            {
+                int k;
+                SInfo* si;
+                if (lt.kind == LK.INT) { -> this.ct_le_swappable(sp, lt); };
+                if (lt.kind == LK.ARRAY) { -> this.ct_agg_le(sp, lt.elem); };
+                if (lt.kind == LK.ISTRUCT)
+                {
+                    si = this.sinfo_of(lt);
+                    if (si == (SInfo*)0) { -> false; };
+                    while (k < si.n)
+                    {
+                        if (this.ct_agg_le(si.specs[k], si.ftys[k])) { -> true; };
+                        k++;
+                    };
+                };
+                -> false;
+            };
+
+            // The initializer text it of a global of type lt with every integer whose type is tagged
+            // little-endian swapped, through arrays and structs, as the Python compiler does
+            ct_endian_agg(byte* it, TypeSpec* sp, IRType* lt) -> byte*
+            {
+                int k, n, cnt, i, pl, vs, ve;
+                int* st;
+                int* en;
+                byte* val;
+                byte* nv;
+                IRType* ety;
+                TypeSpec* esp;
+                SInfo* si;
+                Buf ob;
+                Buf tb;
+                bool ok;
+                if (lt.kind == LK.INT) { -> this.ct_endian_text(it, sp, lt); };
+                if (!this.ct_agg_le(sp, lt)) { -> it; };
+                if (it[0] != '[' & it[0] != '{') { -> it; };
+                if (lt.kind == LK.ARRAY) { n = lt.count; }
+                else
+                {
+                    si = this.sinfo_of(lt);
+                    n = si.n;
+                };
+                st = (int*)this.zbuf(n + 1);
+                en = (int*)this.zbuf(n + 1);
+                cnt = this.split_agg(it, 0, st, en, n);
+                ob.__init();
+                ob.put((int)it[0]);
+                while (k < cnt)
+                {
+                    if (lt.kind == LK.ARRAY) { ety = lt.elem; esp = sp; }
+                    else { ety = si.ftys[k]; esp = si.specs[k]; };
+                    if (k > 0) { ob.put_str(g", \0"); };
+                    vs = st[k];
+                    while (it[vs] == ' ') { vs++; };
+                    ve = en[k];
+                    tb.__init();
+                    lt_text(@tb, ety);
+                    pl = 0;
+                    ok = true;
+                    while (tb.mem[pl] != 0 & ok)
+                    {
+                        if (it[vs + pl] != tb.mem[pl]) { ok = false; };
+                        pl++;
+                    };
+                    if (ok)
+                    {
+                        i = vs + pl;
+                        while (it[i] == ' ') { i++; };
+                        val = (byte*)this.zbuf((ve - i) / 8 + 2);
+                        n = 0;
+                        while (i + n < ve) { val[n] = it[i + n]; n++; };
+                        nv = this.ct_endian_agg(val, esp, ety);
+                        ob.put_str(tb.mem);
+                        ob.put(' ');
+                        ob.put_str(nv);
+                    }
+                    else
+                    {
+                        i = vs;
+                        while (i < ve) { ob.put((int)it[i]); i++; };
+                    };
+                    tb.__exit();
+                    if (lt.kind == LK.ARRAY) { n = lt.count; } else { n = si.n; };
+                    k++;
+                };
+                if (it[0] == '[') { ob.put(']'); } else { ob.put('}'); };
+                nv = this.mod.own(ob.mem);
+                ob.__exit();
+                -> nv;
+            };
+
+            // Initializer of the global declared at n from the value a block left in it
+            ct_back_init(Node* n, FvmCap* bk, IRType* lt) -> byte*
+            {
+                Buf ob;
+                byte* r;
+                bool okc;
+                ob.__init();
+                defer ob.__exit();
+                this.ctp.len = 0;
+                this.ctp.put_str(bk.name);
+                this.ctp_on = true;
+                okc = this.ct_const(bk.tag, bk.d, bk.m, lt, n.ts, @ob, n, bk.name);
+                this.ctp_on = false;
+                if (!okc) { -> (byte*)0; };
+                r = this.mod.own(ob.mem);
+                -> r;
             };
 
             // Keeps a local for the blocks that follow (scalars, data and pointers only)
@@ -25816,6 +26590,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     this.ct_fail(n, g"comptime execution failed: \0", vm.err_text());
                     -> 2;
                 };
+
+                this.ct_back_collect(n, c, vm);
 
                 // persist locals for the blocks that follow, internal temporaries are skipped
                 i = 0;

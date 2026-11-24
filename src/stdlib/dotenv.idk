@@ -319,7 +319,9 @@ namespace dotenv
             #endif;
                 
             int read_result;
-            while((read_result = _getline(pLineBuf, @len, file)) >= 0) {
+            while (true) {
+                read_result = _getline(pLineBuf, @len, file);
+                if (read_result < 0) { break; };
                 byte* line_buf = pLineBuf[0];
                     
                 #ifdef DEBUG

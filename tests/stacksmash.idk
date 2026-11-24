@@ -6,8 +6,7 @@ using standard::runtime::shadow_stack;
 // Overwrites the return address, which is what a stack smash does
 def smash_return() -> void : FSS_Protect_Frame
 {
-    u64* ra = @->;
-    *ra = 0xDEADBEEFCAFEBABEu;
+    *@-> = 0xDEADBEEFCAFEBABEu;
     return;
 } : FSS_Cleanup_Frame;
 

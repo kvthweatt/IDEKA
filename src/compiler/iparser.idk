@@ -605,6 +605,8 @@ namespace IDEKA
             byte* err_msg;
             byte* eof_msg;          // text for EOF inside a statement list, null for the generic error
             int function_depth, loop_depth, in_comptime, in_trait, in_fn_stringify, async_errs;
+            int assign_count;       // assignment nodes built so far (ternary condition check)
+            int cond_depth;         // >0 while parsing an if/elif/while/do-while/for/switch condition (assignment banned)
             bool in_for_init;       // parsing the init clause of a for loop
             bool failed, verbose;
             Node* last_stmt;
@@ -640,6 +642,7 @@ namespace IDEKA
             PtrVec* tinst_s;        // instantiated template structs (appended after the program)
             PtrVec* tinst_o;        // instantiated template objects
             PtrVec* tinst_f;        // instantiated template functions
+            NameMap* opproto;       // operator name -> binding (1 prefix, 2 postfix) declared by a prototype
             PtrVec* pend_dict;      // dict argument TypeSpecs by parameter index, for capacity patching (_pending_dict_arg_ts)
             PtrVec* tmp_ts;         // TypeSpecs made while inferring, freed on exit
             Checker* chk; // template constraint checker (created on first use)
@@ -670,6 +673,8 @@ namespace IDEKA
                 this.function_depth = 0;
                 this.loop_depth = 0;
                 this.in_for_init = false;
+                this.cond_depth = 0;
+                this.assign_count = 0;
                 this.in_comptime = 0;
                 this.in_trait = 0;
                 this.in_fn_stringify = 0;
@@ -711,6 +716,7 @@ namespace IDEKA
                 this.tinst_s = pv_new();
                 this.tinst_o = pv_new();
                 this.tinst_f = pv_new();
+                this.opproto = nm_new();
                 this.pend_dict = pv_new();
                 this.tmp_ts = pv_new();
                 this.chk = (Checker*)0;
@@ -829,6 +835,7 @@ namespace IDEKA
                 pv_free(this.tinst_s);
                 pv_free(this.tinst_o);
                 pv_free(this.tinst_f);
+                nm_free(this.opproto);
                 pi = 0;
                 while (pi < this.tmp_ts.len)
                 {
@@ -3917,7 +3924,7 @@ namespace IDEKA
                 }
                     default
                     {
-                        switch (te.kind != 0)
+                        switch (te.kind != 0 & te.kind != 3)
                         {
                             case (true) {
                             this.error(this.cat2(this.cat2(g"Unknown template function '\0", fname), g"'\0"));
@@ -4011,7 +4018,8 @@ namespace IDEKA
                                                                 }
                                                                     default
                                                                     {
-                                                                        concrete.text = fname;
+                                                                        // an operator keeps its operator__ name, its registry key is the symbol
+                                                                        if (te.kind == 0) { concrete.text = fname; };
                                                                         switch ((concrete.flags `& NF_NO_MANGLE) != 0)
                                                                         {
                                                                             case (true) { concrete.flags = concrete.flags - NF_NO_MANGLE; }
@@ -4072,37 +4080,18 @@ namespace IDEKA
                 byte* key = operator_text(n.op);
                 TemplateEntry* te = this.template_lookup(key);
                 TypeSpec* lts, rts;
-                switch (te == (TemplateEntry*)0)
-                {
-                    case (true) { ->; }
-                    default
-                    {
-                        switch (te.kind != 3)
-                        {
-                            case (true) { ->; }
-                            default
-                            {
-                                lts = this.infer_operand_type(n.a);
-                                switch (lts == (TypeSpec*)0)
-                                {
-                                    case (true) { ->; }
-                                    default
-                                    {
-                                        rts = this.infer_operand_type(n.b);
-                                        switch (rts == (TypeSpec*)0)
-                                        {
-                                            case (true) { ->; }
-                                            default
-                                            {
-                                                -> this.resolve_template_operator(key, te, lts, rts);
-                                            };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
+                PtrVec* ops;
+                if (te == (TemplateEntry*)0) { ->; };
+                if (te.kind != 3) { ->; };
+                lts = this.infer_operand_type(n.a);
+                if (lts == (TypeSpec*)0) { ->; };
+                rts = this.infer_operand_type(n.b);
+                if (rts == (TypeSpec*)0) { ->; };
+                ops = pv_new();
+                pv_push(ops, (void*)lts);
+                pv_push(ops, (void*)rts);
+                this.resolve_template_operator(key, te, ops, 0);
+                -> pv_free(ops);
             };
 
             // Binds template parameter pn from the concrete operand type c (fparser._resolve_template_operator)
@@ -4272,138 +4261,159 @@ namespace IDEKA
                 };
             };
 
-            resolve_template_operator(byte* key, TemplateEntry* te, TypeSpec* lts, TypeSpec* rts) -> void
+            // True when every declared allowed-type list of te accepts the matching operand type
+            op_allowed_ok(TemplateEntry* te, PtrVec* specs) -> bool
+            {
+                int i, j;
+                bool hit, seen;
+                byte* pname;
+                while (i < te.params.len & i < specs.len)
+                {
+                    pname = (byte*)te.params.items[i];
+                    seen = false;
+                    hit = false;
+                    j = 0;
+                    while (j < te.cparam.len)
+                    {
+                        if (cstr_eq((byte*)te.cparam.items[j], pname))
+                        {
+                            seen = true;
+                            if (ts_matches((TypeSpec*)specs.items[i], (TypeSpec*)te.cts.items[j])) { hit = true; };
+                        };
+                        j++;
+                    };
+                    if (seen & !hit) { -> false; };
+                    i++;
+                };
+                -> true;
+            };
+
+            // Instantiates the template operator registered under key for the concrete operand types
+            // ops (fparser._resolve_template_operator). Constraints, relations and de-duplication go
+            // through resolve_template_call, as for a function template.
+            resolve_template_operator(byte* key, TemplateEntry* te, PtrVec* ops, int hidden) -> void
             {
                 Node* f = te.node;
-                PtrVec* names, specs;
-                NameMap* inferred, map;
-                Node* concrete;
+                PtrVec* names = pv_new();
+                PtrVec* specs = pv_new();
+                NameMap* inferred;
                 TypeSpec* c;
-                byte* mangled;
+                bool nb;
                 int i;
-                switch (f == (Node*)0)
+                if (f == (Node*)0 | node_count(f, 0) - hidden != ops.len)
                 {
-                    case (true) { ->; }
-                    default
+                    pv_free(specs);
+                    -> pv_free(names);
+                };
+                if (te.params.len != ops.len)
+                {
+                    inferred = nm_new();
+                    i = 0;
+                    while (i < ops.len)
                     {
-                        switch (node_count(f, 0) != 2)
+                        if (node_child(f, 0, i + hidden).ts != (TypeSpec*)0)
                         {
-                            case (true) { ->; }
-                            default
+                            this.op_infer_param(te, inferred, node_child(f, 0, i + hidden).ts, (TypeSpec*)ops.items[i]);
+                        };
+                        i++;
+                    };
+                    i = 0;
+                    while (i < te.params.len)
+                    {
+                        if (!nm_has(inferred, (byte*)te.params.items[i]))
+                        {
+                            nm_free(inferred);
+                            pv_free(specs);
+                            -> pv_free(names);
+                        };
+                        pv_push(specs, nm_get(inferred, (byte*)te.params.items[i]));
+                        i++;
+                    };
+                    nm_free(inferred);
+                }
+                else
+                {
+                    i = 0;
+                    while (i < ops.len)
+                    {
+                        pv_push(specs, ops.items[i]);
+                        i++;
+                    };
+                };
+                // A built-in symbol is overloaded for some operand types only: all-primitive operands
+                // never use the template, and operands that fail a declared constraint are not an error
+                if (this.is_builtin_op(key))
+                {
+                    nb = false;
+                    i = 0;
+                    while (i < ops.len)
+                    {
+                        if (this.op_is_non_builtin((TypeSpec*)ops.items[i])) { nb = true; };
+                        i++;
+                    };
+                    if (!nb | !this.op_allowed_ok(te, specs))
+                    {
+                        pv_free(specs);
+                        -> pv_free(names);
+                    };
+                };
+                i = 0;
+                while (i < specs.len)
+                {
+                    pv_push(names, (void*)this.ts_mangle((TypeSpec*)specs.items[i]));
+                    i++;
+                };
+                this.resolve_template_call(key, names, specs, (PtrVec*)0);
+                pv_free(specs);
+                pv_free(names);
+                ->;
+            };
+
+            // A call to a custom operator was just built (operands pushed): instantiates the template
+            // operator it names, when every operand type is known (fparser._try_instantiate_custom_template_op)
+            try_custom_template_op(Node* call, int hidden) -> void
+            {
+                TemplateEntry* te;
+                PtrVec* ops;
+                TypeSpec* ts;
+                int i, k, nfixed;
+                if (this.failed | call == (Node*)0) { ->; };
+                while (k < this.templates.count)
+                {
+                    te = (TemplateEntry*)this.templates.vals[k];
+                    if (te != (TemplateEntry*)0)
+                    {
+                        if (te.kind == 3 & te.node != (Node*)0)
+                        {
+                            if (cstr_eq(te.node.text, call.text))
                             {
-                                specs = pv_new();
-                                names = pv_new();
-                                switch (te.params.len != 2)
+                                // a variadic operator has hidden leading parameters and arguments; operands past
+                                // the declared parameters are C varargs and take no part in inference
+                                nfixed = node_count(te.node, 0) - hidden;
+                                if (node_count(call, 0) - hidden < nfixed)
                                 {
-                                    case (true) {
-                                    inferred = nm_new();
-                                    i = 0;
-                                    while (i < 2)
-                                    {
-                                        c = lts;
-                                        switch (i == 1)
-                                        {
-                                            case (true) { c = rts; }
-                                            default {};
-                                        };
-                                        switch (node_child(f, 0, i).ts != (TypeSpec*)0)
-                                        {
-                                            case (true) { this.op_infer_param(te, inferred, node_child(f, 0, i).ts, c); }
-                                            default {};
-                                        };
-                                        i++;
-                                    };
-                                    i = 0;
-                                    while (i < te.params.len)
-                                    {
-                                        switch (!nm_has(inferred, (byte*)te.params.items[i]))
-                                        {
-                                            case (true) {
-                                            nm_free(inferred);
-                                            pv_free(specs);
-                                            -> pv_free(names);
-                                        }
-                                            default
-                                            {
-                                                pv_push(specs, nm_get(inferred, (byte*)te.params.items[i]));
-                                                i++;
-                                            };
-                                        };
-                                    };
-                                    nm_free(inferred);
-                                }
-                                    default {
-                                    pv_push(specs, (void*)lts);
-                                    pv_push(specs, (void*)rts);
+                                    ->;
                                 };
-                                };
-                                switch (!this.op_is_non_builtin(lts) & !this.op_is_non_builtin(rts))
+                                ops = pv_new();
+                                i = 0;
+                                while (i < nfixed)
                                 {
-                                    case (true) {
-                                    pv_free(specs);
-                                    -> pv_free(names);
-                                }
-                                    default
+                                    ts = this.infer_operand_type(node_child(call, 0, i + hidden));
+                                    if (ts == (TypeSpec*)0)
                                     {
-                                        this.sb.len = 0;
-                                        this.sb.mem[0] = 0;
-                                        this.sb.put_str(f"{f.text}__tmpl__\0");
-                                        i = 0;
-                                        while (i < specs.len)
-                                        {
-                                            switch (i > 0)
-                                            {
-                                                case (true) { this.sb.put_str(g"__\0"); }
-                                                default {};
-                                            };
-                                            this.sb.put_str(this.ts_mangle((TypeSpec*)specs.items[i]));
-                                            i++;
-                                        };
-                                        mangled = this.own_n(this.sb.mem, this.sb.len);
-                                        i = 0;
-                                        while (i < specs.len)
-                                        {
-                                            pv_push(names, (void*)this.ts_mangle((TypeSpec*)specs.items[i]));
-                                            i++;
-                                        };
-                                        switch (nm_has(te.emitted, mangled))
-                                        {
-                                            case (true) {
-                                            pv_free(specs);
-                                            -> pv_free(names);
-                                        }
-                                            default
-                                            {
-                                                nm_put(te.emitted, mangled, (void*)te);
-                                                map = this.tp_mapping(te, names, specs);
-                                                pv_free(specs);
-                                                pv_free(names);
-                                                concrete = node_clone(f);
-                                                this.subst_node(concrete, map);
-                                                nm_free(map);
-                                                switch (this.failed)
-                                                {
-                                                    case (true) {
-                                                    -> node_free(concrete);
-                                                }
-                                                    default
-                                                    {
-                                                        switch ((concrete.flags `& NF_NO_MANGLE) != 0)
-                                                        {
-                                                            case (true) { concrete.flags = concrete.flags - NF_NO_MANGLE; }
-                                                            default {};
-                                                        };
-                                                        -> pv_push(this.tinst_f, (void*)concrete);
-                                                    };
-                                                };
-                                            };
-                                        };
+                                        -> pv_free(ops);
                                     };
+                                    pv_push(ops, (void*)ts);
+                                    i++;
                                 };
+                                this.resolve_template_operator((byte*)this.templates.keys[k], te, ops, hidden);
+                                -> pv_free(ops);
                             };
                         };
                     };
+                    k++;
                 };
+                ->;
             };
 
             // Type implied by one call argument: identifier (symbol table), literal or string
@@ -9472,6 +9482,15 @@ namespace IDEKA
             // expression -> assignment_expression
             expression() -> Node* -> this.assignment_expression();
 
+            // expression in a conditional context: assignment of any kind is rejected
+            cond_expression() -> Node*
+            {
+                this.cond_depth = this.cond_depth + 1;
+                Node* ce = this.expression();
+                this.cond_depth = this.cond_depth - 1;
+                -> ce;
+            };
+
             is_compound_assign() -> bool -> this.expect4(TokenType.PLUS_ASSIGN, TokenType.MINUS_ASSIGN, TokenType.MULTIPLY_ASSIGN, TokenType.DIVIDE_ASSIGN) | this.expect4(TokenType.MODULO_ASSIGN, TokenType.EXPONENT_ASSIGN, TokenType.XOR_ASSIGN, TokenType.BITXOR_ASSIGN) | this.expect4(TokenType.BITXNOR_ASSIGN, TokenType.BITSHIFT_LEFT_ASSIGN, TokenType.BITSHIFT_RIGHT_ASSIGN, TokenType.BITAND_ASSIGN) | this.expect4(TokenType.BITOR_ASSIGN, TokenType.BITNAND_ASSIGN, TokenType.BITNOR_ASSIGN, TokenType.OR_ASSIGN) | this.expect(TokenType.AND_ASSIGN);
 
             // assignment_expression -> ternary (('=' | op= | '@=' | '?=') assignment_expression)?
@@ -9485,6 +9504,19 @@ namespace IDEKA
                     case (true) { -> expr; }
                     default
                     {
+                        switch (this.expect(TokenType.ASSIGN) | this.is_compound_assign() | this.expect(TokenType.ADDRESS_ASSIGN) | this.expect(TokenType.TERNARY_ASSIGN))
+                        {
+                            case (true) { this.assign_count = this.assign_count + 1; }
+                            default {};
+                        };
+                        switch (this.cond_depth > 0 & (this.expect(TokenType.ASSIGN) | this.is_compound_assign() | this.expect(TokenType.ADDRESS_ASSIGN) | this.expect(TokenType.TERNARY_ASSIGN)))
+                        {
+                            case (true) {
+                            this.error(g"Assignment is not allowed inside a condition; use '==' to compare\0");
+                            -> expr;
+                        }
+                            default {};
+                        };
                         Node* n, value;
                         switch (this.expect(TokenType.ASSIGN))
                         {
@@ -9643,6 +9675,7 @@ namespace IDEKA
             {
                 int line = this.cur_line();
                 int col = this.cur_col();
+                int assign_mark = this.assign_count;
                 Node* expr = this.null_coalesce_expression();
                 switch (this.failed)
                 {
@@ -9652,6 +9685,14 @@ namespace IDEKA
                         switch (this.expect(TokenType.QUESTION))
                         {
                             case (true) {
+                            switch (this.assign_count != assign_mark)
+                            {
+                                case (true) {
+                                this.error(g"Assignment is not allowed inside a condition; use '==' to compare\0");
+                                -> expr;
+                            }
+                                default {};
+                            };
                             this.advance();
                             Node* t = this.expression();
                             switch (this.failed)
@@ -11064,6 +11105,19 @@ namespace IDEKA
                                             switch (this.expect(TokenType.INCREMENT) | this.expect(TokenType.DECREMENT))
                                             {
                                                 case (true) {
+                        // a custom postfix operator that starts with ++ or -- (such as +++) takes
+                        // precedence over the built-in postfix increment and decrement
+                        pc = this.cop_best(3);
+                        if (pc != (COp*)0)
+                        {
+                            n = this.op_call(pc.func, this.cur_line(), this.cur_col());
+                            if (this.failed) { -> expr; };
+                            this.skip_tokens(pc.left.n);
+                            node_push(n, 0, expr);
+                            this.try_custom_template_op(n, 0);
+                            expr = n;
+                            continue;
+                        };
                         // not a postfix ++ or -- when it begins a registered custom operator
                         switch (this.cop_best(0) != (COp*)0)
                         {
@@ -11192,7 +11246,7 @@ namespace IDEKA
                         this.advance(); switch (!this.consume_msg(TokenType.LEFT_PAREN, g"Expected '(' after 'if' in if-expression\0")) { case (true) { -> expr; }
                             default
                             {
-                                cond = this.expression(); switch (this.failed) { case (true) { -> expr; } default { switch (!this.consume_msg(TokenType.RIGHT_PAREN, g"Expected ')' after condition in if-expression\0"))
+                                cond = this.cond_expression(); switch (this.failed) { case (true) { -> expr; } default { switch (!this.consume_msg(TokenType.RIGHT_PAREN, g"Expected ')' after condition in if-expression\0"))
                                         {
                                             case (true) { -> expr; }
                                             default
@@ -11245,6 +11299,7 @@ namespace IDEKA
                                     {
                                         this.skip_tokens(pc.left.n);
                                         node_push(n, 0, expr);
+                                        this.try_custom_template_op(n, 0);
                                         expr = n;
                                     };
                                 };
@@ -14334,10 +14389,12 @@ namespace IDEKA
                     case (true) { -> b; }
                     default
                     {
+                        int saved_cd = this.cond_depth;
+                        this.cond_depth = 0;
                         this.consume(TokenType.LEFT_BRACE);
                         switch (!this.failed)
                         {
-                            case (true) { this.statements_until_brace(b); }
+                            case (true) { this.statements_until_brace(b); this.cond_depth = saved_cd; }
                             default {};
                         };
                         switch (!this.failed)
@@ -14385,7 +14442,7 @@ namespace IDEKA
                             n.b = body; this.consume_msg(TokenType.LEFT_PAREN, g"Expected '(' after 'if' in block-if statement\0");
                             switch (!this.failed)
                             {
-                                case (true) { n.a = this.expression(); }
+                                case (true) { n.a = this.cond_expression(); }
                                 default {};
                             };
                             switch (!this.failed)
@@ -14495,7 +14552,7 @@ namespace IDEKA
                         };
                         switch (!this.failed)
                         {
-                            case (true) { n.a = this.expression(); }
+                            case (true) { n.a = this.cond_expression(); }
                             default {};
                         };
                         switch (!this.failed)
@@ -14527,7 +14584,7 @@ namespace IDEKA
                                 case (true) { break; }
                                 default
                                 {
-                                    c = this.expression();
+                                    c = this.cond_expression();
                                     switch (this.failed)
                                     {
                                         case (true) { node_free(c); break; }
@@ -14592,7 +14649,7 @@ namespace IDEKA
                         };
                         switch (!this.failed)
                         {
-                            case (true) { n.a = this.expression(); }
+                            case (true) { n.a = this.cond_expression(); }
                             default {};
                         };
                         switch (!this.failed)
@@ -14647,7 +14704,7 @@ namespace IDEKA
                                     this.consume(TokenType.LEFT_PAREN);
                                     switch (!this.failed)
                                     {
-                                        case (true) { n.a = this.expression(); }
+                                        case (true) { n.a = this.cond_expression(); }
                                         default {};
                                     };
                                     switch (!this.failed)
@@ -15021,7 +15078,7 @@ namespace IDEKA
                                         };
                                         switch (!this.failed & !this.expect(TokenType.SEMICOLON))
                                         {
-                                            case (true) { n.b = this.expression(); }
+                                            case (true) { n.b = this.cond_expression(); }
                                             default {};
                                         };
                                         switch (!this.failed)
@@ -15141,7 +15198,7 @@ namespace IDEKA
                         };
                         switch (!this.failed)
                         {
-                            case (true) { n.a = this.expression(); }
+                            case (true) { n.a = this.cond_expression(); }
                             default {};
                         };
                         switch (!this.failed)
@@ -15599,7 +15656,7 @@ namespace IDEKA
                         };
                         switch (!this.failed)
                         {
-                            case (true) { n.a = this.expression(); }
+                            case (true) { n.a = this.cond_expression(); }
                             default {};
                         };
                         switch (!this.failed & this.expect(TokenType.COMMA))
@@ -22860,6 +22917,7 @@ namespace IDEKA
                 this.set_count_literal(cnt, count);
                 this.set_count_literal(argc, nargs);
                 trail.ival = is_trailing;
+                this.try_custom_template_op(call, 4);
                 -> call;
             };
 
@@ -22955,6 +23013,7 @@ namespace IDEKA
                                                 node_push(call, 0, expr);
                                                 node_push(call, 0, mid);
                                                 node_push(call, 0, right);
+                                                this.try_custom_template_op(call, 0);
                                                 expr = call;
                                                 continue;
                                             }
@@ -22981,6 +23040,7 @@ namespace IDEKA
                                                                         {
                                                                             node_push(call, 0, expr);
                                                                             node_push(call, 0, right);
+                                                                            this.try_custom_template_op(call, 0);
                                                                             expr = call;
                                                                         };
                                                                     };
@@ -23037,6 +23097,7 @@ namespace IDEKA
                                 default {};
                             };
                             node_push(call, 0, operand);
+                            this.try_custom_template_op(call, 0);
                             -> call;
                         }
                             default
@@ -23070,6 +23131,7 @@ namespace IDEKA
                                         default {};
                                     };
                                     node_push(call, 0, operand);
+                                    this.try_custom_template_op(call, 0);
                                     -> call;
                                 }
                                     default
@@ -23212,6 +23274,44 @@ namespace IDEKA
                 };
             };
 
+            // The optional '# binding' of an operator definition, and the checks that go with it:
+            // a one parameter operator with one symbol is unary and needs a binding, one with two
+            // symbols is circumfix and cannot have one. Returns 0 none, 1 prefix, 2 postfix.
+            op_bind(Node* f, OpSym* r, bool variadic, bool proto) -> int
+            {
+                int bind;
+                if (this.expect(TokenType.TAG) & this.type_at(1) == TokenType.IDENTIFIER)
+                {
+                    if (cstr_eq(this.val_at(1), g"binding\0") & r != (OpSym*)0)
+                    {
+                        if (this.param_count(f) == 1)
+                        {
+                            this.error(g"Operator takes a single parameter and defines two symbols (circumfix) and cannot have a #binding{:}\0");
+                        }
+                        else
+                        {
+                            this.error(g"Operator defines two symbols and cannot have a #binding{:}\0");
+                        };
+                        -> 0;
+                    };
+                };
+                bind = this.unary_binding(f, g"an operator definition\0");
+                // a definition needs no binding when its prototype declared one
+                if (!this.failed & bind == 0 & nm_has(this.opproto, f.text))
+                {
+                    bind = (int)(i64)nm_get(this.opproto, f.text);
+                };
+                if (!this.failed & proto & bind != 0)
+                {
+                    nm_put(this.opproto, this.own(ts_dup(f.text)), (void*)(i64)bind);
+                };
+                if (!this.failed & bind == 0 & r == (OpSym*)0 & this.param_count(f) == 1 & !variadic)
+                {
+                    this.error(g"Operator takes a single parameter and defines one symbol (unary) and must have a #binding{:}\0");
+                };
+                -> bind;
+            };
+
             // Registers the operator named by the symbols after the definition parsed
             register_operator(Node* f, OpSym* l, OpSym* r, int bind, bool variadic, bool is_template) -> void
             {
@@ -23332,35 +23432,16 @@ namespace IDEKA
                     default
                     {
                         this.advance();
-                        switch (this.expect(TokenType.LESS_THAN) & this.is_template_list())
+                        // After 'operator' a '<' can only open a template parameter list, which takes
+                        // the full function template syntax (constraints, constraint sets, defaults)
+                        if (this.expect(TokenType.LESS_THAN))
                         {
-                            case (true) {
-                            te = te_new();
-                            this.advance();
-                            pv_push(te.params, (void*)this.own(ts_dup(this.ident())));
-                            while (!this.failed & this.expect(TokenType.COMMA))
+                            te = this.template_params(false);
+                            if (this.failed)
                             {
-                                this.advance();
-                                pv_push(te.params, (void*)this.own(ts_dup(this.ident())));
-                            };
-                            switch (!this.failed)
-                            {
-                                case (true) { this.consume(TokenType.GREATER_THAN); }
-                                default {};
-                            };
-                            switch (this.failed)
-                            {
-                                case (true) {
-                                te_free(te);
                                 -> this.done(f);
-                            }
-                                default
-                                {
-                                    this.tmpl_cur = te;
-                                };
                             };
-                        }
-                            default {};
+                            this.tmpl_cur = te;
                         };
                         switch (!this.consume(TokenType.LEFT_PAREN))
                         {
@@ -23520,10 +23601,16 @@ namespace IDEKA
                                                                         OpSym* prev_vop = this.vop_sym;
                                                                         Node* ret, b, post;
                                                                         int bind;
-                                                                        switch (this.expect(TokenType.SEMICOLON))
+                                                                        switch (this.expect(TokenType.SEMICOLON) | (this.expect(TokenType.TAG) & this.type_at(1) == TokenType.IDENTIFIER & cstr_eq(this.val_at(1), g"binding\0")))
                                                                         {
                                                                             case (true) {
-                                                                            this.advance();
+                                                                            // a prototype; a unary one carries its '# binding' before the ';'
+                                                                            bind = this.op_bind(f, r, variadic, true);
+                                                                            switch (!this.failed)
+                                                                            {
+                                                                                case (true) { this.consume(TokenType.SEMICOLON); }
+                                                                                default {};
+                                                                            };
                                                                             this.mark_proto(f);
                                                                         }
                                                                             default {
@@ -23580,6 +23667,11 @@ namespace IDEKA
                                                                                     switch (this.st != (IDKC_SYMTABLE*)0)
                                                                                     {
                                                                                         case (true) { st_exit_scope(this.st); }
+                                                                                        default {};
+                                                                                    };
+                                                                                    switch (!this.failed)
+                                                                                    {
+                                                                                        case (true) { bind = this.op_bind(f, r, variadic, false); }
                                                                                         default {};
                                                                                     };
                                                                                     switch (!this.failed)
@@ -23648,7 +23740,7 @@ namespace IDEKA
                                                                             switch (!this.failed)
                                                                             {
                                                                                 case (true) {
-                                                                                bind = this.unary_binding(f, g"an operator definition\0");
+                                                                                bind = this.op_bind(f, r, variadic, false);
                                                                                 switch (!this.failed)
                                                                                 {
                                                                                     case (true) { this.consume(TokenType.SEMICOLON); }
@@ -23689,7 +23781,7 @@ namespace IDEKA
                                                                                     case (true) { f.flags = f.flags `| NF_VARIADIC; }
                                                                                     default {};
                                                                                 };
-                                                                                this.register_operator(f, l, r, 0, variadic, te != (TemplateEntry*)0);
+                                                                                this.register_operator(f, l, r, bind, variadic, te != (TemplateEntry*)0);
                                                                                 switch (te != (TemplateEntry*)0)
                                                                                 {
                                                                                     case (true) { -> this.op_template_done(f, te, opkey); }

@@ -4,9 +4,9 @@ using standard::io::console;
 
 const noopstr chars = "HI";
 
-operator(i32 x)[!] -> i32
+operator<T>(T x)[!] -> T
 {
-    int v = x;
+    T v = x;
     while (x--)
     {
         if (x!?) v *= x;
@@ -52,7 +52,7 @@ main() -> int
 {
     int y = 25;
 
-    int z = 5!;
+    u64 z = 20!;
 
     println(z);
 
@@ -61,16 +61,13 @@ main() -> int
     {
         if (x!?)
         {
-            //print(f"Current char: {x}\n");
-            print(f"Current char: ");      // 1 4
-            print(x);                      // 2 5
-            print();                       // 3 6
+            println(f"Current char: {x}");
         }
         else
         {
             println("Hit end of string!"); // 7
         };
     };
-    println(--GCSTDOUT);
+
     -> 0;
 };

@@ -1,6 +1,6 @@
 // Author: Karac V. Thweatt
 
-// redcrypto.idk - Cryptography Library
+// cryptography.idk - Cryptography Library
 
 #ifndef IDEKA_STANDARD_TYPES
 #import <types.idk>;

@@ -1,0 +1,92 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+singinit heap float[6] invPow10 = [
+    1.0,
+    0.1,
+    0.01,
+    0.001,
+    0.0001,
+    0.00001
+];
+
+def parse_float_strict(byte* str, i32 length) -> float 
+{
+    i32 resultInt, i;
+    i32 sign = 1;
+    
+    if (str[0] == 45) 
+    {
+        i++;
+        sign = -1;
+    };
+
+    while (i < length & str[i] != 46) 
+    {
+        resultInt = resultInt * 10 + (str[i++] - 48);
+    };
+
+    float result = (float)resultInt;
+    
+    if (i < length & str[i] == 46)
+    {
+        i++;
+        u64 frac = 0;
+        i32 amount = 0;
+        while (i < length)
+        {
+            frac = frac * 10 + (str[i++] - 48);
+            amount += 1; 
+        };
+        result += (float)frac * invPow10[amount];
+    };
+
+    return result * (float)sign;
+};
+
+def main() -> int
+{
+    const double CPU_BASE_GHZ = 2.6;
+    const int WARMUP_ITERATIONS = 1000000000;
+    const int BENCHMARK_ITERATIONS = 1000000000;
+
+    byte[] str = [ 49, 50, 51, 46, 49, 50, 51, 52, 53];
+    i32 length = 9;
+
+    float x;
+    println("Begin..");
+    for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+        x = parse_float_strict(str, length);
+    };
+
+    i64 start = time_now();
+
+    for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+        x = parse_float_strict(str, length);
+    };
+
+    i64 end = time_now();
+
+    i64 total_cycles = end - start;
+    double cycles_per_op = (double)(total_cycles)/(double)BENCHMARK_ITERATIONS;
+    print("CPU cycles elapsed: \0");
+    print(total_cycles);
+    print("\n\0");
+
+    print("CPU cycles per operation: \0");
+    print(cycles_per_op);
+    print("\n\0");
+
+    double total_ns = (double)total_cycles /CPU_BASE_GHZ;
+    double ns_per_op = total_ns/(double)BENCHMARK_ITERATIONS;
+    print("nanoseconds elapsed: \0");
+    print(total_ns);
+    print("\n\0");
+
+    print("nanoseconds per operation: \0");
+    print(ns_per_op);
+    print("\n\0");
+
+    return 0;
+};

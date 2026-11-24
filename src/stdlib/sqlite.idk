@@ -86,6 +86,33 @@ namespace standard
             byte*[20] lv_bits;
             void*[20] lv_fp;
             byte[800] lv_name;
+            // write-ahead log: wal 1 when the file header says WAL; frames up to wnf are committed, wtf includes the open transaction
+            int wal, wnf, wtf, wcap, wbe, wckpt, wdn, wdcap;
+            u64 ws1, ws2, wc1, wc2, wk1, wk2;
+            void* wfp;
+            int* widx;
+            int* wdpg;
+            int* wdh;
+            byte* wdbuf;
+            byte[330] wpath;
+            // locking: lk 0 none, 1 shared, 2 reserved, 3 pending, 4 exclusive. rdepth counts statements reading; busy is set when a lock was refused
+            int lk, rdepth, busy, busy_ms, lkx, chg, spill, stale;
+            long wsz;
+            // attached databases: natt entries of att/attn(32 bytes each); attm marks a private temporary file
+            int natt;
+            void* home;
+            void*[10] att;
+            byte[320] attn;
+            int[10] attm;
+            // pages freed into a trunk after being changed in this transaction keep their old bytes in the file (SQLite's
+            // sqlite3PagerDontWrite); the changed copy is held here for as long as the page may be read again
+            int dwn;
+            int[16] dwpg;
+            byte* dwbuf;
+            // leaf pages freed in this transaction (SQLite's pHasContent): their content is kept when they are allocated again
+            int hcn;
+            int hccap;
+            int* hcpg;
             SQ_SCHEMA_ENT[512] schema;
         };
 
@@ -97,10 +124,138 @@ namespace standard
             int[20] pg;
             int[20] ci;
             byte* payload;
-            int pcap, plen, ncols;
+            int pcap, plen, ncols, wor, wseq;
             int[128] ctype;
             int[128] coff;
             int[128] clen;
+            byte*[128] cptr;
+            byte* ubuf;
+            int ucap;
+        };
+
+        // ================================================================
+        // Text encodings. The engine works on UTF-8; a database whose header says UTF-16 stores its text as UTF-16, so text is
+        // converted when records are read and written. SQ_ENC is 1 (UTF-8), 2 (UTF-16le) or 3 (UTF-16be) and follows the
+        // database that was opened last.
+        // ================================================================
+
+        global int SQ_ENC = 1;
+
+        // next code point of a UTF-8 string, *pos advances. Malformed bytes give U+FFFD.
+        def sq_u8_next(byte* s, int n, int* pos) -> int
+        {
+            int i, c, need, k, r;
+            i = *pos;
+            c = (int)s[i];
+            if (c < 128) { *pos = i + 1; return c; };
+            need = 0;
+            r = 65533;
+            if (c >= 194 & c < 224) { need = 1; r = c `& 31; };
+            if (c >= 224 & c < 240) { need = 2; r = c `& 15; };
+            if (c >= 240 & c < 245) { need = 3; r = c `& 7; };
+            if (need == 0) { *pos = i + 1; return 65533; };
+            if (i + need >= n) { *pos = n; return 65533; };
+            for (k = 1; k <= need; k++)
+            {
+                if (((int)s[i + k] `& 192) != 128) { *pos = i + k; return 65533; };
+                r = (r << 6) | ((int)s[i + k] `& 63);
+            };
+            *pos = i + need + 1;
+            return r;
+        };
+
+        // next code point of UTF-16 text in the database encoding
+        def sq_u16_next(byte* s, int n, int* pos) -> int
+        {
+            int i, c, d;
+            i = *pos;
+            if (i + 1 >= n) { *pos = n; return 65533; };
+            if (SQ_ENC == 3) { c = ((int)s[i] << 8) | (int)s[i + 1]; } else { c = ((int)s[i + 1] << 8) | (int)s[i]; };
+            i = i + 2;
+            if (c >= 55296 & c < 56320)
+            {
+                if (i + 1 < n)
+                {
+                    if (SQ_ENC == 3) { d = ((int)s[i] << 8) | (int)s[i + 1]; } else { d = ((int)s[i + 1] << 8) | (int)s[i]; };
+                    if (d >= 56320 & d < 57344)
+                    {
+                        *pos = i + 2;
+                        return 65536 + ((c - 55296) << 10) + (d - 56320);
+                    };
+                };
+                *pos = i;
+                return 65533;
+            };
+            if (c >= 56320 & c < 57344) { *pos = i; return 65533; };
+            *pos = i;
+            return c;
+        };
+
+        def sq_put_u16(byte* out, int c) -> void
+        {
+            if (SQ_ENC == 3) { out[0] = (byte)((c >> 8) `& 255); out[1] = (byte)(c `& 255); }
+            else { out[0] = (byte)(c `& 255); out[1] = (byte)((c >> 8) `& 255); };
+        };
+
+        // UTF-8 text to UTF-16 in the database encoding. With out null only the byte length is returned.
+        def sq_u8_to_u16(byte* s, int n, byte* out) -> int
+        {
+            int pos, c, o;
+            pos = 0; o = 0;
+            while (pos < n)
+            {
+                c = sq_u8_next(s, n, @pos);
+                if (c >= 65536)
+                {
+                    c = c - 65536;
+                    if ((u64)out != (u64)0) { sq_put_u16(@out[o], 55296 + (c >> 10)); sq_put_u16(@out[o + 2], 56320 + (c `& 1023)); };
+                    o = o + 4;
+                }
+                else
+                {
+                    if ((u64)out != (u64)0) { sq_put_u16(@out[o], c); };
+                    o = o + 2;
+                };
+            };
+            return o;
+        };
+
+        // UTF-16 text in the database encoding to UTF-8. With out null only the byte length is returned.
+        def sq_u16_to_u8(byte* s, int n, byte* out) -> int
+        {
+            int pos, c, o;
+            pos = 0; o = 0;
+            while (pos < n)
+            {
+                c = sq_u16_next(s, n, @pos);
+                if (c < 128)
+                {
+                    if ((u64)out != (u64)0) { out[o] = (byte)c; };
+                    o = o + 1;
+                }
+                else
+                {
+                    if (c < 2048)
+                    {
+                        if ((u64)out != (u64)0) { out[o] = (byte)(192 | (c >> 6)); out[o + 1] = (byte)(128 | (c `& 63)); };
+                        o = o + 2;
+                    }
+                    else
+                    {
+                        if (c < 65536)
+                        {
+                            if ((u64)out != (u64)0) { out[o] = (byte)(224 | (c >> 12)); out[o + 1] = (byte)(128 | ((c >> 6) `& 63)); out[o + 2] = (byte)(128 | (c `& 63)); };
+                            o = o + 3;
+                        }
+                        else
+                        {
+                            if ((u64)out != (u64)0) { out[o] = (byte)(240 | (c >> 18)); out[o + 1] = (byte)(128 | ((c >> 12) `& 63)); out[o + 2] = (byte)(128 | ((c >> 6) `& 63)); out[o + 3] = (byte)(128 | (c `& 63)); };
+                            o = o + 4;
+                        };
+                    };
+                };
+            };
+            return o;
         };
 
         // ---- big-endian helpers ----
@@ -108,6 +263,13 @@ namespace standard
         def sq_be16(byte* p) -> int
         {
             return ((int)p[0] << 8) | (int)p[1];
+        };
+
+        // copies n bytes (the ranges must not overlap)
+        def sq_memcpy(byte* d, byte* s, int n) -> void
+        {
+            int i;
+            for (i = 0; i < n; i++) { d[i] = s[i]; };
         };
 
         def sq_be32(byte* p) -> int
@@ -140,22 +302,41 @@ namespace standard
         def sq_close(SQLITE_DB* db) -> void;
         def sq_page(SQLITE_DB* db, int pgno) -> byte*;
 
+        def sq_wal_open(SQLITE_DB* db) -> int;
+        def sq_dirty_alloc(SQLITE_DB* db) -> int;
+        def sq_wal_close(SQLITE_DB* db) -> void;
+        def sq_wal_read(SQLITE_DB* db, int pgno, byte* buf) -> int;
+        def sq_wal_checkpoint(SQLITE_DB* db, int del) -> int;
+        def sq_wal_abort(SQLITE_DB* db) -> int;
+
+        def sq_unbuf(void* fp) -> void;
+
         def sq_open_mode(SQLITE_DB* db, byte* path, int rw) -> int
         {
             byte[100] hdr;
             int i, n;
             db.rw = rw;
+            db.natt = 0;
+            db.home = (void*)0;
             db.wbuf = (byte*)0;
             db.cbuf = (byte*)0;
             db.jbuf = (byte*)0;
             db.jfp = (void*)0;
             db.jbits = (byte*)0;
             db.nlv = 0;
+            db.dwn = 0;
+            db.dwbuf = (byte*)0;
+            db.hcn = 0;
+            db.hccap = 0;
+            db.hcpg = (int*)0;
             db.sp_auto = 0;
             for (i = 0; i < 20; i++) { db.lv_bits[i] = (byte*)0; db.lv_fp[i] = (void*)0; db.lv_n[i] = 0; };
             db.in_txn = 0;
             db.ex_txn = 0;
             db.dirty = 0;
+            db.wal = 0; db.wnf = 0; db.wtf = 0; db.wcap = 0; db.wdn = 0; db.wdcap = 0;
+            db.wsz = 0; db.lk = 0; db.rdepth = 0; db.busy = 0; db.busy_ms = 0; db.lkx = 0; db.chg = 0; db.spill = 0; db.stale = 0;
+            db.wfp = (void*)0; db.widx = (int*)0; db.wdpg = (int*)0; db.wdh = (int*)0; db.wdbuf = (byte*)0;
             for (i = 0; i < 316; i++)
             {
                 db.path[i] = path[i];
@@ -165,6 +346,7 @@ namespace standard
             if (rw == 1) { db.fp = fopen(path, "r+b\0"); }
             else { db.fp = fopen(path, "rb\0"); };
             if ((u64)db.fp == (u64)0) { return 1; };
+            sq_unbuf(db.fp);
             db.cache_data = (byte*)0;
             db.cache_pg = (int*)0;
             db.nschema = 0;
@@ -184,10 +366,14 @@ namespace standard
             db.ftrunk = sq_be32(@hdr[32]);
             db.fcount = sq_be32(@hdr[36]);
             db.cookie = sq_be32(@hdr[40]);
+            db.chg = sq_be32(@hdr[24]);
+            db.enc = sq_be32(@hdr[56]);
+            SQ_ENC = 1;
+            if (db.enc == 2 | db.enc == 3) { SQ_ENC = db.enc; };
             if (db.npages == 0)
             {
                 fseek(db.fp, 0, 2);
-                db.npages = ftell(db.fp) / db.page_size;
+                db.npages = (int)(ftell(db.fp) / (long)db.page_size);
             };
             db.cache_data = (byte*)fmalloc((u64)(SQ_CACHE_SLOTS * db.page_size));
             db.cache_pg = (int*)fmalloc((u64)(SQ_CACHE_SLOTS * 4));
@@ -198,6 +384,25 @@ namespace standard
                 return 4;
             };
             for (i = 0; i < SQ_CACHE_SLOTS; i++) { db.cache_pg[i] = 0; };
+            if (rw == 1) { if (sq_dirty_alloc(db) != 0) { sq_close(db); return 4; }; };
+            if (hdr[18] == (byte)2 | hdr[19] == (byte)2)
+            {
+                db.wal = 1;
+                if (sq_wal_open(db) != 0) { sq_close(db); return 4; };
+                if (db.wcap > 1)
+                {
+                    if (db.widx[1] != 0)
+                    {
+                        if (sq_wal_read(db, 1, db.cache_data) == 1)
+                        {
+                            db.enc = sq_be32(@db.cache_data[56]);
+                            db.ftrunk = sq_be32(@db.cache_data[32]);
+                            db.fcount = sq_be32(@db.cache_data[36]);
+                            db.cookie = sq_be32(@db.cache_data[40]);
+                        };
+                    };
+                };
+            };
             if (rw == 1)
             {
                 db.wbuf = (byte*)fmalloc((u64)db.page_size);
@@ -226,6 +431,7 @@ namespace standard
         {
             def !!
                 fflush(void*) -> int,
+                setvbuf(void*, byte*, int, u64) -> int,
                 remove(byte*) -> int;
         };
 
@@ -244,6 +450,35 @@ namespace standard
                 fsync(int) -> int;
         };
 #endif;
+
+#ifdef __LINUX__
+        extern
+        {
+            def !!
+                fcntl(int, int, void*) -> int,
+                usleep(int) -> int;
+        };
+#endif;
+#ifdef __WINDOWS__
+        extern
+        {
+            def !!
+                _get_osfhandle(int) -> i64,
+                LockFileEx(void*, int, int, int, int, void*) -> int,
+                UnlockFileEx(void*, int, int, int, void*) -> int,
+                Sleep(int) -> void;
+        };
+#endif;
+
+        // Files other processes may change are read without stdio buffering, or a stale buffer would hide their commits.
+        def sq_unbuf(void* fp) -> void
+        {
+#ifdef __WINDOWS__
+            setvbuf(fp, (byte*)0, 4, (u64)0);
+#else
+            setvbuf(fp, (byte*)0, 2, (u64)0);
+#endif;
+        };
 
         // Flushes stdio buffers and asks the OS to put the file on disk.
         def sq_sync_file(void* fp) -> void
@@ -286,11 +521,828 @@ namespace standard
             for (i = 0; i < SQ_CACHE_SLOTS; i++) { db.cache_pg[i] = 0; };
         };
 
+        // ================================================================
+        // File locking (the SQLite protocol: pending byte at 1GB, reserved byte after it, a 510 byte shared range after that)
+        // ================================================================
+        // Readers hold a shared lock while a statement runs. A writer takes the reserved lock at its first change, keeps its pages in
+        // memory, and needs the pending and exclusive locks only to put them into the file at commit. Other connections notice a
+        // change through the file change counter and drop their caches. POSIX locks belong to the process, so two connections to the
+        // same file inside one process do not exclude each other. On platforms with neither fcntl nor LockFileEx the calls succeed.
+
+        def sq_put32le(byte* p, int v) -> void
+        {
+            p[0] = (byte)(v `& 255);
+            p[1] = (byte)((v >> 8) `& 255);
+            p[2] = (byte)((v >> 16) `& 255);
+            p[3] = (byte)((v >> 24) `& 255);
+        };
+
+        // kind 0 read lock, 1 write lock, 2 unlock. Never waits. Returns 0 when done, 1 when another process holds a conflicting lock.
+#ifdef __LINUX__
+        def sq_lk_range(SQLITE_DB* db, int start, int len, int kind) -> int
+        {
+            byte[32] f;
+            int i;
+            for (i = 0; i < 32; i++) { f[i] = (byte)0; };
+            f[0] = (byte)kind;
+            sq_put32le(@f[8], start);
+            sq_put32le(@f[16], len);
+            if (fcntl(fileno(db.fp), 6, @f[0]) != 0) { return 1; };
+            return 0;
+        };
+#endif;
+#ifdef __WINDOWS__
+        def sq_lk_range(SQLITE_DB* db, int start, int len, int kind) -> int
+        {
+            byte[32] ov;
+            void* h;
+            int i, r, fl;
+            for (i = 0; i < 32; i++) { ov[i] = (byte)0; };
+            sq_put32le(@ov[16], start);
+            h = (void*)_get_osfhandle(_fileno(db.fp));
+            if (kind == 2) { r = UnlockFileEx(h, 0, len, 0, @ov[0]); }
+            else
+            {
+                fl = 1;
+                if (kind == 1) { fl = 3; };
+                r = LockFileEx(h, fl, 0, len, 0, @ov[0]);
+            };
+            if (r == 0) { return 1; };
+            return 0;
+        };
+#endif;
+#ifdef __MACOS__
+        def sq_lk_range(SQLITE_DB* db, int start, int len, int kind) -> int
+        {
+            return 0;
+        };
+#endif;
+
+        def sq_sleep_ms(int ms) -> void
+        {
+#ifdef __WINDOWS__
+            Sleep(ms);
+#endif;
+#ifdef __LINUX__
+            usleep(ms * 1000);
+#endif;
+        };
+
+        // shared lock: look at the pending byte first so a writer that is waiting for the readers to leave is not starved
+        def sq_lk_shared_once(SQLITE_DB* db) -> int
+        {
+            int r;
+            if (db.lk >= 1) { return 0; };
+            if (sq_lk_range(db, 1073741824, 1, 0) != 0) { return 1; };
+            r = sq_lk_range(db, 1073741826, 510, 0);
+            sq_lk_range(db, 1073741824, 1, 2);
+            if (r != 0) { return 1; };
+            db.lk = 1;
+            return 0;
+        };
+
+        def sq_lk_reserved_once(SQLITE_DB* db) -> int
+        {
+            if (db.lk >= 2) { return 0; };
+            if (db.lk < 1) { return 1; };
+            if (sq_lk_range(db, 1073741825, 1, 1) != 0) { return 1; };
+            db.lk = 2;
+            return 0;
+        };
+
+        // pending and exclusive: no reader may be left. On failure the shared and reserved locks are kept.
+        def sq_lk_exclusive_once(SQLITE_DB* db) -> int
+        {
+            if (db.lk >= 4) { return 0; };
+            if (db.lk < 1) { return 1; };
+            if (sq_lk_range(db, 1073741824, 1, 1) != 0) { return 1; };
+#ifdef __WINDOWS__
+            sq_lk_range(db, 1073741826, 510, 2);
+#endif;
+            if (sq_lk_range(db, 1073741826, 510, 1) != 0)
+            {
+                sq_lk_range(db, 1073741824, 1, 2);
+#ifdef __WINDOWS__
+                sq_lk_range(db, 1073741826, 510, 0);
+#endif;
+                return 1;
+            };
+            db.lk = 4;
+            return 0;
+        };
+
+        // lowers the lock to level 0 or 1 (keeps nothing above)
+        def sq_lk_drop(SQLITE_DB* db, int to) -> void
+        {
+            if (db.lk == 0) { return; };
+            if (db.lk >= 4)
+            {
+#ifdef __WINDOWS__
+                sq_lk_range(db, 1073741826, 510, 2);
+#endif;
+                sq_lk_range(db, 1073741826, 510, 0);
+            };
+            if (db.lk >= 2)
+            {
+                sq_lk_range(db, 1073741824, 1, 2);
+                sq_lk_range(db, 1073741825, 1, 2);
+            };
+            db.lk = 1;
+            if (to == 0)
+            {
+                sq_lk_range(db, 1073741826, 510, 2);
+                db.lk = 0;
+            };
+        };
+
+        // runs one of the *_once functions again until it works or busy_timeout (milliseconds) is used up
+        def sq_lk_wait(SQLITE_DB* db, int what) -> int
+        {
+            int t, r;
+            t = 0;
+            while (true)
+            {
+                if (what == 1) { r = sq_lk_shared_once(db); }
+                else { if (what == 2) { r = sq_lk_reserved_once(db); } else { r = sq_lk_exclusive_once(db); }; };
+                if (r == 0) { return 0; };
+                if (t >= db.busy_ms) { db.busy = 1; return 1; };
+                sq_sleep_ms(1);
+                t++;
+            };
+            return 1;
+        };
+
+        def sq_journal_exists(SQLITE_DB* db) -> int
+        {
+            byte[330] jp;
+            byte* suf = "-journal\0";
+            void* f;
+            int n, i;
+            n = 0;
+            while (db.path[n] != (byte)0 & n < 316) { jp[n] = db.path[n]; n++; };
+            for (i = 0; i < 9; i++) { jp[n + i] = suf[i]; };
+            f = fopen(@jp[0], "rb\0");
+            if ((u64)f == (u64)0) { return 0; };
+            fclose(f);
+            return 1;
+        };
+
+        def sq_recover_db(SQLITE_DB* db) -> int;
+        def sq_reload_header(SQLITE_DB* db) -> void;
+        def sq_wal_refresh(SQLITE_DB* db) -> int;
+        def sq_schema_load(SQLITE_DB* db) -> int;
+
+        // A journal that nobody is writing is hot: a writer died before it finished. Roll it back while holding every lock.
+        def sq_hot_recover(SQLITE_DB* db) -> int
+        {
+            int had;
+            if (db.rw == 0 | db.wal == 1) { return 0; };
+            if (sq_journal_exists(db) == 0) { return 0; };
+            had = db.lk;
+            if (db.lk < 1) { if (sq_lk_wait(db, 1) != 0) { return 1; }; };
+            if (sq_lk_range(db, 1073741825, 1, 1) != 0)
+            {
+                // somebody is writing right now: the journal is theirs
+                if (had == 0) { sq_lk_drop(db, 0); };
+                return 0;
+            };
+            sq_lk_range(db, 1073741825, 1, 2);
+            db.lk = 1;
+            if (sq_lk_wait(db, 2) != 0) { if (had == 0) { sq_lk_drop(db, 0); }; return 1; };
+            if (sq_lk_wait(db, 3) != 0)
+            {
+                sq_lk_drop(db, 1);
+                if (had == 0) { sq_lk_drop(db, 0); };
+                return 1;
+            };
+            if (sq_recover_db(db) == 1) { sq_cache_clear(db); sq_reload_header(db); db.stale = 1; };
+            sq_lk_drop(db, 1);
+            if (had == 0) { sq_lk_drop(db, 0); };
+            return 0;
+        };
+
+        // takes the shared lock for a read or the start of a transaction, and notices changes made by other connections
+        def sq_lk_acquire(SQLITE_DB* db) -> int
+        {
+            byte[4] c4;
+            int c, got;
+            if (db.lk >= 1) { return 0; };
+            if (sq_lk_wait(db, 1) != 0) { return 1; };
+            if (sq_hot_recover(db) != 0) { sq_lk_drop(db, 0); return 1; };
+            if (db.wal == 1)
+            {
+                if (sq_wal_refresh(db) == 1) { sq_lk_drop(db, 0); return 1; };
+            };
+            got = 0;
+            if (db.wal == 1 & db.wcap > 1)
+            {
+                if (db.widx[1] != 0 & (u64)db.wfp != (u64)0)
+                {
+                    fseek(db.wfp, (long)32 + (long)(db.widx[1] - 1) * (long)(24 + db.page_size) + (long)48, 0);
+                    if (fread(@c4[0], 1, 4, db.wfp) == 4) { got = 1; };
+                };
+            };
+            if (got == 0)
+            {
+                if (fseek(db.fp, 24, 0) != 0) { return 0; };
+                if (fread(@c4[0], 1, 4, db.fp) != 4) { return 0; };
+            };
+            c = sq_be32(@c4[0]);
+            if (c != db.chg)
+            {
+                db.chg = c;
+                sq_cache_clear(db);
+                sq_reload_header(db);
+                db.stale = 1;
+            };
+            return 0;
+        };
+
+        // the first change of a transaction needs the reserved lock
+        def sq_need_write(SQLITE_DB* db) -> int
+        {
+            int r;
+            if (db.lk >= 2)
+            {
+                if (db.lkx == 0 | db.wal == 1 | db.lk >= 4) { return 0; };
+            };
+            if (db.lk == 0) { if (sq_lk_acquire(db) != 0) { return 1; }; };
+            if (db.ex_txn == 1) { if (sq_lk_reserved_once(db) != 0) { db.busy = 1; return 1; }; }
+            else { if (sq_lk_wait(db, 2) != 0) { return 1; }; };
+            if (db.wal == 1)
+            {
+                r = sq_wal_refresh(db);
+                if (r == 1) { return 1; };
+                if (r == 2) { db.busy = 1; return 1; };
+            };
+            if (db.lkx == 1 & db.wal == 0) { if (sq_lk_wait(db, 3) != 0) { return 1; }; };
+            return 0;
+        };
+
+        // statement level read lock; schema is reloaded when another connection changed it
+        def sq_read_begin(SQLITE_DB* db) -> int
+        {
+            if (db.lk == 0) { if (sq_lk_acquire(db) != 0) { return 1; }; };
+            db.rdepth = db.rdepth + 1;
+            if (db.stale == 1) { db.stale = 0; sq_schema_load(db); };
+            return 0;
+        };
+
+        def sq_read_end(SQLITE_DB* db) -> void
+        {
+            if (db.rdepth > 0) { db.rdepth = db.rdepth - 1; };
+            if (db.rdepth == 0 & db.in_txn == 0 & db.lkx == 0) { sq_lk_drop(db, 0); };
+        };
+
+        // ================================================================
+        // Write-ahead log
+        // ================================================================
+        // A WAL database keeps new page images in <db>-wal until a checkpoint copies them into the database file. Committed frames
+        // are found through widx (page number to frame number). Pages written by the open transaction wait in a small table and are
+        // appended as frames when it commits (or when the table fills up). No -shm file is kept: other connections rebuild their
+        // wal-index by scanning the log.
+
+        global int SQ_WALAC = 1000;
+
+        def sq_wal_word(byte* p, int be) -> u64
+        {
+            if (be == 1) { return ((u64)p[0] << (u64)24) | ((u64)p[1] << (u64)16) | ((u64)p[2] << (u64)8) | (u64)p[3]; };
+            return ((u64)p[3] << (u64)24) | ((u64)p[2] << (u64)16) | ((u64)p[1] << (u64)8) | (u64)p[0];
+        };
+
+        def sq_wal_sum(byte* d, int n, int be, u64* s1, u64* s2) -> void
+        {
+            u64 a, b, x0, x1;
+            int i;
+            a = *s1; b = *s2;
+            i = 0;
+            while (i + 8 <= n)
+            {
+                x0 = sq_wal_word(@d[i], be);
+                x1 = sq_wal_word(@d[i + 4], be);
+                a = (a + x0 + b) `& (u64)4294967295;
+                b = (b + x1 + a) `& (u64)4294967295;
+                i = i + 8;
+            };
+            *s1 = a; *s2 = b;
+        };
+
+        def sq_wal_put(byte* p, u64 v) -> void
+        {
+            p[0] = (byte)((v >> (u64)24) `& (u64)255);
+            p[1] = (byte)((v >> (u64)16) `& (u64)255);
+            p[2] = (byte)((v >> (u64)8) `& (u64)255);
+            p[3] = (byte)(v `& (u64)255);
+        };
+
+        def sq_wal_grow(SQLITE_DB* db, int pgno) -> int
+        {
+            int ncap, i;
+            int* nx;
+            if (pgno < db.wcap) { return 0; };
+            ncap = db.wcap;
+            if (ncap < 1024) { ncap = 1024; };
+            while (ncap <= pgno) { ncap = ncap * 2; };
+            nx = (int*)fmalloc((u64)ncap * (u64)4);
+            if ((u64)nx == (u64)0) { return 1; };
+            for (i = 0; i < ncap; i++) { nx[i] = 0; };
+            if ((u64)db.widx != (u64)0)
+            {
+                for (i = 0; i < db.wcap; i++) { nx[i] = db.widx[i]; };
+                ffree((u64)db.widx);
+            };
+            db.widx = nx;
+            db.wcap = ncap;
+            return 0;
+        };
+
+        // header of a fresh log: new salts, checksum of the first 24 bytes
+        def sq_wal_hdr_write(SQLITE_DB* db) -> int
+        {
+            byte[32] h;
+            u64 a, b;
+            int i;
+            for (i = 0; i < 32; i++) { h[i] = (byte)0; };
+            if (db.wbe == 1) { sq_wal_put(@h[0], (u64)931071619); } else { sq_wal_put(@h[0], (u64)931071618); };
+            sq_wal_put(@h[4], (u64)3007000);
+            sq_wal_put(@h[8], (u64)db.page_size);
+            sq_wal_put(@h[12], (u64)db.wckpt);
+            sq_wal_put(@h[16], db.ws1);
+            sq_wal_put(@h[20], db.ws2);
+            a = (u64)0; b = (u64)0;
+            sq_wal_sum(@h[0], 24, db.wbe, @a, @b);
+            sq_wal_put(@h[24], a);
+            sq_wal_put(@h[28], b);
+            fseek(db.wfp, 0, 0);
+            if (fwrite(@h[0], 1, 32, db.wfp) != 32) { return 1; };
+            db.wc1 = a; db.wc2 = b; db.wk1 = a; db.wk2 = b;
+            return 0;
+        };
+
+        def sq_wal_next_salts(SQLITE_DB* db) -> void
+        {
+            db.ws1 = (db.ws1 + (u64)1) `& (u64)4294967295;
+            db.ws2 = (db.ws2 * (u64)1103515245 + (u64)12345) `& (u64)4294967295;
+        };
+
+        // reads the committed part of the log into widx. Returns 0 (also when the log is empty or invalid).
+        def sq_wal_scan(SQLITE_DB* db) -> int
+        {
+            byte[32] h;
+            byte[24] fh;
+            byte* pg;
+            u64 a, b, m, f1, f2, ck1, ck2, ca, cb;
+            int n, f, ps, be, lastc, i, pgno, dbs, cdb, pass, fcount;
+            db.wnf = 0; db.wtf = 0;
+            if ((u64)db.wfp == (u64)0) { return 0; };
+            fseek(db.wfp, 0, 0);
+            if (fread(@h[0], 1, 32, db.wfp) != 32) { return 0; };
+            m = sq_wal_word(@h[0], 1);
+            if (m != (u64)931071618 & m != (u64)931071619) { return 0; };
+            be = (int)(m `& (u64)1);
+            if (sq_wal_word(@h[4], 1) != (u64)3007000) { return 0; };
+            ps = (int)sq_wal_word(@h[8], 1);
+            if (ps != db.page_size) { return 0; };
+            a = (u64)0; b = (u64)0;
+            sq_wal_sum(@h[0], 24, be, @a, @b);
+            if (a != sq_wal_word(@h[24], 1) | b != sq_wal_word(@h[28], 1)) { return 0; };
+            db.wbe = be;
+            db.wckpt = (int)sq_wal_word(@h[12], 1);
+            db.ws1 = sq_wal_word(@h[16], 1);
+            db.ws2 = sq_wal_word(@h[20], 1);
+            pg = (byte*)fmalloc((u64)(ps + 8));
+            if ((u64)pg == (u64)0) { return 1; };
+            ca = a; cb = b;
+            lastc = 0; cdb = 0;
+            db.wk1 = a; db.wk2 = b;
+            f = 0;
+            while (true)
+            {
+                fseek(db.wfp, (long)32 + (long)f * (long)(24 + ps), 0);
+                if (fread(@fh[0], 1, 24, db.wfp) != 24) { break; };
+                if (fread(pg, 1, ps, db.wfp) != ps) { break; };
+                f1 = sq_wal_word(@fh[8], 1); f2 = sq_wal_word(@fh[12], 1);
+                if (f1 != db.ws1 | f2 != db.ws2) { break; };
+                sq_wal_sum(@fh[0], 8, be, @ca, @cb);
+                sq_wal_sum(pg, ps, be, @ca, @cb);
+                if (ca != sq_wal_word(@fh[16], 1) | cb != sq_wal_word(@fh[20], 1)) { break; };
+                f++;
+                dbs = (int)sq_wal_word(@fh[4], 1);
+                if (dbs != 0) { lastc = f; cdb = dbs; db.wk1 = ca; db.wk2 = cb; };
+            };
+            ffree((u64)pg);
+            if (lastc == 0) { db.wc1 = db.wk1; db.wc2 = db.wk2; return 0; };
+            // second pass: which frame holds the newest committed image of each page
+            for (f = 0; f < lastc; f++)
+            {
+                fseek(db.wfp, (long)32 + (long)f * (long)(24 + ps), 0);
+                if (fread(@fh[0], 1, 24, db.wfp) != 24) { break; };
+                pgno = (int)sq_wal_word(@fh[0], 1);
+                if (pgno < 1) { continue; };
+                if (sq_wal_grow(db, pgno) != 0) { return 1; };
+                db.widx[pgno] = f + 1;
+            };
+            db.wnf = lastc; db.wtf = lastc;
+            db.wc1 = db.wk1; db.wc2 = db.wk2;
+            db.npages = cdb;
+            return 0;
+        };
+
+        def sq_wal_path_set(SQLITE_DB* db) -> void
+        {
+            byte* suf = "-wal\0";
+            int n, i;
+            n = 0;
+            while (db.path[n] != (byte)0) { db.wpath[n] = db.path[n]; n++; };
+            for (i = 0; i < 5; i++) { db.wpath[n + i] = suf[i]; };
+        };
+
+        // opens the log of a WAL database and reads its committed frames
+        def sq_wal_open(SQLITE_DB* db) -> int
+        {
+            int n;
+            sq_wal_path_set(db);
+            db.wbe = 0;
+            db.ws1 = (u64)305419896; db.ws2 = (u64)(2271560481);
+            db.wckpt = 0;
+            if (db.rw == 1) { db.wfp = fopen(@db.wpath[0], "r+b\0"); } else { db.wfp = fopen(@db.wpath[0], "rb\0"); };
+            if ((u64)db.wfp != (u64)0) { sq_unbuf(db.wfp); };
+            n = sq_wal_scan(db);
+            db.wsz = 0;
+            if ((u64)db.wfp != (u64)0) { fseek(db.wfp, 0, 2); db.wsz = ftell(db.wfp); };
+            return n;
+        };
+
+        def sq_wal_close(SQLITE_DB* db) -> void
+        {
+            if ((u64)db.wfp != (u64)0) { fclose(db.wfp); db.wfp = (void*)0; };
+            if ((u64)db.widx != (u64)0) { ffree((u64)db.widx); db.widx = (int*)0; };
+            db.wcap = 0; db.wal = 0;
+        };
+
+        // The table of pages written by the open transaction. It is used in both journal modes: in rollback mode nothing reaches the
+        // database file before commit (or before the table overflows), so other connections can keep reading until then.
+        def sq_dirty_alloc(SQLITE_DB* db) -> int
+        {
+            int i;
+            db.wdcap = 4194304 / db.page_size;
+            if (db.wdcap > 1024) { db.wdcap = 1024; };
+            if (db.wdcap < 16) { db.wdcap = 16; };
+            db.wdpg = (int*)fmalloc((u64)db.wdcap * (u64)4);
+            db.wdh = (int*)fmalloc((u64)8192 * (u64)4);
+            db.wdbuf = (byte*)fmalloc((u64)db.wdcap * (u64)db.page_size);
+            if ((u64)db.wdpg == (u64)0 | (u64)db.wdh == (u64)0 | (u64)db.wdbuf == (u64)0) { return 1; };
+            for (i = 0; i < 8192; i++) { db.wdh[i] = 0; };
+            db.wdn = 0;
+            return 0;
+        };
+
+        def sq_dirty_free(SQLITE_DB* db) -> void
+        {
+            if ((u64)db.wdpg != (u64)0) { ffree((u64)db.wdpg); db.wdpg = (int*)0; };
+            if ((u64)db.wdh != (u64)0) { ffree((u64)db.wdh); db.wdh = (int*)0; };
+            if ((u64)db.wdbuf != (u64)0) { ffree((u64)db.wdbuf); db.wdbuf = (byte*)0; };
+        };
+
+        // makes sure the log file exists with a valid header (first write after the log was reset or never created)
+        def sq_wal_ensure(SQLITE_DB* db) -> int
+        {
+            if ((u64)db.wfp != (u64)0 & db.wtf > 0) { return 0; };
+            if ((u64)db.wfp == (u64)0)
+            {
+                db.wfp = fopen(@db.wpath[0], "w+b\0");
+                if ((u64)db.wfp == (u64)0) { return 1; };
+                sq_unbuf(db.wfp);
+                sq_wal_next_salts(db);
+                if (sq_wal_hdr_write(db) != 0) { return 1; };
+                return 0;
+            };
+            if (db.wtf == 0)
+            {
+                // an empty (or fully checkpointed) log: start a new generation
+                sq_wal_next_salts(db);
+                db.wckpt = db.wckpt + 1;
+                if (sq_wal_hdr_write(db) != 0) { return 1; };
+            };
+            return 0;
+        };
+
+        // finds the dirty slot of a page, -1 when absent
+        def sq_wal_dfind(SQLITE_DB* db, int pgno) -> int
+        {
+            int h, s;
+            if (db.wdn == 0) { return 0 - 1; };
+            h = pgno % 8192;
+            while (true)
+            {
+                s = db.wdh[h];
+                if (s == 0) { return 0 - 1; };
+                if (db.wdpg[s - 1] == pgno) { return s - 1; };
+                h = h + 1;
+                if (h >= 8192) { h = 0; };
+            };
+            return 0 - 1;
+        };
+
+        // reads the newest visible image of a page from the transaction table or the log; 1 found, 0 not in the log
+        def sq_wal_read(SQLITE_DB* db, int pgno, byte* buf) -> int
+        {
+            int s, f, i;
+            s = sq_wal_dfind(db, pgno);
+            if (s >= 0)
+            {
+                for (i = 0; i < db.page_size; i++) { buf[i] = db.wdbuf[s * db.page_size + i]; };
+                return 1;
+            };
+            if (db.wal == 0) { return 0; };
+            if (pgno >= db.wcap) { return 0; };
+            f = db.widx[pgno];
+            if (f == 0) { return 0; };
+            if ((u64)db.wfp == (u64)0) { return 0; };
+            fseek(db.wfp, (long)32 + (long)(f - 1) * (long)(24 + db.page_size) + (long)24, 0);
+            if (fread(buf, 1, db.page_size, db.wfp) != db.page_size) { return 0; };
+            return 1;
+        };
+
+        // appends one frame (dbsize != 0 marks a commit)
+        def sq_wal_append(SQLITE_DB* db, int pgno, byte* buf, int dbsize) -> int
+        {
+            byte[24] fh;
+            u64 a, b;
+            if (sq_wal_ensure(db) != 0) { return 1; };
+            sq_wal_put(@fh[0], (u64)pgno);
+            sq_wal_put(@fh[4], (u64)dbsize);
+            sq_wal_put(@fh[8], db.ws1);
+            sq_wal_put(@fh[12], db.ws2);
+            a = db.wc1; b = db.wc2;
+            sq_wal_sum(@fh[0], 8, db.wbe, @a, @b);
+            sq_wal_sum(buf, db.page_size, db.wbe, @a, @b);
+            sq_wal_put(@fh[16], a);
+            sq_wal_put(@fh[20], b);
+            fseek(db.wfp, (long)32 + (long)db.wtf * (long)(24 + db.page_size), 0);
+            if (fwrite(@fh[0], 1, 24, db.wfp) != 24) { return 1; };
+            if (fwrite(buf, 1, db.page_size, db.wfp) != db.page_size) { return 1; };
+            db.wtf = db.wtf + 1;
+            db.wc1 = a; db.wc2 = b;
+            if (sq_wal_grow(db, pgno) != 0) { return 1; };
+            db.widx[pgno] = db.wtf;
+            return 0;
+        };
+
+        def sq_wal_dclear(SQLITE_DB* db) -> void
+        {
+            int i;
+            for (i = 0; i < 8192; i++) { db.wdh[i] = 0; };
+            db.wdn = 0;
+        };
+
+        // stores a page of the open transaction; when the table is full everything goes to the log as uncommitted frames
+        def sq_spill(SQLITE_DB* db) -> int;
+
+        def sq_wal_dput(SQLITE_DB* db, int pgno, byte* buf) -> int
+        {
+            int s, h, i;
+            s = sq_wal_dfind(db, pgno);
+            if (s < 0)
+            {
+                if (db.wdn >= db.wdcap)
+                {
+                    if (db.wal == 0)
+                    {
+                        if (sq_spill(db) != 0) { return 1; };
+                        if (fseek(db.fp, (long)(pgno - 1) * (long)db.page_size, 0) != 0) { return 1; };
+                        if (fwrite(buf, 1, db.page_size, db.fp) != db.page_size) { return 1; };
+                        return 0;
+                    }
+                    else
+                    {
+                        for (i = 0; i < db.wdn; i++)
+                        {
+                            if (sq_wal_append(db, db.wdpg[i], @db.wdbuf[i * db.page_size], 0) != 0) { return 1; };
+                        };
+                        sq_wal_dclear(db);
+                    };
+                };
+                s = db.wdn;
+                db.wdn = db.wdn + 1;
+                db.wdpg[s] = pgno;
+                h = pgno % 8192;
+                while (db.wdh[h] != 0) { h = h + 1; if (h >= 8192) { h = 0; }; };
+                db.wdh[h] = s + 1;
+            };
+            for (i = 0; i < db.page_size; i++) { db.wdbuf[s * db.page_size + i] = buf[i]; };
+            return 0;
+        };
+
+        // makes the transaction durable: its pages become frames, page 1 last with the database size
+        def sq_wal_commit(SQLITE_DB* db) -> int
+        {
+            int i, s1;
+            for (i = 0; i < db.wdn; i++)
+            {
+                if (db.wdpg[i] == 1) { continue; };
+                if (sq_wal_append(db, db.wdpg[i], @db.wdbuf[i * db.page_size], 0) != 0) { return 1; };
+            };
+            s1 = sq_wal_dfind(db, 1);
+            if (s1 >= 0)
+            {
+                if (sq_wal_append(db, 1, @db.wdbuf[s1 * db.page_size], db.npages) != 0) { return 1; };
+            }
+            else
+            {
+                if (sq_wal_read(db, 1, db.jbuf) == 0)
+                {
+                    fseek(db.fp, 0, 0);
+                    if (fread(db.jbuf, 1, db.page_size, db.fp) != db.page_size) { return 1; };
+                };
+                if (sq_wal_append(db, 1, db.jbuf, db.npages) != 0) { return 1; };
+            };
+            fflush(db.wfp);
+            sq_sync_file(db.wfp);
+            fseek(db.wfp, 0, 2);
+            db.wsz = ftell(db.wfp);
+            sq_wal_dclear(db);
+            db.wnf = db.wtf;
+            db.wk1 = db.wc1; db.wk2 = db.wc2;
+            return 0;
+        };
+
+        // drops the changes of the open transaction
+        def sq_wal_abort(SQLITE_DB* db) -> int
+        {
+            int i;
+            sq_wal_dclear(db);
+            if (db.wtf == db.wnf) { return 0; };
+            // frames of the failed transaction lose their index entries; rebuild from the committed part of the log
+            for (i = 0; i < db.wcap; i++) { db.widx[i] = 0; };
+            db.wtf = 0;
+            return sq_wal_scan(db);
+        };
+
+        // copies the committed pages into the database file and starts a new log generation. Needs every other connection to be idle:
+        // returns 2 without doing anything when it cannot get the locks. With del set the log file is deleted too (last close).
+        def sq_wal_checkpoint(SQLITE_DB* db, int del) -> int
+        {
+            int pg, last, had, rc;
+            if (db.wal == 0) { return 0; };
+            if (db.in_txn == 1) { return 1; };
+            if (db.rw == 0) { return 1; };
+            had = db.lk;
+            if (db.lk < 1) { if (sq_lk_shared_once(db) != 0) { return 2; }; };
+            if (sq_lk_reserved_once(db) != 0) { if (had == 0) { sq_lk_drop(db, 0); }; return 2; };
+            if (sq_lk_exclusive_once(db) != 0) { sq_lk_drop(db, 1); if (had == 0) { sq_lk_drop(db, 0); }; return 2; };
+            rc = 0;
+            if (db.lk < 4) { rc = 1; };
+            if (rc == 0) { if (sq_wal_refresh(db) == 1) { rc = 1; }; };
+            if (rc == 0 & db.wnf > 0)
+            {
+                last = db.wcap;
+                for (pg = 1; pg < last; pg++)
+                {
+                    if (db.widx[pg] == 0) { continue; };
+                    if (pg > db.npages) { continue; };
+                    if (sq_wal_read(db, pg, db.jbuf) == 0) { rc = 1; break; };
+                    if (fseek(db.fp, (long)(pg - 1) * (long)db.page_size, 0) != 0) { rc = 1; break; };
+                    if (fwrite(db.jbuf, 1, db.page_size, db.fp) != db.page_size) { rc = 1; break; };
+                };
+                if (rc == 0)
+                {
+                    fflush(db.fp);
+                    sq_sync_file(db.fp);
+                    for (pg = 0; pg < db.wcap; pg++) { db.widx[pg] = 0; };
+                    db.wnf = 0; db.wtf = 0;
+                    sq_cache_clear(db);
+                };
+            };
+            if (rc == 0 & del == 1)
+            {
+                if ((u64)db.wfp != (u64)0) { fclose(db.wfp); db.wfp = (void*)0; };
+                remove(@db.wpath[0]);
+            };
+            sq_lk_drop(db, 1);
+            if (had == 0) { sq_lk_drop(db, 0); };
+            return rc;
+        };
+
+        // another connection may have appended to or restarted the log: read it again when the file differs from what was seen.
+        // Returns 0 unchanged, 2 reloaded, 1 on failure.
+        def sq_wal_refresh(SQLITE_DB* db) -> int
+        {
+            byte[32] h;
+            long sz;
+            int i, redo;
+            if (db.wal == 0) { return 0; };
+            redo = 0;
+            // the log may have been deleted and created again by another connection, so look the file up by name every time
+            if ((u64)db.wfp != (u64)0) { fclose(db.wfp); db.wfp = (void*)0; };
+            if (db.rw == 1) { db.wfp = fopen(@db.wpath[0], "r+b\0"); } else { db.wfp = fopen(@db.wpath[0], "rb\0"); };
+            if ((u64)db.wfp != (u64)0) { sq_unbuf(db.wfp); };
+            if ((u64)db.wfp == (u64)0)
+            {
+                if (db.wsz != 0) { redo = 1; };
+            };
+            if ((u64)db.wfp != (u64)0)
+            {
+                fseek(db.wfp, 0, 2);
+                sz = ftell(db.wfp);
+                if (sz != db.wsz) { redo = 1; }
+                else
+                {
+                    fseek(db.wfp, 0, 0);
+                    if (fread(@h[0], 1, 32, db.wfp) == 32)
+                    {
+                        if (sq_wal_word(@h[16], 1) != db.ws1 | sq_wal_word(@h[20], 1) != db.ws2) { redo = 1; };
+                    };
+                };
+            };
+            if (redo == 0) { return 0; };
+            if ((u64)db.widx != (u64)0) { for (i = 0; i < db.wcap; i++) { db.widx[i] = 0; }; };
+            db.wnf = 0; db.wtf = 0;
+            if (sq_wal_scan(db) != 0) { return 1; };
+            db.wsz = 0;
+            if ((u64)db.wfp != (u64)0) { fseek(db.wfp, 0, 2); db.wsz = ftell(db.wfp); };
+            sq_cache_clear(db);
+            sq_reload_header(db);
+            db.stale = 1;
+            return 2;
+        };
+
+        // reads the header fields the pager keeps in memory from page 1 again
+        def sq_reload_header(SQLITE_DB* db) -> void
+        {
+            byte* pg;
+            int n;
+            pg = sq_page(db, 1);
+            if ((u64)pg == (u64)0) { return; };
+            n = sq_be32(@pg[28]);
+            if (n == 0)
+            {
+                fseek(db.fp, 0, 2);
+                n = (int)(ftell(db.fp) / (long)db.page_size);
+            };
+            db.npages = n;
+            db.enc = sq_be32(@pg[56]);
+            db.ftrunk = sq_be32(@pg[32]);
+            db.fcount = sq_be32(@pg[36]);
+            db.cookie = sq_be32(@pg[40]);
+            db.chg = sq_be32(@pg[24]);
+        };
+
+        // writes every page of the table into the database file (journal first, so a crash can still be undone)
+        def sq_flush_dirty(SQLITE_DB* db) -> int
+        {
+            int i, pg;
+            if ((u64)db.jfp != (u64)0) { sq_sync_file(db.jfp); };
+            for (i = 0; i < db.wdn; i++)
+            {
+                pg = db.wdpg[i];
+                if (fseek(db.fp, (long)(pg - 1) * (long)db.page_size, 0) != 0) { return 1; };
+                if (fwrite(@db.wdbuf[i * db.page_size], 1, db.page_size, db.fp) != db.page_size) { return 1; };
+            };
+            fflush(db.fp);
+            sq_wal_dclear(db);
+            sq_cache_clear(db);
+            return 0;
+        };
+
+        // the table is full: put the pages into the file now, which needs the exclusive lock
+        def sq_spill(SQLITE_DB* db) -> int
+        {
+            if (db.wal == 1) { return 1; };
+            if (sq_lk_wait(db, 3) != 0) { return 1; };
+            if (sq_flush_dirty(db) != 0) { return 1; };
+            db.spill = 1;
+            return 0;
+        };
+
         // Writes one page straight to the file and drops it from the read cache. No journaling.
         def sq_page_write_raw(SQLITE_DB* db, int pgno, byte* buf) -> int
         {
-            int slot;
-            if (fseek(db.fp, (pgno - 1) * db.page_size, 0) != 0) { return 1; };
+            int slot, q;
+            if (db.dwn > 0)
+            {
+                for (q = 0; q < db.dwn; q++)
+                {
+                    if (db.dwpg[q] == pgno)
+                    {
+                        db.dwn--;
+                        if (q < db.dwn)
+                        {
+                            db.dwpg[q] = db.dwpg[db.dwn];
+                            sq_memcpy(@db.dwbuf[q * db.page_size], @db.dwbuf[db.dwn * db.page_size], db.page_size);
+                        };
+                        break;
+                    };
+                };
+            };
+            if (db.in_txn == 1 & (db.wal == 1 | (db.spill == 0 & (u64)db.wdpg != (u64)0)))
+            {
+                if (sq_wal_dput(db, pgno, buf) != 0) { return 1; };
+                slot = pgno % SQ_CACHE_SLOTS;
+                if (db.cache_pg[slot] == pgno) { db.cache_pg[slot] = 0; };
+                return 0;
+            };
+            if (fseek(db.fp, (long)(pgno - 1) * (long)db.page_size, 0) != 0) { return 1; };
             if (fwrite(buf, 1, db.page_size, db.fp) != db.page_size) { return 1; };
             slot = pgno % SQ_CACHE_SLOTS;
             if (db.cache_pg[slot] == pgno) { db.cache_pg[slot] = 0; };
@@ -430,10 +1482,11 @@ namespace standard
             byte* nb;
             int i;
             if (db.in_txn == 0) { return 0; };
+            if (sq_need_write(db) != 0) { return 1; };
             db.dirty = 1;
             needj = 0;
             needs = 0;
-            if (pgno <= db.txn_npages)
+            if (pgno <= db.txn_npages & db.wal == 0)
             {
                 if (sq_bit_get(db.jbits, pgno) == 0) { needj = 1; };
             };
@@ -445,8 +1498,11 @@ namespace standard
                 };
             };
             if (needj == 0 & needs == 0) { return 0; };
-            if (fseek(db.fp, (pgno - 1) * db.page_size, 0) != 0) { return 1; };
-            if (fread(db.jbuf, 1, db.page_size, db.fp) != db.page_size) { return 1; };
+            if (sq_wal_read(db, pgno, db.jbuf) == 0)
+            {
+                if (fseek(db.fp, (long)(pgno - 1) * (long)db.page_size, 0) != 0) { return 1; };
+                if (fread(db.jbuf, 1, db.page_size, db.fp) != db.page_size) { return 1; };
+            };
             if (needj == 1)
             {
                 if ((u64)db.jfp == (u64)0)
@@ -476,11 +1532,41 @@ namespace standard
             return sq_page_write_raw(db, pgno, buf);
         };
 
-        // Returns a new page number (0 on failure). The page contents are unspecified.
-        def sq_alloc_page(SQLITE_DB* db) -> int
+        def sq_hc_has(SQLITE_DB* db, int pgno) -> int
+        {
+            int q;
+            for (q = 0; q < db.hcn; q++) { if (db.hcpg[q] == pgno) { return 1; }; };
+            return 0;
+        };
+
+        def sq_hc_add(SQLITE_DB* db, int pgno) -> void
+        {
+            int* nb;
+            int q;
+            if (sq_hc_has(db, pgno) == 1) { return; };
+            if (db.hcn >= db.hccap)
+            {
+                q = db.hccap * 2 + 64;
+                nb = (int*)fmalloc((u64)q * (u64)4);
+                if ((u64)nb == (u64)0) { return; };
+                if ((u64)db.hcpg != (u64)0)
+                {
+                    sq_memcpy((byte*)nb, (byte*)db.hcpg, db.hcn * 4);
+                    ffree((u64)db.hcpg);
+                };
+                db.hcpg = nb;
+                db.hccap = q;
+            };
+            db.hcpg[db.hcn] = pgno;
+            db.hcn++;
+        };
+
+        // Returns a new page number (0 on failure). The page contents are unspecified. With nearby > 0 the free leaf
+        // closest to that page number is taken, as SQLite's allocateBtreePage does.
+        def sq_alloc_page_near(SQLITE_DB* db, int nearby) -> int
         {
             byte* page;
-            int trunk, nxt, cnt, leaf, i;
+            int trunk, nxt, cnt, leaf, i, closest, dist, d2, v;
             if (db.fcount > 0)
             {
                 trunk = db.ftrunk;
@@ -490,11 +1576,32 @@ namespace standard
                 cnt = sq_be32(@page[4]);
                 if (cnt > 0)
                 {
-                    leaf = sq_be32(@page[8 + 4 * (cnt - 1)]);
+                    closest = 0;
+                    if (nearby > 0)
+                    {
+                        v = sq_be32(@page[8]) - nearby;
+                        if (v < 0) { v = 0 - v; };
+                        dist = v;
+                        for (i = 1; i < cnt; i++)
+                        {
+                            v = sq_be32(@page[8 + 4 * i]) - nearby;
+                            if (v < 0) { v = 0 - v; };
+                            d2 = v;
+                            if (d2 < dist) { closest = i; dist = d2; };
+                        };
+                    };
+                    leaf = sq_be32(@page[8 + 4 * closest]);
                     for (i = 0; i < db.page_size; i++) { db.wbuf[i] = page[i]; };
+                    if (closest < cnt - 1) { sq_put32(@db.wbuf[8 + 4 * closest], sq_be32(@page[8 + 4 * (cnt - 1)])); };
                     sq_put32(@db.wbuf[4], cnt - 1);
                     if (sq_page_write(db, trunk, db.wbuf) != 0) { return 0; };
                     db.fcount = db.fcount - 1;
+                    // a free leaf is handed out as an empty buffer (PAGER_GET_NOCONTENT) unless it was freed in this transaction
+                    if (sq_hc_has(db, leaf) == 0)
+                    {
+                        for (i = 0; i < db.page_size; i++) { db.wbuf[i] = (byte)0; };
+                        if (sq_page_write(db, leaf, db.wbuf) != 0) { return 0; };
+                    };
                     return leaf;
                 };
                 db.ftrunk = nxt;
@@ -514,6 +1621,64 @@ namespace standard
             return db.npages;
         };
 
+        def sq_alloc_page(SQLITE_DB* db) -> int
+        {
+            return sq_alloc_page_near(db, 0);
+        };
+
+        // Reads the original image of a page from the rollback journal (0 when it is not in it).
+        def sq_jorig(SQLITE_DB* db, int pgno, byte* out) -> int
+        {
+            byte[4] t4;
+            long pos, endp;
+            int pg;
+            if ((u64)db.jfp == (u64)0) { return 0; };
+            fflush(db.jfp);
+            fseek(db.jfp, 0, 2);
+            endp = ftell(db.jfp);
+            pos = (long)512;
+            while (pos + (long)(db.page_size + 8) <= endp)
+            {
+                fseek(db.jfp, pos, 0);
+                if (fread(@t4[0], 1, 4, db.jfp) != 4) { return 0; };
+                pg = sq_be32(@t4[0]);
+                if (pg == pgno)
+                {
+                    if (fread(out, 1, db.page_size, db.jfp) != db.page_size) { return 0; };
+                    return 1;
+                };
+                pos = pos + (long)(db.page_size + 8);
+            };
+            return 0;
+        };
+
+        // A page that was changed in this transaction and is then freed as a leaf of the free list is not written: the
+        // file keeps its old image (sqlite3PagerDontWrite). Its changed image stays readable until it is written again.
+        def sq_page_dontwrite(SQLITE_DB* db, int pgno) -> int
+        {
+            byte* page;
+            int q;
+            if (db.in_txn == 0 | db.wal == 1) { return 0; };
+            if (pgno > db.txn_npages) { return 0; };
+            if ((u64)db.jbits == (u64)0) { return 0; };
+            if (sq_bit_get(db.jbits, pgno) == 0) { return 0; };
+            for (q = 0; q < db.dwn; q++) { if (db.dwpg[q] == pgno) { return 0; }; };
+            if (db.dwn >= 16) { return 0; };
+            if ((u64)db.dwbuf == (u64)0)
+            {
+                db.dwbuf = (byte*)fmalloc((u64)(db.page_size * 16));
+                if ((u64)db.dwbuf == (u64)0) { return 1; };
+            };
+            page = sq_page(db, pgno);
+            if ((u64)page == (u64)0) { return 1; };
+            sq_memcpy(@db.dwbuf[db.dwn * db.page_size], page, db.page_size);
+            if (sq_jorig(db, pgno, db.wbuf) == 0) { return 1; };
+            if (sq_page_write_raw(db, pgno, db.wbuf) != 0) { return 1; };
+            db.dwpg[db.dwn] = pgno;
+            db.dwn++;
+            return 0;
+        };
+
         def sq_free_page(SQLITE_DB* db, int pgno) -> int
         {
             byte* page;
@@ -523,7 +1688,7 @@ namespace standard
                 page = sq_page(db, db.ftrunk);
                 if ((u64)page == (u64)0) { return 1; };
                 cnt = sq_be32(@page[4]);
-                cap = (db.usable / 4) - 2;
+                cap = (db.usable / 4) - 8;
                 if (cnt < cap)
                 {
                     for (i = 0; i < db.page_size; i++) { db.wbuf[i] = page[i]; };
@@ -531,11 +1696,18 @@ namespace standard
                     sq_put32(@db.wbuf[4], cnt + 1);
                     if (sq_page_write(db, db.ftrunk, db.wbuf) != 0) { return 1; };
                     db.fcount = db.fcount + 1;
+                    if (sq_page_dontwrite(db, pgno) != 0) { return 1; };
+                    sq_hc_add(db, pgno);
                     return 0;
                 };
             };
-            for (i = 0; i < db.page_size; i++) { db.wbuf[i] = (byte)0; };
+            // the freed page becomes the new trunk: only its first eight bytes change
+            page = sq_page(db, pgno);
+            if ((u64)page == (u64)0) { return 1; };
+            for (i = 0; i < db.page_size; i++) { db.wbuf[i] = page[i]; };
+            sq_put32(@db.wbuf[0], 0);
             if (db.fcount > 0) { sq_put32(@db.wbuf[0], db.ftrunk); };
+            sq_put32(@db.wbuf[4], 0);
             if (sq_page_write(db, pgno, db.wbuf) != 0) { return 1; };
             db.ftrunk = pgno;
             db.fcount = db.fcount + 1;
@@ -565,8 +1737,30 @@ namespace standard
 
         def sq_txn_begin(SQLITE_DB* db, int is_explicit) -> int
         {
-            int n, i;
+            int n, i, t;
             if (db.in_txn == 1) { return 1; };
+            if (is_explicit == 1)
+            {
+                if (sq_lk_acquire(db) != 0) { return 1; };
+            }
+            else
+            {
+                // a statement that writes takes the reserved lock when it starts. While waiting it must not hold the shared lock,
+                // or the writer it is waiting for could never finish.
+                t = 0;
+                while (true)
+                {
+                    if (sq_lk_acquire(db) != 0) { return 1; };
+                    if (sq_lk_reserved_once(db) == 0) { break; };
+                    if (t >= db.busy_ms) { db.busy = 1; return 1; };
+                    sq_lk_drop(db, 0);
+                    sq_sleep_ms(1);
+                    t++;
+                };
+                if (db.wal == 1) { sq_wal_refresh(db); };
+                if (db.lkx == 1 & db.wal == 0) { if (sq_lk_wait(db, 3) != 0) { return 1; }; };
+                if (db.stale == 1) { db.stale = 0; sq_schema_load(db); };
+            };
             n = db.npages / 8 + 2;
             db.jbits = (byte*)fmalloc((u64)n);
             if ((u64)db.jbits == (u64)0) { return 1; };
@@ -592,9 +1786,17 @@ namespace standard
             };
             if ((u64)db.jbits != (u64)0) { ffree((u64)db.jbits); db.jbits = (byte*)0; };
             sq_lv_free_all(db);
+            db.dwn = 0;
+            db.hcn = 0;
             db.in_txn = 0;
             db.ex_txn = 0;
             db.dirty = 0;
+            db.spill = 0;
+            if ((u64)db.wdpg != (u64)0 & db.wal == 0) { sq_wal_dclear(db); };
+            if (db.lkx == 0)
+            {
+                if (db.rdepth == 0) { sq_lk_drop(db, 0); } else { sq_lk_drop(db, 1); };
+            };
         };
 
         def sq_txn_commit(SQLITE_DB* db) -> int
@@ -602,11 +1804,25 @@ namespace standard
             if (db.in_txn == 0) { return 1; };
             if (db.dirty == 1)
             {
+                // the exclusive lock first: if a reader is still active the transaction stays open and COMMIT can be tried again
+                if (db.wal == 0) { if (sq_lk_wait(db, 3) != 0) { return 1; }; };
                 if (sq_sync_header(db) != 0) { return 1; };
-                if ((u64)db.jfp != (u64)0) { sq_sync_file(db.jfp); };
-                sq_sync_file(db.fp);
+                if (db.wal == 1)
+                {
+                    if (sq_wal_commit(db) != 0) { return 1; };
+                }
+                else
+                {
+                    if (sq_flush_dirty(db) != 0) { return 1; };
+                    sq_sync_file(db.fp);
+                };
+                db.chg = sq_be32(@db.wbuf[24]);
             };
             sq_txn_end(db);
+            if (db.wal == 1 & db.dirty == 0)
+            {
+                if (SQ_WALAC > 0 & db.wnf >= SQ_WALAC) { sq_wal_checkpoint(db, 0); };
+            };
             return 0;
         };
 
@@ -616,7 +1832,7 @@ namespace standard
             int pg, bad;
             if (db.in_txn == 0) { return 1; };
             bad = 0;
-            if ((u64)db.jfp != (u64)0)
+            if ((u64)db.jfp != (u64)0 & db.spill == 1)
             {
                 fflush(db.jfp);
                 fseek(db.jfp, 512, 0);
@@ -628,6 +1844,7 @@ namespace standard
                     if (pg >= 1) { if (sq_page_write_raw(db, pg, db.jbuf) != 0) { bad = 1; }; };
                 };
             };
+            if (db.wal == 1) { if (sq_wal_abort(db) != 0) { bad = 1; }; };
             db.npages = db.txn_npages;
             db.ftrunk = db.t_ftrunk;
             db.fcount = db.t_fcount;
@@ -636,6 +1853,59 @@ namespace standard
             fflush(db.fp);
             sq_txn_end(db);
             return bad;
+        };
+
+
+        // Switches between rollback-journal and WAL mode by rewriting the file format bytes of the header. Returns 0 on success.
+        def sq_set_journal_mode(SQLITE_DB* db, int towal) -> int
+        {
+            byte* pg;
+            int i;
+            if (db.rw == 0 | db.in_txn == 1) { return 1; };
+            if (towal == 1 & db.wal == 1) { return 0; };
+            if (towal == 0 & db.wal == 0) { return 0; };
+            if (towal == 0)
+            {
+                if (sq_wal_checkpoint(db, 1) != 0) { return 1; };
+                sq_wal_close(db);
+            };
+            if (sq_txn_begin(db, 0) != 0) { return 1; };
+            pg = sq_page(db, 1);
+            if ((u64)pg == (u64)0) { sq_txn_rollback(db); return 1; };
+            if (sq_before_write(db, 1) != 0) { sq_txn_rollback(db); return 1; };
+            for (i = 0; i < db.page_size; i++) { db.wbuf[i] = pg[i]; };
+            if (towal == 1) { db.wbuf[18] = (byte)2; db.wbuf[19] = (byte)2; } else { db.wbuf[18] = (byte)1; db.wbuf[19] = (byte)1; };
+            if (sq_page_write(db, 1, db.wbuf) != 0) { sq_txn_rollback(db); return 1; };
+            if (sq_txn_commit(db) != 0) { return 1; };
+            if (towal == 1)
+            {
+                sq_wal_path_set(db);
+                remove(@db.wpath[0]);
+                db.wal = 1;
+                if (sq_wal_open(db) != 0) { return 1; };
+                sq_cache_clear(db);
+            };
+            return 0;
+        };
+
+        // Sets the text encoding of a database that has no tables yet (1 UTF-8, 2 UTF-16le, 3 UTF-16be). Returns 0 when applied.
+        def sq_set_encoding(SQLITE_DB* db, int enc) -> int
+        {
+            byte* pg;
+            int i;
+            if (db.rw == 0 | db.in_txn == 1 | db.npages > 1 | db.nschema > 0) { return 1; };
+            if (sq_txn_begin(db, 0) != 0) { return 1; };
+            pg = sq_page(db, 1);
+            if ((u64)pg == (u64)0) { sq_txn_rollback(db); return 1; };
+            if (sq_before_write(db, 1) != 0) { sq_txn_rollback(db); return 1; };
+            for (i = 0; i < db.page_size; i++) { db.wbuf[i] = pg[i]; };
+            sq_put32(@db.wbuf[56], enc);
+            if (sq_page_write(db, 1, db.wbuf) != 0) { sq_txn_rollback(db); return 1; };
+            if (sq_txn_commit(db) != 0) { return 1; };
+            db.enc = enc;
+            SQ_ENC = 1;
+            if (enc == 2 | enc == 3) { SQ_ENC = enc; };
+            return 0;
         };
 
         // Statement-level undo inside an explicit transaction.
@@ -718,8 +1988,9 @@ namespace standard
         };
 
         // Replays a hot journal left by a crashed writer. Returns 1 when a journal was applied.
-        def sq_recover(byte* path) -> int
+        def sq_recover_db(SQLITE_DB* db) -> int
         {
+            byte* path = @db.path[0];
             byte[330] jp;
             byte[32] h;
             byte[4] t4;
@@ -727,7 +1998,8 @@ namespace standard
             byte* suf = "-journal\0";
             void* jf;
             void* df;
-            int i, n, sz, ps, nrec, nonce, sector, r, pg, ck, ok, applied, j;
+            long sz;
+            int i, n, ps, nrec, nonce, sector, r, pg, ck, ok, applied, j;
             n = 0;
             while (path[n] != (byte)0 & n < 316) { jp[n] = path[n]; n++; };
             for (i = 0; i < 9; i++) { jp[n + i] = suf[i]; };
@@ -748,20 +2020,19 @@ namespace standard
             nonce = sq_be32(@h[12]);
             sector = sq_be32(@h[20]);
             if (sector < 512) { sector = 512; };
-            if (nrec == 0 - 1) { nrec = (sz - sector) / (ps + 8); };
+            if (nrec == 0 - 1) { nrec = (int)((sz - (long)sector) / (long)(ps + 8)); };
             buf = (byte*)fmalloc((u64)(ps + 8));
-            df = fopen(path, "r+b\0");
+            df = db.fp;
             if ((u64)buf == (u64)0 | (u64)df == (u64)0)
             {
                 if ((u64)buf != (u64)0) { ffree((u64)buf); };
-                if ((u64)df != (u64)0) { fclose(df); };
                 fclose(jf);
                 return 0;
             };
             applied = 0;
             for (r = 0; r < nrec; r++)
             {
-                fseek(jf, sector + r * (ps + 8), 0);
+                fseek(jf, (long)sector + (long)r * (long)(ps + 8), 0);
                 if (fread(@t4[0], 1, 4, jf) != 4) { break; };
                 pg = sq_be32(@t4[0]);
                 if (fread(buf, 1, ps, jf) != ps) { break; };
@@ -771,13 +2042,12 @@ namespace standard
                 while (j > 0) { ck = ck + (int)buf[j]; j = j - 200; };
                 if (ck != sq_be32(@t4[0])) { break; };
                 if (pg < 1) { break; };
-                fseek(df, (pg - 1) * ps, 0);
+                fseek(df, (long)(pg - 1) * (long)ps, 0);
                 fwrite(buf, 1, ps, df);
                 applied = 1;
             };
             fflush(df);
             sq_sync_file(df);
-            fclose(df);
             fclose(jf);
             ffree((u64)buf);
             remove(@jp[0]);
@@ -821,6 +2091,7 @@ namespace standard
         // Opens a database for reading and writing. A hot journal from a crashed writer is rolled back first.
         def sq_open_rw(SQLITE_DB* db, byte* path, int create) -> int
         {
+            int rc;
             void* f = fopen(path, "rb\0");
             if ((u64)f == (u64)0)
             {
@@ -830,9 +2101,11 @@ namespace standard
             else
             {
                 fclose(f);
-                sq_recover(path);
             };
-            return sq_open_mode(db, path, 1);
+            rc = sq_open_mode(db, path, 1);
+            if (rc != 0) { return rc; };
+            if (sq_hot_recover(db) != 0) { sq_close(db); return 5; };
+            return 0;
         };
 
         def sq_schema_free(SQLITE_DB* db) -> void
@@ -847,12 +2120,31 @@ namespace standard
 
         def sq_close(SQLITE_DB* db) -> void
         {
+            int ai;
+            for (ai = 0; ai < db.natt; ai++)
+            {
+                if ((u64)db.att[ai] != (u64)0)
+                {
+                    sq_close((SQLITE_DB*)db.att[ai]);
+                    if (db.attm[ai] == 1) { remove(@((SQLITE_DB*)db.att[ai]).path[0]); };
+                    ffree((u64)db.att[ai]);
+                    db.att[ai] = (void*)0;
+                };
+            };
+            db.natt = 0;
             if (db.rw == 1)
             {
                 if (db.in_txn == 1) { sq_txn_rollback(db); };
             };
             sq_schema_free(db);
+            if (db.wal == 1)
+            {
+                if (db.rw == 1 & db.in_txn == 0) { sq_wal_checkpoint(db, 1); };
+                sq_wal_close(db);
+            };
+            sq_lk_drop(db, 0);
             if ((u64)db.fp != (u64)0) { fclose(db.fp); db.fp = (void*)0; };
+            sq_dirty_free(db);
             if ((u64)db.cache_data != (u64)0) { ffree((u64)db.cache_data); db.cache_data = (byte*)0; };
             if ((u64)db.cache_pg != (u64)0) { ffree((u64)db.cache_pg); db.cache_pg = (int*)0; };
             if ((u64)db.wbuf != (u64)0) { ffree((u64)db.wbuf); db.wbuf = (byte*)0; };
@@ -868,10 +2160,18 @@ namespace standard
             int slot, n;
             byte* buf;
             if (pgno < 1 | pgno > db.npages) { return (byte*)0; };
+            if (db.dwn > 0)
+            {
+                for (n = 0; n < db.dwn; n++) { if (db.dwpg[n] == pgno) { return @db.dwbuf[n * db.page_size]; }; };
+            };
             slot = pgno % SQ_CACHE_SLOTS;
             buf = @db.cache_data[slot * db.page_size];
             if (db.cache_pg[slot] == pgno) { return buf; };
-            if (fseek(db.fp, (pgno - 1) * db.page_size, 0) != 0) { return (byte*)0; };
+            if (db.wal == 1 | db.wdn > 0)
+            {
+                if (sq_wal_read(db, pgno, buf) == 1) { db.cache_pg[slot] = pgno; return buf; };
+            };
+            if (fseek(db.fp, (long)(pgno - 1) * (long)db.page_size, 0) != 0) { return (byte*)0; };
             n = fread(buf, 1, db.page_size, db.fp);
             if (n != db.page_size) { return (byte*)0; };
             db.cache_pg[slot] = pgno;
@@ -900,6 +2200,35 @@ namespace standard
             if (st < (u64)12) { return SQ_INTEGER; };
             if (((int)st & 1) == 0) { return SQ_BLOB; };
             return SQ_TEXT;
+        };
+
+        // UTF-16 database: text columns of the loaded row are converted to UTF-8 into the cursor's own buffer
+        def sq_cur_utf8(SQ_CURSOR* cur) -> int
+        {
+            int i, need, o, n;
+            byte* nb;
+            need = 16;
+            for (i = 0; i < cur.ncols; i++) { if (cur.ctype[i] == SQ_TEXT) { need = need + cur.clen[i] * 3 / 2 + 4; }; };
+            if (need > cur.ucap)
+            {
+                nb = (byte*)fmalloc((u64)need);
+                if ((u64)nb == (u64)0) { return 1; };
+                if ((u64)cur.ubuf != (u64)0) { ffree((u64)cur.ubuf); };
+                cur.ubuf = nb;
+                cur.ucap = need;
+            };
+            o = 0;
+            for (i = 0; i < cur.ncols; i++)
+            {
+                if (cur.ctype[i] == SQ_TEXT)
+                {
+                    n = sq_u16_to_u8(@cur.payload[cur.coff[i]], cur.clen[i], @cur.ubuf[o]);
+                    cur.cptr[i] = @cur.ubuf[o];
+                    cur.clen[i] = n;
+                    o = o + n + 1;
+                };
+            };
+            return 0;
         };
 
         // Parses cur.payload (cur.plen bytes) into the column arrays.
@@ -935,6 +2264,7 @@ namespace standard
             };
             if (off > cur.plen) { return 0 - 1; };
             cur.ncols = col;
+            if (SQ_ENC != 1) { if (sq_cur_utf8(cur) != 0) { return 0 - 1; }; };
             return 0;
         };
 
@@ -960,6 +2290,8 @@ namespace standard
 
         // ---- table b-tree cursor ----
 
+        def sq_hdr_off(int pgno) -> int;
+
         def sq_cur_open(SQ_CURSOR* cur, SQLITE_DB* db, int root) -> void
         {
             cur.db = db;
@@ -968,14 +2300,29 @@ namespace standard
             cur.valid = 0;
             cur.rowid = (i64)0;
             cur.payload = (byte*)0;
+            cur.ubuf = (byte*)0;
+            cur.ucap = 0;
             cur.pcap = 0;
             cur.plen = 0;
             cur.ncols = 0;
+            cur.wor = 0;
+            cur.wseq = 0;
+            // a WITHOUT ROWID table is an index b-tree (page types 2 and 10)
+            {
+                byte* rp = sq_page(db, root);
+                if ((u64)rp != (u64)0)
+                {
+                    int rt = (int)rp[sq_hdr_off(root)];
+                    if (rt == 2 | rt == 10) { cur.wor = 1; };
+                };
+            };
         };
 
         def sq_cur_close(SQ_CURSOR* cur) -> void
         {
             if ((u64)cur.payload != (u64)0) { ffree((u64)cur.payload); cur.payload = (byte*)0; };
+            if ((u64)cur.ubuf != (u64)0) { ffree((u64)cur.ubuf); cur.ubuf = (byte*)0; };
+            cur.ucap = 0;
             cur.pcap = 0;
             cur.valid = 0;
         };
@@ -1038,6 +2385,130 @@ namespace standard
             return sq_parse_record(cur);
         };
 
+        // Loads cell ci of an index b-tree page (leaf type 10 or interior type 2) of a WITHOUT ROWID table into the payload.
+        def sq_wload(SQ_CURSOR* cur, int pgno, int ci) -> int
+        {
+            SQLITE_DB* db = cur.db;
+            byte* page = sq_page(db, pgno);
+            u64 psz;
+            int ho, t, hsz, cp, n, total, lcl, U, X, M, K, copied, ovf, chunk, i;
+            if ((u64)page == (u64)0) { return 0 - 1; };
+            ho = sq_hdr_off(pgno);
+            t = (int)page[ho];
+            hsz = 8;
+            if (t == 2) { hsz = 12; };
+            cp = sq_be16(@page[ho + hsz + ci * 2]);
+            if (cp >= db.page_size) { return 0 - 1; };
+            if (t == 2) { cp = cp + 4; };
+            n = sq_varint(@page[cp], @psz);
+            cp = cp + n;
+            total = (int)psz;
+            U = db.usable;
+            X = ((U - 12) * 64 / 255) - 23;
+            if (total <= X) { lcl = total; }
+            else
+            {
+                M = ((U - 12) * 32 / 255) - 23;
+                K = M + ((total - M) % (U - 4));
+                if (K <= X) { lcl = K; } else { lcl = M; };
+            };
+            if (sq_payload_reserve(cur, total + 8) != 0) { return 0 - 1; };
+            if (cp + lcl > db.page_size) { return 0 - 1; };
+            for (i = 0; i < lcl; i++) { cur.payload[i] = page[cp + i]; };
+            copied = lcl;
+            if (lcl < total)
+            {
+                ovf = sq_be32(@page[cp + lcl]);
+                while (copied < total & ovf != 0)
+                {
+                    byte* op = sq_page(db, ovf);
+                    if ((u64)op == (u64)0) { return 0 - 1; };
+                    chunk = total - copied;
+                    if (chunk > U - 4) { chunk = U - 4; };
+                    for (i = 0; i < chunk; i++) { cur.payload[copied + i] = op[4 + i]; };
+                    copied = copied + chunk;
+                    ovf = sq_be32(op);
+                };
+                if (copied < total) { return 0 - 1; };
+            };
+            cur.plen = total;
+            cur.wseq = cur.wseq + 1;
+            cur.rowid = (i64)cur.wseq;
+            return sq_parse_record(cur);
+        };
+
+        // pops finished levels and loads the next entry in order; 1 entry, 0 end, -1 error
+        def sq_wsettle(SQ_CURSOR* cur) -> int
+        {
+            SQLITE_DB* db = cur.db;
+            byte* page;
+            int d, pgno, ho, nc, ci;
+            while (cur.depth > 0)
+            {
+                d = cur.depth - 1;
+                pgno = cur.pg[d];
+                page = sq_page(db, pgno);
+                if ((u64)page == (u64)0) { return 0 - 1; };
+                ho = sq_hdr_off(pgno);
+                nc = sq_be16(@page[ho + 3]);
+                ci = cur.ci[d];
+                if (ci < nc)
+                {
+                    if (sq_wload(cur, pgno, ci) != 0) { return 0 - 1; };
+                    cur.valid = 1;
+                    return 1;
+                };
+                cur.depth = d;
+            };
+            cur.valid = 0;
+            return 0;
+        };
+
+        def sq_wdescend(SQ_CURSOR* cur, int pgno) -> int
+        {
+            SQLITE_DB* db = cur.db;
+            byte* page;
+            int ho, t, nc, d;
+            while (true)
+            {
+                if (cur.depth >= SQ_MAX_DEPTH) { return 0 - 1; };
+                page = sq_page(db, pgno);
+                if ((u64)page == (u64)0) { return 0 - 1; };
+                ho = sq_hdr_off(pgno);
+                t = (int)page[ho];
+                nc = sq_be16(@page[ho + 3]);
+                d = cur.depth;
+                cur.pg[d] = pgno;
+                cur.ci[d] = 0;
+                cur.depth = d + 1;
+                if (t == 10) { return sq_wsettle(cur); };
+                if (t != 2) { return 0 - 1; };
+                if (nc == 0) { pgno = sq_be32(@page[ho + 8]); }
+                else { pgno = sq_be32(@page[sq_be16(@page[ho + 12])]); };
+            };
+            return 0 - 1;
+        };
+
+        def sq_wnext(SQ_CURSOR* cur) -> int
+        {
+            SQLITE_DB* db = cur.db;
+            byte* page;
+            int d, pgno, ho, t, nc, child;
+            if (cur.valid == 0) { return 0; };
+            d = cur.depth - 1;
+            pgno = cur.pg[d];
+            page = sq_page(db, pgno);
+            if ((u64)page == (u64)0) { return 0 - 1; };
+            ho = sq_hdr_off(pgno);
+            t = (int)page[ho];
+            nc = sq_be16(@page[ho + 3]);
+            cur.ci[d] = cur.ci[d] + 1;
+            if (t == 10) { return sq_wsettle(cur); };
+            if (cur.ci[d] < nc) { child = sq_be32(@page[sq_be16(@page[ho + 12 + 2 * cur.ci[d]])]); }
+            else { child = sq_be32(@page[ho + 8]); };
+            return sq_wdescend(cur, child);
+        };
+
         // Descends from pgno along leftmost children, pushing stack levels. Returns 1 on a leaf cell, 0 if empty, -1 on error.
         def sq_descend(SQ_CURSOR* cur, int pgno) -> int
         {
@@ -1074,6 +2545,7 @@ namespace standard
         {
             cur.depth = 0;
             cur.valid = 0;
+            if (cur.wor == 1) { cur.wseq = 0; return sq_wdescend(cur, cur.root); };
             return sq_descend(cur, cur.root);
         };
 
@@ -1083,6 +2555,7 @@ namespace standard
             byte* page;
             int d, ho, nc, ci, child, r, pgno;
             if (cur.valid == 0) { return 0; };
+            if (cur.wor == 1) { return sq_wnext(cur); };
             // advance within the leaf
             d = cur.depth - 1;
             pgno = cur.pg[d];
@@ -1188,6 +2661,7 @@ namespace standard
         def sq_col_ptr(SQ_CURSOR* cur, int i) -> byte*
         {
             if (i < 0 | i >= cur.ncols) { return (byte*)0; };
+            if (SQ_ENC != 1) { if (cur.ctype[i] == SQ_TEXT) { return cur.cptr[i]; }; };
             return @cur.payload[cur.coff[i]];
         };
 
@@ -1201,7 +2675,7 @@ namespace standard
             if (cur.ctype[i] != SQ_TEXT & cur.ctype[i] != SQ_BLOB) { return 0; };
             n = cur.clen[i];
             if (n > cap - 1) { n = cap - 1; };
-            p = @cur.payload[cur.coff[i]];
+            p = sq_col_ptr(cur, i);
             for (k = 0; k < n; k++) { out[k] = p[k]; };
             out[n] = (byte)0;
             return n;

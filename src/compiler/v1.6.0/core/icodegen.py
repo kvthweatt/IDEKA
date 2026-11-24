@@ -6447,6 +6447,9 @@ class CodegenVisitor:
     def visit_ForInLoop(self, node, builder, module):
         if getattr(node, 'is_bit', False):
             return self._visit_bit_iteration(node, builder, module)
+        from iast import RangeExpression as _RangeExpression
+        if isinstance(node.iterable, _RangeExpression):
+            return self._visit_range_iteration(node, builder, module)
         collection = self.visit(node.iterable, builder, module)
         coll_type = collection.type
 
@@ -6537,8 +6540,8 @@ class CodegenVisitor:
             module.symbol_table.define(node.variables[0], SymbolKind.VARIABLE, llvm_value=var_ptr)
 
         elif (isinstance(coll_type, ir.PointerType) and
-              isinstance(coll_type.pointee, ir.IntType) and
-              coll_type.pointee.width != 8):
+              ((isinstance(coll_type.pointee, ir.IntType) and coll_type.pointee.width != 8) or
+               isinstance(coll_type.pointee, (ir.IdentifiedStructType, ir.LiteralStructType)))):
             # Decayed array pointer: int[] stored as i32* (VLA / inferred-size array).
             # Recover the element count from the symbol table type_spec.
             elem_type = coll_type.pointee
@@ -6557,6 +6560,11 @@ class CodegenVisitor:
                             raw = ts.array_dimensions[0]
                             size = raw if isinstance(raw, int) else (
                                 raw.value if hasattr(raw, 'value') else int(raw))
+            if size is None and hasattr(node, 'iterable'):
+                # a member whose array came back from comptime: the count was kept by path
+                path = self._forin_member_path(node.iterable, module)
+                if path is not None:
+                    size = getattr(module, '_ct_lens', {}).get(path)
             if size is None:
                 raise IDEKACodegenError(
                     f"Cannot iterate over pointer type {coll_type} - "
@@ -6607,12 +6615,76 @@ class CodegenVisitor:
                 nxt = builder.gep(pv, [ir.Constant(ir.IntType(32), 1)], name='ptr.next')
                 builder.store(nxt, current_ptr)
             elif (isinstance(coll_type, ir.PointerType) and
-                  isinstance(coll_type.pointee, ir.IntType) and
-                  coll_type.pointee.width != 8):
+                  ((isinstance(coll_type.pointee, ir.IntType) and coll_type.pointee.width != 8) or
+                   isinstance(coll_type.pointee, (ir.IdentifiedStructType, ir.LiteralStructType)))):
                 current_idx = builder.load(index_ptr, name='idx')
                 next_idx = builder.add(current_idx, ir.Constant(ir.IntType(32), 1), name='next.idx')
                 builder.store(next_idx, index_ptr)
             builder.branch(cond_block)
+
+        builder.break_block    = old_break
+        builder.continue_block = old_continue
+        builder.position_at_start(end_block)
+        return None
+
+    def _visit_range_iteration(self, node, builder, module):
+        """for (x in a..b): x takes every value from a to b, both ends included.
+        The loop is counted, so a range such as 0..99 needs no array behind it. The test
+        against the end happens before the increment, so a range that ends at the largest
+        value of its type terminates."""
+        rng = node.iterable
+        start_val = self.visit(rng.start, builder, module)
+        end_val = self.visit(rng.end, builder, module)
+        if not (isinstance(start_val.type, ir.IntType) and isinstance(end_val.type, ir.IntType)):
+            raise IDEKACodegenError("The bounds of a range must be integers", node, module)
+        width = max(start_val.type.width, end_val.type.width, 32)
+        idx_type = ir.IntType(width)
+        def _widen(v):
+            if v.type.width == width:
+                return v
+            return builder.sext(v, idx_type)
+        start_val = _widen(start_val)
+        end_val = _widen(end_val)
+
+        func = builder.block.function
+        cond_block  = func.append_basic_block('forrange.cond')
+        body_block  = func.append_basic_block('forrange.body')
+        latch_block = func.append_basic_block('forrange.latch')
+        end_block   = func.append_basic_block('forrange.end')
+
+        index_ptr = builder.alloca(idx_type, name='forrange.idx')
+        end_ptr = builder.alloca(idx_type, name='forrange.end')
+        var_ptr = builder.alloca(idx_type, name=node.variables[0])
+        builder.store(start_val, index_ptr)
+        builder.store(end_val, end_ptr)
+        builder.branch(cond_block)
+
+        builder.position_at_start(cond_block)
+        current = builder.load(index_ptr, name='idx')
+        last = builder.load(end_ptr, name='last')
+        cmp = builder.icmp_signed('<=', current, last, name='loop.cond')
+        builder.cbranch(cmp, body_block, end_block)
+
+        builder.position_at_start(body_block)
+        builder.store(builder.load(index_ptr, name='elem'), var_ptr)
+        module.symbol_table.define(node.variables[0], SymbolKind.VARIABLE, llvm_value=var_ptr)
+
+        old_break    = getattr(builder, 'break_block', None)
+        old_continue = getattr(builder, 'continue_block', None)
+        builder.break_block    = end_block
+        builder.continue_block = latch_block
+        self.visit(node.body, builder, module)
+        if not builder.block.is_terminated:
+            builder.branch(latch_block)
+
+        builder.position_at_start(latch_block)
+        cur = builder.load(index_ptr, name='idx.latch')
+        at_end = builder.icmp_signed('==', cur, builder.load(end_ptr, name='last.latch'), name='at.end')
+        step_block = func.append_basic_block('forrange.step')
+        builder.cbranch(at_end, end_block, step_block)
+        builder.position_at_start(step_block)
+        builder.store(builder.add(cur, ir.Constant(idx_type, 1), name='next.idx'), index_ptr)
+        builder.branch(cond_block)
 
         builder.break_block    = old_break
         builder.continue_block = old_continue
@@ -9586,7 +9658,7 @@ class CodegenVisitor:
         elif node.initial_value:
             init_const = self._vardecl_create_global_initializer(node, module, llvm_type)
             if init_const is not None:
-                gvar.initializer = init_const
+                gvar.initializer = self._endian_fix_const(init_const, llvm_type, resolved_type_spec, module)
             else:
                 gvar.initializer = TypeSystem.get_default_initializer(llvm_type)
         else:
@@ -9607,6 +9679,46 @@ class CodegenVisitor:
             )
 
         return gvar
+
+    @staticmethod
+    def _bswap_int_value(v, width):
+        """The integer v with the bytes of its width reversed."""
+        nb = width // 8
+        u = int(v) & ((1 << width) - 1)
+        return int.from_bytes(u.to_bytes(nb, 'little'), 'big')
+
+    @staticmethod
+    def _is_le_spec(spec):
+        """True when the type spec is tagged little-endian (0). A type with no spec is the default."""
+        return spec is not None and getattr(spec, 'endianness', None) == 0
+
+    def _endian_fix_const(self, c, ty, spec, module):
+        """Data of a global is stored the way the loads and stores of its type expect it: a type tagged
+        little-endian holds bswap(logical), the same rule EndianSwapHandler applies to every store."""
+        if c is None or spec is None or not isinstance(c, ir.Constant):
+            return c
+        if isinstance(ty, ir.IntType):
+            if (self._is_le_spec(spec) and ty.width >= 16 and ty.width % 16 == 0
+                    and isinstance(c.constant, int) and not isinstance(c.constant, bool)):
+                return ir.Constant(ty, self._wrap_signed(self._bswap_int_value(c.constant, ty.width), ty.width))
+            return c
+        if isinstance(ty, ir.ArrayType) and isinstance(c.constant, (list, tuple)):
+            elems = [self._endian_fix_const(e, ty.element, spec, module) for e in c.constant]
+            return ir.Constant(ty, elems)
+        if isinstance(ty, (ir.IdentifiedStructType, ir.LiteralStructType)) and isinstance(c.constant, (list, tuple)):
+            names = list(getattr(ty, 'names', None) or [])
+            mspecs = getattr(module, '_struct_member_type_specs', {}).get(getattr(ty, 'name', None), {})
+            if len(names) != len(ty.elements) or not mspecs:
+                return c
+            elems = [self._endian_fix_const(e, ty.elements[i], mspecs.get(names[i]), module)
+                     for i, e in enumerate(c.constant)]
+            return ir.Constant(ty, elems)
+        return c
+
+    @staticmethod
+    def _wrap_signed(v, width):
+        v &= (1 << width) - 1
+        return v - (1 << width) if v >> (width - 1) else v
 
     def _vardecl_create_global_initializer(self, node, module, llvm_type):
         """Create compile-time constant initializer for global variable."""
@@ -11131,6 +11243,8 @@ class CodegenVisitor:
                 if val.tag in _persist_tags:
                     self._comptime_locals[name] = val
 
+        self._ct_pass_state_back(node, cg, vm, captured_scope, module)
+
         # Process emissions
         #print(f"DEBUG comptime_locals keys={list(self._comptime_locals.keys())}", flush=True)
         # Accumulate all emitted text fragments into one buffer, then parse combined.
@@ -11167,6 +11281,180 @@ class CodegenVisitor:
             for stmt in sub_stmts:
                 #print(f"DEBUG visiting emitted stmt: {type(stmt).__name__}", flush=True)
                 self.visit(stmt, builder, module)
+
+    # ------------------------------------------------------------------
+    # comptime cleanup: state of the block is passed back to the program globals
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ct_declared_names(node, out=None):
+        """Names the comptime body declares itself (variables, loop variables). Those are
+        locals of the block and never refer to a program global."""
+        import dataclasses
+        from iast import VariableDeclaration, ForInLoop, FunctionDef
+        if out is None:
+            out = set()
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                CodegenVisitor._ct_declared_names(x, out)
+            return out
+        if node is None or not dataclasses.is_dataclass(node) or isinstance(node, type):
+            return out
+        if isinstance(node, VariableDeclaration):
+            out.add(node.name)
+        elif isinstance(node, ForInLoop):
+            out.update(node.variables)
+        elif isinstance(node, FunctionDef):
+            return out
+        for f in dataclasses.fields(node):
+            CodegenVisitor._ct_declared_names(getattr(node, f.name, None), out)
+        return out
+
+    def _ct_new_private_global(self, module, cty, init):
+        gv = ir.GlobalVariable(module, cty, name=f".comptime.data.{len(module.globals)}.{id(init) & 0xFFFFFF}")
+        gv.initializer = init
+        gv.linkage = 'internal'
+        return gv
+
+    def _forin_member_path(self, expr, module):
+        """Dotted path of a member chain rooted at a global, None when it is not one."""
+        from iast import Identifier as _Identifier, MemberAccess as _MemberAccess
+        if isinstance(expr, _Identifier):
+            entry = module.symbol_table.lookup_any(expr.name)
+            if entry is not None and getattr(entry, 'llvm_value', None) is not None and \
+                    isinstance(entry.llvm_value, ir.GlobalVariable):
+                return expr.name
+            return None
+        if isinstance(expr, _MemberAccess):
+            base = self._forin_member_path(expr.object, module)
+            return None if base is None else f"{base}.{expr.member}"
+        return None
+
+    def _ct_to_const(self, val, ty, module, vm, what, spec=None, path=None):
+        """Convert a comptime VM value into an LLVM constant of type ty."""
+        from idkvm import TTag
+        from itypesys import TypeSystem
+
+        def fail(msg):
+            raise IDEKACodegenError(
+                f"comptime value of '{what}' cannot be passed back to the program: {msg}", None, module)
+
+        int_tags = (TTag.INT, TTag.UINT, TTag.LONG, TTag.ULONG, TTag.BOOL, TTag.BYTE,
+                    TTag.CHAR, TTag.DATA, TTag.ENUM)
+        if val is None:
+            return TypeSystem.get_default_initializer(ty)
+
+        if isinstance(ty, ir.IntType):
+            if val.tag in int_tags or val.tag in (TTag.FLOAT, TTag.DOUBLE):
+                v = int(val.data)
+            elif val.tag == TTag.PTR and isinstance(val.data, int) and val.data == 0:
+                v = 0
+            else:
+                fail(f"a {val.tag.value} value does not fit {ty}")
+            if ty.width == 1:
+                return ir.Constant(ty, v & 1)
+            if self._is_le_spec(spec) and ty.width >= 16 and ty.width % 16 == 0:
+                v = self._bswap_int_value(v, ty.width)
+            v &= (1 << ty.width) - 1
+            if v >> (ty.width - 1):
+                v -= 1 << ty.width
+            return ir.Constant(ty, v)
+
+        if isinstance(ty, (ir.FloatType, ir.DoubleType)):
+            if val.tag in int_tags or val.tag in (TTag.FLOAT, TTag.DOUBLE):
+                return ir.Constant(ty, float(val.data))
+            fail(f"a {val.tag.value} value does not fit {ty}")
+
+        if isinstance(ty, ir.PointerType):
+            if val.tag in int_tags or val.tag == TTag.PTR:
+                if isinstance(val.data, int) and val.data == 0:
+                    return ir.Constant(ty, None)
+            if val.tag == TTag.BYTES:
+                raw = bytes(val.data) + b'\0'
+                aty = ir.ArrayType(ir.IntType(8), len(raw))
+                gv = self._ct_new_private_global(module, aty, ir.Constant(aty, bytearray(raw)))
+                zero = ir.Constant(ir.IntType(32), 0)
+                ptr = gv.gep([zero, zero])
+                return ptr if ptr.type == ty else ptr.bitcast(ty)
+            if val.tag == TTag.ARRAY:
+                elems = (val.meta or {}).get('elements')
+                if elems is None:
+                    fail("the array has no element storage")
+                ety = ty.pointee
+                if path is not None:
+                    if not hasattr(module, '_ct_lens'):
+                        module._ct_lens = {}
+                    module._ct_lens[path] = len(elems)
+                aty = ir.ArrayType(ety, max(len(elems), 1))
+                consts = [self._ct_to_const(e, ety, module, vm, what) for e in elems]
+                while len(consts) < aty.count:
+                    consts.append(TypeSystem.get_default_initializer(ety))
+                gv = self._ct_new_private_global(module, aty, ir.Constant(aty, consts))
+                zero = ir.Constant(ir.IntType(32), 0)
+                ptr = gv.gep([zero, zero])
+                return ptr if ptr.type == ty else ptr.bitcast(ty)
+            if val.tag == TTag.STRUCT:
+                inner = self._ct_to_const(val, ty.pointee, module, vm, what)
+                gv = self._ct_new_private_global(module, ty.pointee, inner)
+                return gv if gv.type == ty else gv.bitcast(ty)
+            fail(f"a {val.tag.value} value cannot become a pointer constant")
+
+        if isinstance(ty, ir.ArrayType):
+            if val.tag == TTag.BYTES and isinstance(ty.element, ir.IntType) and ty.element.width == 8:
+                raw = bytes(val.data)[:ty.count]
+                raw = raw + b'\0' * (ty.count - len(raw))
+                return ir.Constant(ty, bytearray(raw))
+            if val.tag == TTag.ARRAY:
+                elems = (val.meta or {}).get('elements')
+                if elems is None:
+                    fail("the array has no element storage")
+                consts = [self._ct_to_const(e, ty.element, module, vm, what, spec) for e in elems[:ty.count]]
+                while len(consts) < ty.count:
+                    consts.append(TypeSystem.get_default_initializer(ty.element))
+                return ir.Constant(ty, consts)
+            fail(f"a {val.tag.value} value does not fit {ty}")
+
+        if isinstance(ty, (ir.IdentifiedStructType, ir.LiteralStructType)):
+            if val.tag != TTag.STRUCT:
+                fail(f"a {val.tag.value} value does not fit struct {ty}")
+            fields = (val.meta or {}).get('fields', {})
+            names = list(getattr(ty, 'names', None) or [])
+            if len(names) != len(ty.elements):
+                layout = vm.struct_layouts.get(val.data)
+                names = [f[0] for f in layout.fields] if layout and len(layout.fields) == len(ty.elements) else []
+            mspecs = getattr(module, '_struct_member_type_specs', {}).get(getattr(ty, 'name', None), {})
+            consts = []
+            for i, ety in enumerate(ty.elements):
+                fv = fields.get(names[i]) if i < len(names) else None
+                consts.append(self._ct_to_const(fv, ety, module, vm, what, mspecs.get(names[i]) if i < len(names) else None,
+                                                None if path is None or i >= len(names) else f"{path}.{names[i]}"))
+            return ir.Constant(ty, consts)
+
+        fail(f"the global has type {ty}, which comptime cannot fill")
+
+    def _ct_pass_state_back(self, node, cg, vm, captured_scope, module):
+        """comptime cleanup: a name the block assigns that is a global of the program gives
+        its final value to that global as its initial value. Names the block declares itself
+        are locals of the block and stay in it."""
+        declared = self._ct_declared_names(node.body)
+        for name, slot in cg._locals.items():
+            if name.startswith('__') or name in declared:
+                continue
+            gv = module.globals.get(name)
+            if not isinstance(gv, ir.GlobalVariable):
+                continue
+            if slot >= len(vm.last_locals) or vm.last_locals[slot] is None:
+                continue
+            val = vm.last_locals[slot]
+            before = captured_scope.get(name)
+            if before is not None and before.tag == val.tag and before.data == val.data \
+                    and not (val.meta or {}).get('fields'):
+                continue
+            try:
+                spec = module.symbol_table.get_type_spec(name)
+            except Exception:
+                spec = None
+            gv.initializer = self._ct_to_const(val, gv.type.pointee, module, vm, name, spec, name)
 
     def visit_EmitIDEKA(self, node, builder: ir.IRBuilder, module: ir.Module):
         """

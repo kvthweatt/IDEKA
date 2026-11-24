@@ -1975,11 +1975,7 @@ class VariableTypeHandler:
                 const_elements.append(field_const)
             else:
                 # Zero-initialize missing field
-                zero_init = ir.Constant(field_llvm_type,
-                                        0 if isinstance(field_llvm_type, ir.IntType)
-                                        else [ir.Constant(field_llvm_type.element, 0)] * field_llvm_type.count
-                                        if isinstance(field_llvm_type, ir.ArrayType)
-                                        else ir.Undefined(field_llvm_type))
+                zero_init = ir.Constant(field_llvm_type, None)
                 const_elements.append(zero_init)
         
         return ir.Constant(llvm_type, const_elements)

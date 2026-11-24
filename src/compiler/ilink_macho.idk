@@ -1,0 +1,1466 @@
+// Author: Karac V. Thweatt
+//
+// ilink_macho.idk - Mach-O (macOS, x86-64 and AArch64) executable linker for the IDEKA toolchain
+//
+// Library, no main. Part of the one IDEKA linker: it shares the helpers of ilink.idk with ilink_elf.idk and
+// ilink_pe.idk, and handles both processors in this one file. Links Mach-O 64 bit relocatable objects into an
+// executable that binds its imports against libSystem at load, with no dependency on a system linker.
+//
+// Usage:
+//
+//     byte* err = lk_macho_link(objs, nobjs, "_main\0", "out\0");
+//     // err is null on success, else it names the problem
+//
+// The processor is read from the objects (x86-64 or arm64) and all objects must agree.
+// Every undefined symbol is imported from /usr/lib/libSystem.B.dylib.
+//
+// Output layout (PIE, images slide, so absolute pointers are rebased at load):
+//
+//   __PAGEZERO  4GB of unmapped space
+//   __TEXT      headers, __text, __stubs, __const
+//   __DATA      __got, __data, __bss
+//   __LINKEDIT  rebase info, bind info, symbol table, string table
+//
+// Imports are bound at load. A function import gets a stub that jumps through its __got slot.
+
+#ifndef IDEKA_ILINK
+#import "ilink.idk";
+#endif;
+
+#ifndef IDEKA_ILINK_MACHO
+#def IDEKA_ILINK_MACHO 1;
+
+namespace IDEKA
+{
+    namespace ilink
+    {
+        struct MoLink
+        {
+            byte* err;
+            int arch;                 // 0 x86-64, 1 arm64
+            int nobj, nsec, nsym, nrel;
+            // per object
+            byte** o_img;
+            int* o_size;
+            int* o_sec0;
+            int* o_nsec;
+            int* o_sym0;
+            int* o_nsym;
+            int* o_symoff;
+            int* o_stroff;
+            // per section (all objects)
+            int* s_obj;
+            int* s_grp;               // 0 text, 1 const, 2 data, 3 bss, -1 dropped
+            i64* s_addr0;             // address in the object
+            i64* s_size;
+            int* s_off;               // file offset of the contents in the object
+            int* s_align;             // power of two
+            int* s_reloff;
+            int* s_nrel;
+            i64* s_new;               // address in the executable
+            // per symbol (all objects)
+            int* y_obj;
+            byte** y_name;
+            int* y_type;
+            int* y_sect;              // 1 based section number in the object, 0 none
+            i64* y_val;
+            int* y_desc;
+            int* y_def;               // symbol index of the definition, or -1
+            int* y_imp;               // import index, or -1
+            int* y_got;               // got slot of a definition, or -1
+            i64* y_addr;
+            int* y_com;               // 1 for a common symbol that owns bss space
+            i64* y_cadr;
+            // imports
+            int nimp;
+            byte** i_name;
+            int* i_got;
+            int* i_stub;
+            // got slots: kind 0 import, 1 definition
+            int ngot;
+            int* g_kind;
+            int* g_ref;
+            int nstub;
+            int* t_imp;
+            // layout
+            i64 datavm, dataoff, gotaddr, stubaddr;
+            int stubsz;
+            // binds and rebases (offsets into __DATA)
+            int nbind, nreb;
+            i64* b_off;
+            int* b_imp;
+            i64* b_add;
+            i64* r_off;
+            LkMap defs;
+            LkMap imps;
+        };
+
+        mo_fail(MoLink* L, byte* msg) -> bool
+        {
+            if (L.err == (byte*)0) { L.err = msg; };
+            -> false;
+        };
+
+        // ===== reading the objects =====
+
+        // Output group of a section: 0 text, 1 const, 2 data, 3 bss, -1 dropped
+        mo_group(byte* segname, byte* sectname, i64 flags) -> int
+        {
+            int ty = (int)(flags `& 255);
+            if ((flags `& 33554432) != 0) { -> -1; };
+            if (lk_streq(segname, "__DWARF\0")) { -> -1; };
+            if (lk_streq(segname, "__LD\0")) { -> -1; };
+            if (lk_streq(sectname, "__eh_frame\0")) { -> -1; };
+            if (ty == 1 | ty == 12) { -> 3; };
+            if ((flags `& 2147483648) != 0 | (flags `& 1024) != 0) { -> 0; };
+            if (lk_streq(segname, "__TEXT\0")) { -> 1; };
+            -> 2;
+        };
+
+        mo_count_obj(MoLink* L, int k) -> bool
+        {
+            byte* m = L.o_img[k];
+            int n = L.o_size[k];
+            int ncmds, off, i, cmd, csz, ty;
+            i64 cpu;
+            if (n < 32) { -> mo_fail(L, "object file too small\0"); };
+            if (lk_r32(m, 0) != 4277009103) { -> mo_fail(L, "input is not a 64 bit Mach-O file\0"); };
+            if (lk_r32(m, 12) != 1) { -> mo_fail(L, "input is not a relocatable object\0"); };
+            cpu = lk_r32(m, 4);
+            if (cpu == 16777223) { ty = 0; }
+            elif (cpu == 16777228) { ty = 1; }
+            else { -> mo_fail(L, "input is not an x86-64 or arm64 object\0"); };
+            if (k == 0) { L.arch = ty; }
+            elif (L.arch != ty) { -> mo_fail(L, "objects for different processors\0"); };
+            ncmds = (int)lk_r32(m, 16);
+            off = 32;
+            L.o_nsec[k] = 0;
+            L.o_nsym[k] = 0;
+            i = 0;
+            while (i < ncmds)
+            {
+                if (off + 8 > n) { -> mo_fail(L, "bad load command\0"); };
+                cmd = (int)lk_r32(m, off);
+                csz = (int)lk_r32(m, off + 4);
+                if (csz < 8 | off + csz > n) { -> mo_fail(L, "bad load command\0"); };
+                if (cmd == 25) { L.o_nsec[k] = L.o_nsec[k] + (int)lk_r32(m, off + 64); };
+                if (cmd == 2) { L.o_nsym[k] = (int)lk_r32(m, off + 12); };
+                off = off + csz;
+                i++;
+            };
+            -> true;
+        };
+
+        mo_load_obj(MoLink* L, int k) -> bool
+        {
+            byte* m = L.o_img[k];
+            int n = L.o_size[k];
+            int ncmds = (int)lk_r32(m, 16);
+            int off = 32;
+            int i, j, cmd, csz, ns, sh, gs, gy, so, ty, symoff, stroff, nsyms;
+            i64 flags;
+            gs = L.o_sec0[k];
+            i = 0;
+            while (i < ncmds)
+            {
+                cmd = (int)lk_r32(m, off);
+                csz = (int)lk_r32(m, off + 4);
+                if (cmd == 25)
+                {
+                    ns = (int)lk_r32(m, off + 64);
+                    j = 0;
+                    while (j < ns)
+                    {
+                        sh = off + 72 + j * 80;
+                        L.s_obj[gs] = k;
+                        flags = lk_r32(m, sh + 64);
+                        L.s_grp[gs] = mo_group(m + sh + 16, m + sh, flags);
+                        L.s_addr0[gs] = lk_r64(m, sh + 32);
+                        L.s_size[gs] = lk_r64(m, sh + 40);
+                        L.s_off[gs] = (int)lk_r32(m, sh + 48);
+                        L.s_align[gs] = (int)lk_r32(m, sh + 52);
+                        L.s_reloff[gs] = (int)lk_r32(m, sh + 56);
+                        L.s_nrel[gs] = (int)lk_r32(m, sh + 60);
+                        L.s_new[gs] = 0;
+                        ty = (int)(flags `& 255);
+                        if (ty >= 17 & ty <= 19) { -> mo_fail(L, "thread local storage is not supported\0"); };
+                        if (ty == 9 | ty == 10) { -> mo_fail(L, "static initializer sections are not supported\0"); };
+                        if (L.s_grp[gs] >= 0 & L.s_grp[gs] != 3)
+                        {
+                            if (L.s_off[gs] + (int)L.s_size[gs] > n) { -> mo_fail(L, "section outside the file\0"); };
+                        };
+                        if (L.s_grp[gs] >= 0 & L.s_nrel[gs] > 0)
+                        {
+                            if (L.s_reloff[gs] + L.s_nrel[gs] * 8 > n) { -> mo_fail(L, "relocations outside the file\0"); };
+                            L.nrel = L.nrel + L.s_nrel[gs];
+                        };
+                        gs++;
+                        j++;
+                    };
+                };
+                if (cmd == 2)
+                {
+                    symoff = (int)lk_r32(m, off + 8);
+                    nsyms = (int)lk_r32(m, off + 12);
+                    stroff = (int)lk_r32(m, off + 16);
+                    L.o_symoff[k] = symoff;
+                    L.o_stroff[k] = stroff;
+                    if (symoff + nsyms * 16 > n | stroff > n) { -> mo_fail(L, "bad symbol table\0"); };
+                    j = 0;
+                    while (j < nsyms)
+                    {
+                        gy = L.o_sym0[k] + j;
+                        so = symoff + j * 16;
+                        L.y_obj[gy] = k;
+                        L.y_name[gy] = m + stroff + (int)lk_r32(m, so);
+                        L.y_type[gy] = lk_r8(m, so + 4);
+                        L.y_sect[gy] = lk_r8(m, so + 5);
+                        L.y_desc[gy] = lk_r16(m, so + 6);
+                        L.y_val[gy] = lk_r64(m, so + 8);
+                        L.y_def[gy] = -1;
+                        L.y_imp[gy] = -1;
+                        L.y_got[gy] = -1;
+                        L.y_addr[gy] = 0;
+                        L.y_com[gy] = 0;
+                        L.y_cadr[gy] = 0;
+                        j++;
+                    };
+                };
+                off = off + csz;
+                i++;
+            };
+            -> true;
+        };
+
+        // ===== symbols =====
+
+        // 1 when the symbol is defined in a section of its object
+        mo_is_sect(MoLink* L, int g) -> bool
+        {
+            if ((L.y_type[g] `& 224) != 0) { -> false; };
+            -> (L.y_type[g] `& 14) == 14;
+        };
+
+        mo_is_ext(MoLink* L, int g) -> bool
+        {
+            -> (L.y_type[g] `& 1) != 0;
+        };
+
+        // The section of a defined symbol, as a global section index, or -1
+        mo_symsec(MoLink* L, int g) -> int
+        {
+            int k = L.y_obj[g];
+            int s = L.y_sect[g];
+            if (s < 1 | s > L.o_nsec[k]) { -> -1; };
+            -> L.o_sec0[k] + s - 1;
+        };
+
+        // Binds every defined external symbol and settles what each undefined symbol refers to
+        mo_resolve_names(MoLink* L) -> bool
+        {
+            int g, d, im;
+            lm_init(@L.defs, L.nsym + 1);
+            lm_init(@L.imps, L.nsym + 1);
+            L.nimp = 0;
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (mo_is_sect(L, g) & mo_is_ext(L, g))
+                {
+                    d = lm_get(@L.defs, L.y_name[g]);
+                    if (d >= 0)
+                    {
+                        // a weak definition yields to any other, two strong ones clash
+                        if ((L.y_desc[d] `& 128) != 0 & (L.y_desc[g] `& 128) == 0) { lm_put(@L.defs, L.y_name[g], g); }
+                        elif ((L.y_desc[d] `& 128) == 0 & (L.y_desc[g] `& 128) == 0)
+                        {
+                            if (L.y_com[d] == 0) { -> mo_fail(L, "duplicate symbol\0"); };
+                        };
+                    }
+                    else { lm_put(@L.defs, L.y_name[g], g); };
+                };
+                g++;
+            };
+            // common symbols: an undefined external symbol that carries a size
+            g = 0;
+            while (g < L.nsym)
+            {
+                if ((L.y_type[g] `& 224) == 0 & (L.y_type[g] `& 14) == 0 & mo_is_ext(L, g) & L.y_val[g] > 0)
+                {
+                    d = lm_get(@L.defs, L.y_name[g]);
+                    if (d < 0)
+                    {
+                        L.y_com[g] = 1;
+                        lm_put(@L.defs, L.y_name[g], g);
+                    }
+                    elif (L.y_com[d] == 1 & L.y_val[g] > L.y_val[d])
+                    {
+                        L.y_com[d] = 0;
+                        L.y_com[g] = 1;
+                        lm_put(@L.defs, L.y_name[g], g);
+                    };
+                };
+                g++;
+            };
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (mo_is_sect(L, g))
+                {
+                    if (mo_is_ext(L, g)) { L.y_def[g] = lm_get(@L.defs, L.y_name[g]); }
+                    else { L.y_def[g] = g; };
+                }
+                elif ((L.y_type[g] `& 224) == 0 & (L.y_type[g] `& 14) == 2) { L.y_def[g] = g; }
+                elif ((L.y_type[g] `& 224) == 0 & mo_is_ext(L, g))
+                {
+                    d = lm_get(@L.defs, L.y_name[g]);
+                    if (d >= 0) { L.y_def[g] = d; }
+                    else
+                    {
+                        im = lm_get(@L.imps, L.y_name[g]);
+                        if (im < 0)
+                        {
+                            im = L.nimp;
+                            L.i_name[im] = L.y_name[g];
+                            L.i_got[im] = -1;
+                            L.i_stub[im] = -1;
+                            lm_put(@L.imps, L.y_name[g], im);
+                            L.nimp++;
+                        };
+                        L.y_imp[g] = im;
+                    };
+                };
+                g++;
+            };
+            -> true;
+        };
+
+        // ===== relocations =====
+
+        // One decoded relocation entry
+        struct MoRel
+        {
+            int addr;
+            int symnum;
+            int pcrel;
+            int len;
+            int ext;
+            int type;
+        };
+
+        mo_decode(byte* m, int o, MoRel* r) -> void
+        {
+            i64 w = lk_r32(m, o + 4);
+            r.addr = (int)lk_r32(m, o);
+            r.symnum = (int)(w `& 16777215);
+            r.pcrel = (int)((w >> 24) `& 1);
+            r.len = (int)((w >> 25) `& 3);
+            r.ext = (int)((w >> 27) `& 1);
+            r.type = (int)((w >> 28) `& 15);
+            ->;
+        };
+
+        // Gives the import a got slot (kind 0) or the definition (kind 1)
+        mo_slot_imp(MoLink* L, int im) -> int
+        {
+            if (L.i_got[im] >= 0) { -> L.i_got[im]; };
+            L.g_kind[L.ngot] = 0;
+            L.g_ref[L.ngot] = im;
+            L.i_got[im] = L.ngot;
+            L.ngot++;
+            -> L.i_got[im];
+        };
+
+        mo_slot_def(MoLink* L, int d) -> int
+        {
+            if (L.y_got[d] >= 0) { -> L.y_got[d]; };
+            L.g_kind[L.ngot] = 1;
+            L.g_ref[L.ngot] = d;
+            L.y_got[d] = L.ngot;
+            L.ngot++;
+            -> L.y_got[d];
+        };
+
+        // The got slot of a symbol reached through a relocation
+        mo_slot_of(MoLink* L, int g) -> int
+        {
+            if (L.y_imp[g] >= 0) { -> mo_slot_imp(L, L.y_imp[g]); };
+            if (L.y_def[g] >= 0) { -> mo_slot_def(L, L.y_def[g]); };
+            -> -1;
+        };
+
+        mo_stub_of(MoLink* L, int im) -> int
+        {
+            if (L.i_stub[im] >= 0) { -> L.i_stub[im]; };
+            mo_slot_imp(L, im);
+            L.t_imp[L.nstub] = im;
+            L.i_stub[im] = L.nstub;
+            L.nstub++;
+            -> L.i_stub[im];
+        };
+
+        // First pass over the relocations: finds the got slots and stubs that must exist
+        mo_scan_relocs(MoLink* L) -> bool
+        {
+            int s, i, k, g, ty, isbr, isgot;
+            MoRel r;
+            byte* m;
+            s = 0;
+            while (s < L.nsec)
+            {
+                if (L.s_grp[s] >= 0 & L.s_nrel[s] > 0)
+                {
+                    k = L.s_obj[s];
+                    m = L.o_img[k];
+                    i = 0;
+                    while (i < L.s_nrel[s])
+                    {
+                        mo_decode(m, L.s_reloff[s] + i * 8, @r);
+                        if ((lk_r32(m, L.s_reloff[s] + i * 8) `& 2147483648) != 0) { -> mo_fail(L, "scattered relocations are not supported\0"); };
+                        ty = r.type;
+                        isbr = 0;
+                        isgot = 0;
+                        if (L.arch == 0)
+                        {
+                            if (ty == 2) { isbr = 1; };
+                            if (ty == 3 | ty == 4) { isgot = 1; };
+                            if (ty == 9) { -> mo_fail(L, "thread local storage is not supported\0"); };
+                        }
+                        else
+                        {
+                            if (ty == 2) { isbr = 1; };
+                            if (ty == 5 | ty == 6 | ty == 7) { isgot = 1; };
+                            if (ty == 8 | ty == 9) { -> mo_fail(L, "thread local storage is not supported\0"); };
+                        };
+                        if (r.ext == 1 & (isbr == 1 | isgot == 1))
+                        {
+                            g = L.o_sym0[k] + r.symnum;
+                            if (r.symnum >= L.o_nsym[k]) { -> mo_fail(L, "bad relocation symbol\0"); };
+                            if (isbr == 1 & L.y_imp[g] >= 0) { mo_stub_of(L, L.y_imp[g]); };
+                            if (isgot == 1) { mo_slot_of(L, g); };
+                        };
+                        i++;
+                    };
+                };
+                s++;
+            };
+            -> true;
+        };
+
+        // ===== layout =====
+
+        mo_up(i64 v, int p) -> i64
+        {
+            -> lk_align_up(v, (i64)1 << p);
+        };
+
+        // Places the sections of one group one after the other from addr and returns the end
+        mo_place(MoLink* L, int grp, i64 addr, i64 vbase, byte* out) -> i64
+        {
+            int s;
+            i64 a = addr;
+            s = 0;
+            while (s < L.nsec)
+            {
+                if (L.s_grp[s] == grp)
+                {
+                    a = mo_up(a, L.s_align[s]);
+                    L.s_new[s] = vbase + a;
+                    a = a + L.s_size[s];
+                };
+                s++;
+            };
+            -> a;
+        };
+
+        mo_maxalign(MoLink* L, int grp) -> int
+        {
+            int s;
+            int a = 0;
+            s = 0;
+            while (s < L.nsec)
+            {
+                if (L.s_grp[s] == grp & L.s_align[s] > a) { a = L.s_align[s]; };
+                s++;
+            };
+            -> a;
+        };
+
+        // The final address of a symbol, given the layout
+        mo_symaddr(MoLink* L, int g, i64 stubbase, i64 gotbase, int stubsz) -> i64
+        {
+            int d, s;
+            if (L.y_imp[g] >= 0)
+            {
+                if (L.i_stub[L.y_imp[g]] >= 0) { -> stubbase + (i64)L.i_stub[L.y_imp[g]] * stubsz; };
+                -> 0;
+            };
+            d = L.y_def[g];
+            if (d < 0) { -> 0; };
+            if (L.y_com[d] == 1) { -> L.y_cadr[d]; };
+            if ((L.y_type[d] `& 14) == 2) { -> L.y_val[d]; };
+            s = mo_symsec(L, d);
+            if (s < 0) { -> 0; };
+            -> L.s_new[s] + (L.y_val[d] - L.s_addr0[s]);
+        };
+
+        // ===== encodings of the dyld opcode streams =====
+
+        mo_uleb(LkBuf* b, i64 v) -> void
+        {
+            i64 x = v;
+            int by;
+            while (true)
+            {
+                by = (int)(x `& 127);
+                x = x >> 7;
+                if (x != 0) { lb_put8(b, by `| 128); }
+                else { lb_put8(b, by); ->; };
+            };
+            ->;
+        };
+
+        mo_sleb(LkBuf* b, i64 v) -> void
+        {
+            i64 x = v;
+            int by;
+            bool more = true;
+            while (more)
+            {
+                by = (int)(x `& 127);
+                x = x >> 7;
+                if ((x == 0 & (by `& 64) == 0) | (x == -1 & (by `& 64) != 0)) { more = false; lb_put8(b, by); }
+                else { lb_put8(b, by `| 128); };
+            };
+            ->;
+        };
+
+        mo_note_bind(MoLink* L, i64 off, int im, i64 add) -> void
+        {
+            L.b_off[L.nbind] = off;
+            L.b_imp[L.nbind] = im;
+            L.b_add[L.nbind] = add;
+            L.nbind++;
+            ->;
+        };
+
+        mo_note_rebase(MoLink* L, i64 off) -> void
+        {
+            L.r_off[L.nreb] = off;
+            L.nreb++;
+            ->;
+        };
+
+        // ===== applying relocations =====
+
+        // Rewrites bits of a 32 bit instruction word
+        mo_put_ins(byte* img, i64 at, i64 mask, i64 v) -> void
+        {
+            i64 w = lk_r32(img, (int)at);
+            w = (w `& (4294967295 - mask)) `| (v `& mask);
+            lk_w32(img, (int)at, w);
+            ->;
+        };
+
+        // arm64 ADRP immediate for a pc and a target
+        mo_adrp(byte* img, i64 at, i64 P, i64 T) -> bool
+        {
+            i64 pg = (T >> 12) - (P >> 12);
+            if (pg > 1048575 | pg < -1048576) { -> false; };
+            mo_put_ins(img, at, 1627389920, ((pg `& 3) << 29) `| (((pg >> 2) `& 524287) << 5));
+            -> true;
+        };
+
+        // arm64 page offset field of an add or a load and store, scaled by the access size
+        mo_pageoff(byte* img, i64 at, i64 T) -> void
+        {
+            i64 ins = lk_r32(img, (int)at);
+            int sh = 0;
+            if ((ins `& 989855744) == 956301312)
+            {
+                sh = (int)((ins >> 30) `& 3);
+                if (sh == 0 & (ins `& 75497472) == 75497472) { sh = 4; };
+            };
+            mo_put_ins(img, at, 4193280, ((T `& 4095) >> sh) << 10);
+            ->;
+        };
+
+
+        // File offset of a virtual address of the image
+        mo_foff(MoLink* L, i64 vm) -> i64
+        {
+            if (vm < L.datavm) { -> vm - 4294967296; };
+            -> vm - L.datavm + L.dataoff;
+        };
+
+        // The address a relocation names: the symbol, or the section it is in. orig receives the address
+        // the stored value is relative to in the object (0 for a symbol, the section address for a section)
+        mo_reltarget(MoLink* L, int k, MoRel* r, int branch, i64* orig, bool* ok) -> i64
+        {
+            int g, d, s;
+            *orig = 0;
+            *ok = true;
+            if (r.ext == 1)
+            {
+                g = L.o_sym0[k] + r.symnum;
+                if (L.y_imp[g] >= 0)
+                {
+                    if (branch == 1) { -> L.stubaddr + (i64)L.i_stub[L.y_imp[g]] * L.stubsz; };
+                    *ok = false;
+                    -> 0;
+                };
+                d = L.y_def[g];
+                if (d < 0) { *ok = false; -> 0; };
+                if (L.y_com[d] == 1) { -> L.y_cadr[d]; };
+                if ((L.y_type[d] `& 14) == 2) { -> L.y_val[d]; };
+                s = mo_symsec(L, d);
+                if (s < 0 | L.s_grp[s] < 0) { *ok = false; -> 0; };
+                -> L.s_new[s] + (L.y_val[d] - L.s_addr0[s]);
+            };
+            if (r.symnum < 1 | r.symnum > L.o_nsec[k]) { *ok = false; -> 0; };
+            s = L.o_sec0[k] + r.symnum - 1;
+            if (L.s_grp[s] < 0) { *ok = false; -> 0; };
+            *orig = L.s_addr0[s];
+            -> L.s_new[s];
+        };
+
+        // Address of the got slot of the symbol a relocation names
+        mo_gotaddr(MoLink* L, int k, MoRel* r) -> i64
+        {
+            int g = L.o_sym0[k] + r.symnum;
+            int slot = mo_slot_of(L, g);
+            if (slot < 0) { -> 0; };
+            -> L.gotaddr + (i64)slot * 8;
+        };
+
+        // The import a relocation names, or -1
+        mo_relimp(MoLink* L, int k, MoRel* r) -> int
+        {
+            if (r.ext != 1) { -> -1; };
+            -> L.y_imp[L.o_sym0[k] + r.symnum];
+        };
+
+        // Applies the relocations of every kept section to the output image
+        mo_apply(MoLink* L, byte* img) -> bool
+        {
+            int s, i, k, nrel, ty, pcoff, nb, im, grp;
+            i64 fo, P, T, orig, stored, addend, t2, o2, v, Porig;
+            bool ok, ok2, haveadd;
+            MoRel r;
+            MoRel r2;
+            byte* m;
+            s = 0;
+            while (s < L.nsec)
+            {
+                if (L.s_grp[s] >= 0 & L.s_nrel[s] > 0)
+                {
+                    k = L.s_obj[s];
+                    m = L.o_img[k];
+                    nrel = L.s_nrel[s];
+                    grp = L.s_grp[s];
+                    addend = 0;
+                    haveadd = false;
+                    i = 0;
+                    while (i < nrel)
+                    {
+                        mo_decode(m, L.s_reloff[s] + i * 8, @r);
+                        ty = r.type;
+                        P = L.s_new[s] + r.addr;
+                        Porig = L.s_addr0[s] + r.addr;
+                        fo = mo_foff(L, P);
+                        if (L.arch == 1 & ty == 10)
+                        {
+                            addend = r.symnum;
+                            if (addend >= 8388608) { addend = addend - 16777216; };
+                            haveadd = true;
+                            i++;
+                            continue;
+                        };
+                        nb = 4;
+                        if (r.len == 3) { nb = 8; }
+                        elif (r.len == 0) { nb = 1; }
+                        elif (r.len == 1) { nb = 2; };
+                        if (nb == 8) { stored = lk_r64(img, (int)fo); }
+                        elif (nb == 4) { stored = lk_r32s(img, (int)fo); }
+                        else { -> mo_fail(L, "unsupported relocation size\0"); };
+                        if ((L.arch == 0 & ty == 5) | (L.arch == 1 & ty == 1))
+                        {
+                            // difference of two addresses: this entry names the one subtracted, the next one the other
+                            if (i + 1 >= nrel) { -> mo_fail(L, "unpaired subtractor relocation\0"); };
+                            mo_decode(m, L.s_reloff[s] + (i + 1) * 8, @r2);
+                            T = mo_reltarget(L, k, @r, 0, @orig, @ok);
+                            t2 = mo_reltarget(L, k, @r2, 0, @o2, @ok2);
+                            if (!ok | !ok2) { -> mo_fail(L, "subtractor relocation names an import or a dropped section\0"); };
+                            v = stored + (t2 - o2) - (T - orig);
+                            if (nb == 8) { lk_w64(img, (int)fo, v); } else { lk_w32(img, (int)fo, v); };
+                            i = i + 2;
+                            continue;
+                        };
+                        pcoff = 0;
+                        if (L.arch == 0 & r.pcrel == 1)
+                        {
+                            pcoff = 4;
+                            if (ty == 6) { pcoff = 5; };
+                            if (ty == 7) { pcoff = 6; };
+                            if (ty == 8) { pcoff = 8; };
+                        };
+                        // an absolute pointer
+                        if (ty == 0 & r.pcrel == 0)
+                        {
+                            im = mo_relimp(L, k, @r);
+                            if (im >= 0)
+                            {
+                                if (grp != 2 | nb != 8) { -> mo_fail(L, "import referenced from read-only data\0"); };
+                                mo_note_bind(L, P - L.datavm, im, stored);
+                                lk_w64(img, (int)fo, 0);
+                                i++;
+                                continue;
+                            };
+                            T = mo_reltarget(L, k, @r, 0, @orig, @ok);
+                            if (!ok) { -> mo_fail(L, "relocation names an undefined symbol or a dropped section\0"); };
+                            v = T + stored - orig;
+                            if (nb == 8)
+                            {
+                                if (grp != 2) { -> mo_fail(L, "absolute address in read-only section\0"); };
+                                lk_w64(img, (int)fo, v);
+                                mo_note_rebase(L, P - L.datavm);
+                            }
+                            else { -> mo_fail(L, "32 bit absolute address in a position independent image\0"); };
+                            i++;
+                            continue;
+                        };
+                        if (L.arch == 0)
+                        {
+                            if (ty == 3 | ty == 4)
+                            {
+                                if (r.ext != 1) { -> mo_fail(L, "got relocation of a section\0"); };
+                                T = mo_gotaddr(L, k, @r);
+                                v = T + stored - (P + 4);
+                            }
+                            else
+                            {
+                                im = mo_relimp(L, k, @r);
+                                if (im >= 0 & ty != 2) { -> mo_fail(L, "data import referenced by address, use the got\0"); };
+                                T = mo_reltarget(L, k, @r, 1, @orig, @ok);
+                                if (!ok) { -> mo_fail(L, "relocation names an undefined symbol or a dropped section\0"); };
+                                if (r.ext == 1) { v = T + stored - (P + pcoff); }
+                                else { v = T + (Porig + pcoff + stored - orig) - (P + pcoff); };
+                            };
+                            if (nb == 4)
+                            {
+                                if (v > 2147483647 | v < -2147483648) { -> mo_fail(L, "relocation out of range\0"); };
+                                lk_w32(img, (int)fo, v);
+                            }
+                            else { lk_w64(img, (int)fo, v); };
+                            haveadd = false;
+                            addend = 0;
+                            i++;
+                            continue;
+                        };
+                        // arm64
+                        if (ty == 7)
+                        {
+                            T = mo_gotaddr(L, k, @r);
+                            v = T - P;
+                            if (v > 2147483647 | v < -2147483648) { -> mo_fail(L, "relocation out of range\0"); };
+                            lk_w32(img, (int)fo, v);
+                        }
+                        elif (ty == 5 | ty == 6)
+                        {
+                            if (r.ext != 1) { -> mo_fail(L, "got relocation of a section\0"); };
+                            T = mo_gotaddr(L, k, @r);
+                            if (ty == 5)
+                            {
+                                if (!mo_adrp(img, fo, P, T)) { -> mo_fail(L, "relocation out of range\0"); };
+                            }
+                            else { mo_pageoff(img, fo, T); };
+                        }
+                        elif (ty == 2 | ty == 3 | ty == 4)
+                        {
+                            T = mo_reltarget(L, k, @r, 1, @orig, @ok);
+                            if (!ok) { -> mo_fail(L, "relocation names an undefined symbol or a dropped section\0"); };
+                            if (ty == 2)
+                            {
+                                if (r.ext == 1) { v = T + addend; }
+                                else
+                                {
+                                    stored = lk_r32(img, (int)fo) `& 67108863;
+                                    if (stored >= 33554432) { stored = stored - 67108864; };
+                                    v = T + (Porig + stored * 4 - orig) + addend;
+                                };
+                                v = v - P;
+                                if (v > 134217727 | v < -134217728 | (v `& 3) != 0) { -> mo_fail(L, "branch out of range\0"); };
+                                mo_put_ins(img, fo, 67108863, (v >> 2) `& 67108863);
+                            }
+                            else
+                            {
+                                v = T + addend;
+                                if (ty == 3)
+                                {
+                                    if (!mo_adrp(img, fo, P, v)) { -> mo_fail(L, "relocation out of range\0"); };
+                                }
+                                else { mo_pageoff(img, fo, v); };
+                            };
+                        }
+                        else { -> mo_fail(L, "unsupported relocation type\0"); };
+                        haveadd = false;
+                        addend = 0;
+                        i++;
+                    };
+                };
+                s++;
+            };
+            -> true;
+        };
+
+        // ===== the executable =====
+
+        mo_cmd_seg(LkBuf* b, byte* name, i64 vmaddr, i64 vmsize, i64 foff, i64 fsize, int maxp, int initp, int nsects) -> void
+        {
+            int i = 0;
+            lb_put32(b, 25);
+            lb_put32(b, 72 + nsects * 80);
+            while (name[i] != 0) { lb_put8(b, name[i]); i++; };
+            while (i < 16) { lb_put8(b, 0); i++; };
+            lb_put64(b, vmaddr);
+            lb_put64(b, vmsize);
+            lb_put64(b, foff);
+            lb_put64(b, fsize);
+            lb_put32(b, maxp);
+            lb_put32(b, initp);
+            lb_put32(b, nsects);
+            lb_put32(b, 0);
+            ->;
+        };
+
+        mo_cmd_sect(LkBuf* b, byte* sect, byte* seg, i64 addr, i64 size, i64 foff, int al, i64 flags) -> void
+        {
+            int i = 0;
+            while (sect[i] != 0) { lb_put8(b, sect[i]); i++; };
+            while (i < 16) { lb_put8(b, 0); i++; };
+            i = 0;
+            while (seg[i] != 0) { lb_put8(b, seg[i]); i++; };
+            while (i < 16) { lb_put8(b, 0); i++; };
+            lb_put64(b, addr);
+            lb_put64(b, size);
+            lb_put32(b, foff);
+            lb_put32(b, al);
+            lb_put32(b, 0);
+            lb_put32(b, 0);
+            lb_put32(b, flags);
+            lb_put32(b, 0);
+            lb_put32(b, 0);
+            lb_put32(b, 0);
+            ->;
+        };
+
+        // Fills the stub of an import: a jump through its got slot
+        mo_write_stub(MoLink* L, byte* img, int idx) -> bool
+        {
+            i64 at = L.stubaddr + (i64)idx * L.stubsz;
+            i64 fo = mo_foff(L, at);
+            i64 slot = L.gotaddr + (i64)L.i_got[L.t_imp[idx]] * 8;
+            i64 d;
+            if (L.arch == 0)
+            {
+                lk_w8(img, (int)fo, 255);
+                lk_w8(img, (int)fo + 1, 37);
+                d = slot - (at + 6);
+                lk_w32(img, (int)fo + 2, d);
+            }
+            else
+            {
+                // adrp x16, slot@page ; ldr x16, [x16, slot@pageoff] ; br x16
+                lk_w32(img, (int)fo, 2415919120);
+                if (!mo_adrp(img, fo, at, slot)) { -> mo_fail(L, "stub out of range\0"); };
+                lk_w32(img, (int)fo + 4, 4181721616 `| (((slot `& 4095) >> 3) << 10));
+                lk_w32(img, (int)fo + 8, 3592356352);
+            };
+            -> true;
+        };
+
+        // ===== SHA-256, for the ad-hoc code signature =====
+
+        mo_ror(i64 x, int n) -> i64
+        {
+            -> ((x >> n) `| (x << (32 - n))) `& 4294967295;
+        };
+
+        mo_sha_k(i64* K) -> void
+        {
+            K[0] = 1116352408;
+            K[1] = 1899447441;
+            K[2] = 3049323471;
+            K[3] = 3921009573;
+            K[4] = 961987163;
+            K[5] = 1508970993;
+            K[6] = 2453635748;
+            K[7] = 2870763221;
+            K[8] = 3624381080;
+            K[9] = 310598401;
+            K[10] = 607225278;
+            K[11] = 1426881987;
+            K[12] = 1925078388;
+            K[13] = 2162078206;
+            K[14] = 2614888103;
+            K[15] = 3248222580;
+            K[16] = 3835390401;
+            K[17] = 4022224774;
+            K[18] = 264347078;
+            K[19] = 604807628;
+            K[20] = 770255983;
+            K[21] = 1249150122;
+            K[22] = 1555081692;
+            K[23] = 1996064986;
+            K[24] = 2554220882;
+            K[25] = 2821834349;
+            K[26] = 2952996808;
+            K[27] = 3210313671;
+            K[28] = 3336571891;
+            K[29] = 3584528711;
+            K[30] = 113926993;
+            K[31] = 338241895;
+            K[32] = 666307205;
+            K[33] = 773529912;
+            K[34] = 1294757372;
+            K[35] = 1396182291;
+            K[36] = 1695183700;
+            K[37] = 1986661051;
+            K[38] = 2177026350;
+            K[39] = 2456956037;
+            K[40] = 2730485921;
+            K[41] = 2820302411;
+            K[42] = 3259730800;
+            K[43] = 3345764771;
+            K[44] = 3516065817;
+            K[45] = 3600352804;
+            K[46] = 4094571909;
+            K[47] = 275423344;
+            K[48] = 430227734;
+            K[49] = 506948616;
+            K[50] = 659060556;
+            K[51] = 883997877;
+            K[52] = 958139571;
+            K[53] = 1322822218;
+            K[54] = 1537002063;
+            K[55] = 1747873779;
+            K[56] = 1955562222;
+            K[57] = 2024104815;
+            K[58] = 2227730452;
+            K[59] = 2361852424;
+            K[60] = 2428436474;
+            K[61] = 2756734187;
+            K[62] = 3204031479;
+            K[63] = 3329325298;
+            ->;
+        };
+
+        // dig receives 32 bytes
+        mo_sha256(byte* src, int n, byte* dig) -> void
+        {
+            i64[64] K;
+            i64[64] W;
+            i64[8] H;
+            i64 a, b, c, d, e, f, g, h, t1, t2, s0, s1;
+            int total, blk, i, j, o;
+            byte* pad;
+            byte* m;
+            mo_sha_k(@K[0]);
+            H[0] = 1779033703; H[1] = 3144134277; H[2] = 1013904242; H[3] = 2773480762;
+            H[4] = 1359893119; H[5] = 2600822924; H[6] = 528734635; H[7] = 1541459225;
+            total = ((n + 8) / 64 + 1) * 64;
+            pad = (byte*)fmalloc(total + 8);
+            lk_zero(pad, total + 8);
+            i = 0;
+            while (i < n) { pad[i] = src[i]; i++; };
+            pad[n] = 128;
+            // length in bits, big endian
+            t1 = (i64)n * 8;
+            i = 0;
+            while (i < 8) { pad[total - 1 - i] = (t1 >> (8 * i)) `& 255; i++; };
+            blk = 0;
+            while (blk < total / 64)
+            {
+                m = pad + blk * 64;
+                i = 0;
+                while (i < 16)
+                {
+                    W[i] = ((m[i * 4] `& 255) << 24) `| ((m[i * 4 + 1] `& 255) << 16) `| ((m[i * 4 + 2] `& 255) << 8) `| (m[i * 4 + 3] `& 255);
+                    i++;
+                };
+                while (i < 64)
+                {
+                    s0 = mo_ror(W[i - 15], 7) `^| mo_ror(W[i - 15], 18) `^| (W[i - 15] >> 3);
+                    s1 = mo_ror(W[i - 2], 17) `^| mo_ror(W[i - 2], 19) `^| (W[i - 2] >> 10);
+                    W[i] = (W[i - 16] + s0 + W[i - 7] + s1) `& 4294967295;
+                    i++;
+                };
+                a = H[0]; b = H[1]; c = H[2]; d = H[3]; e = H[4]; f = H[5]; g = H[6]; h = H[7];
+                i = 0;
+                while (i < 64)
+                {
+                    s1 = mo_ror(e, 6) `^| mo_ror(e, 11) `^| mo_ror(e, 25);
+                    t1 = (h + s1 + ((e `& f) `^| ((4294967295 `^| e) `& g)) + K[i] + W[i]) `& 4294967295;
+                    s0 = mo_ror(a, 2) `^| mo_ror(a, 13) `^| mo_ror(a, 22);
+                    t2 = (s0 + ((a `& b) `^| (a `& c) `^| (b `& c))) `& 4294967295;
+                    h = g; g = f; f = e;
+                    e = (d + t1) `& 4294967295;
+                    d = c; c = b; b = a;
+                    a = (t1 + t2) `& 4294967295;
+                    i++;
+                };
+                H[0] = (H[0] + a) `& 4294967295; H[1] = (H[1] + b) `& 4294967295;
+                H[2] = (H[2] + c) `& 4294967295; H[3] = (H[3] + d) `& 4294967295;
+                H[4] = (H[4] + e) `& 4294967295; H[5] = (H[5] + f) `& 4294967295;
+                H[6] = (H[6] + g) `& 4294967295; H[7] = (H[7] + h) `& 4294967295;
+                blk++;
+            };
+            i = 0;
+            while (i < 8)
+            {
+                j = 0;
+                while (j < 4) { dig[i * 4 + j] = (H[i] >> (24 - 8 * j)) `& 255; j++; };
+                i++;
+            };
+            ffree(pad);
+            ->;
+        };
+
+        mo_be32(byte* p, int o, i64 v) -> void
+        {
+            p[o] = (v >> 24) `& 255;
+            p[o + 1] = (v >> 16) `& 255;
+            p[o + 2] = (v >> 8) `& 255;
+            p[o + 3] = v `& 255;
+            ->;
+        };
+
+        mo_be64(byte* p, int o, i64 v) -> void
+        {
+            mo_be32(p, o, v >> 32);
+            mo_be32(p, o + 4, v);
+            ->;
+        };
+
+        // Fills an ad-hoc signature blob (SuperBlob with one CodeDirectory, SHA-256 over 4096 byte pages) at sigoff.
+        // all holds the whole file, the first sigoff bytes are what is hashed.
+        mo_sign(byte* all, i64 sigoff, int siglen, byte* ident, i64 textfs) -> void
+        {
+            int idl = lk_strlen(ident) + 1;
+            int nslots = (int)((sigoff + 4095) / 4096);
+            int cdlen = 88 + idl + 32 * nslots;
+            byte* sb = all + (int)sigoff;
+            int i, n, cn;
+            byte* dg;
+            lk_zero(sb, siglen);
+            mo_be32(sb, 0, 4208856256);
+            mo_be32(sb, 4, 20 + cdlen);
+            mo_be32(sb, 8, 1);
+            mo_be32(sb, 12, 0);
+            mo_be32(sb, 16, 20);
+            sb = sb + 20;
+            mo_be32(sb, 0, 4208856066);
+            mo_be32(sb, 4, cdlen);
+            mo_be32(sb, 8, 132096);
+            mo_be32(sb, 12, 131074);
+            mo_be32(sb, 16, 88 + idl);
+            mo_be32(sb, 20, 88);
+            mo_be32(sb, 24, 0);
+            mo_be32(sb, 28, nslots);
+            mo_be32(sb, 32, sigoff);
+            sb[36] = 32;
+            sb[37] = 2;
+            sb[38] = 0;
+            sb[39] = 12;
+            mo_be64(sb, 56, 0);
+            mo_be64(sb, 64, 0);
+            mo_be64(sb, 72, textfs);
+            mo_be64(sb, 80, 1);
+            i = 0;
+            while (i < idl) { sb[88 + i] = ident[i]; i++; };
+            dg = (byte*)fmalloc(40);
+            i = 0;
+            while (i < nslots)
+            {
+                n = 4096;
+                if ((i64)(i + 1) * 4096 > sigoff) { n = (int)(sigoff - (i64)i * 4096); };
+                mo_sha256(all + i * 4096, n, dg);
+                cn = 0;
+                while (cn < 32) { sb[88 + idl + i * 32 + cn] = dg[cn]; cn++; };
+                i++;
+            };
+            ffree(dg);
+            ->;
+        };
+
+        // The last component of a path
+        mo_basename(byte* path) -> byte*
+        {
+            int i = 0;
+            int b = 0;
+            while (path[i] != 0)
+            {
+                if (path[i] == 47) { b = i + 1; };
+                i++;
+            };
+            -> path + b;
+        };
+
+        lk_write_exe(byte* path, byte* all, int n) -> bool
+        {
+            bool ok = lk_write_file(path, all, n);
+            if (ok) { lk_make_exec(path); };
+            -> ok;
+        };
+
+        mo_link_all(MoLink* L, byte* entry, byte* out) -> bool
+        {
+            i64 BASE = 4294967296;
+            i64 PAGE = 16384;
+            i64 hdr, textstart, a, te, textend, stubstart, stubend, conststart, gotend, dataend, bssend, dataseg_fs, dataseg_vs, a2;
+            i64 le_off, le_vm, rebs, bndo, bnds, symo, entryaddr, cmdsz, curadd, total, tvs, sigoff;
+            int siglen, idl;
+            byte* ident;
+            byte* all;
+            int ncmds, i, g, d, ent, al;
+            LkBuf img;
+            LkBuf lk;
+            LkBuf hb;
+            int atext, aconst, adata, abss;
+            if (L.arch == 0) { L.stubsz = 6; } else { L.stubsz = 12; };
+            // header and load commands: pagezero, text(3 sections), data(3), linkedit, dyld info, symtab, dysymtab, dylinker, build version, main, libSystem
+            cmdsz = 72 + (72 + 3 * 80) + (72 + 3 * 80) + 72 + 48 + 24 + 80 + 32 + 24 + 24 + 56;
+            ncmds = 11;
+            if (L.arch == 1) { cmdsz = cmdsz + 16; ncmds = 12; };
+            hdr = 32 + cmdsz;
+            // __TEXT
+            textstart = lk_align_up(hdr, 16);
+            atext = mo_maxalign(L, 0);
+            a = mo_place(L, 0, textstart, BASE, out);
+            textend = a;
+            stubstart = lk_align_up(textend, 4);
+            L.stubaddr = BASE + stubstart;
+            stubend = stubstart + (i64)L.nstub * L.stubsz;
+            aconst = mo_maxalign(L, 1);
+            conststart = stubend;
+            a = mo_place(L, 1, stubend, BASE, out);
+            te = a;
+            L.datavm = BASE + lk_align_up(te, PAGE);
+            L.dataoff = lk_align_up(te, PAGE);
+            // __DATA: got, data, bss
+            L.gotaddr = L.datavm;
+            gotend = (i64)L.ngot * 8;
+            adata = mo_maxalign(L, 2);
+            a = mo_place(L, 2, gotend, L.datavm, out);
+            dataend = a;
+            abss = mo_maxalign(L, 3);
+            a2 = mo_place(L, 3, dataend, L.datavm, out);
+            g = 0;
+            while (g < L.nsym)
+            {
+                if (L.y_com[g] == 1)
+                {
+                    al = (L.y_desc[g] >> 8) `& 15;
+                    if (al < 3) { al = 3; };
+                    a2 = mo_up(a2, al);
+                    L.y_cadr[g] = L.datavm + a2;
+                    a2 = a2 + L.y_val[g];
+                };
+                g++;
+            };
+            bssend = a2;
+            dataseg_fs = lk_align_up(dataend, PAGE);
+            dataseg_vs = lk_align_up(bssend, PAGE);
+            if (dataseg_vs < PAGE) { dataseg_vs = PAGE; };
+            if (dataseg_fs < PAGE) { dataseg_fs = PAGE; };
+            le_off = L.dataoff + dataseg_fs;
+            le_vm = L.datavm + dataseg_vs;
+            // the image up to the end of __DATA
+            lb_init(@img);
+            lb_reserve(@img, (int)le_off + 16);
+            if (!img.ok) { -> mo_fail(L, "out of memory\0"); };
+            lk_zero(img.m, (int)le_off + 16);
+            img.len = (int)le_off;
+            // section contents
+            i = 0;
+            while (i < L.nsec)
+            {
+                if (L.s_grp[i] >= 0 & L.s_grp[i] != 3 & L.s_size[i] > 0)
+                {
+                    d = 0;
+                    a = mo_foff(L, L.s_new[i]);
+                    while (d < (int)L.s_size[i]) { img.m[(int)a + d] = L.o_img[L.s_obj[i]][L.s_off[i] + d]; d++; };
+                };
+                i++;
+            };
+            // stubs and got slots
+            i = 0;
+            while (i < L.nstub)
+            {
+                if (!mo_write_stub(L, img.m, i)) { -> false; };
+                i++;
+            };
+            L.nbind = 0;
+            L.nreb = 0;
+            i = 0;
+            while (i < L.ngot)
+            {
+                if (L.g_kind[i] == 0) { mo_note_bind(L, (i64)i * 8, L.g_ref[i], 0); }
+                else
+                {
+                    a = mo_symaddr(L, L.g_ref[i], L.stubaddr, L.gotaddr, L.stubsz);
+                    lk_w64(img.m, (int)(L.dataoff + (i64)i * 8), a);
+                    mo_note_rebase(L, (i64)i * 8);
+                };
+                i++;
+            };
+            if (!mo_apply(L, img.m)) { -> false; };
+            // the entry point
+            ent = lm_get(@L.defs, entry);
+            if (ent < 0) { -> mo_fail(L, "entry symbol is not defined\0"); };
+            entryaddr = mo_symaddr(L, ent, L.stubaddr, L.gotaddr, L.stubsz);
+            if (entryaddr < BASE + textstart | entryaddr >= BASE + textend) { -> mo_fail(L, "entry symbol is not in the code\0"); };
+            // __LINKEDIT: rebase opcodes, bind opcodes, an empty symbol table and its string table
+            lb_init(@lk);
+            if (L.nreb > 0) { lb_put8(@lk, 17); };
+            i = 0;
+            while (i < L.nreb)
+            {
+                lb_put8(@lk, 34);
+                mo_uleb(@lk, L.r_off[i]);
+                lb_put8(@lk, 81);
+                i++;
+            };
+            lb_put8(@lk, 0);
+            lb_align(@lk, 8);
+            rebs = lk.len;
+            bndo = lk.len;
+            if (L.nbind > 0) { lb_put8(@lk, 17); lb_put8(@lk, 81); };
+            curadd = 0;
+            i = 0;
+            while (i < L.nbind)
+            {
+                lb_put8(@lk, 64);
+                lb_put_str(@lk, L.i_name[L.b_imp[i]]);
+                lb_put8(@lk, 114);
+                mo_uleb(@lk, L.b_off[i]);
+                if (L.b_add[i] != curadd) { lb_put8(@lk, 96); mo_sleb(@lk, L.b_add[i]); curadd = L.b_add[i]; };
+                lb_put8(@lk, 144);
+                i++;
+            };
+            lb_put8(@lk, 0);
+            lb_align(@lk, 8);
+            bnds = lk.len - bndo;
+            symo = lk.len;
+            lb_put32(@lk, 0);
+            lb_put32(@lk, 0);
+            sigoff = 0;
+            siglen = 0;
+            ident = mo_basename(out);
+            if (L.arch == 1)
+            {
+                // arm64 images must carry a signature, an ad-hoc one is enough
+                lb_align(@lk, 16);
+                sigoff = le_off + lk.len;
+                idl = lk_strlen(ident) + 1;
+                siglen = 20 + 88 + idl + 32 * (int)((sigoff + 4095) / 4096);
+                i = 0;
+                while (i < siglen) { lb_put8(@lk, 0); i++; };
+            };
+            if (!lk.ok) { -> mo_fail(L, "out of memory\0"); };
+            // load commands
+            lb_init(@hb);
+            lb_put32(@hb, 4277009103);
+            if (L.arch == 0) { lb_put32(@hb, 16777223); lb_put32(@hb, 3); } else { lb_put32(@hb, 16777228); lb_put32(@hb, 0); };
+            lb_put32(@hb, 2);
+            lb_put32(@hb, ncmds);
+            lb_put32(@hb, cmdsz);
+            lb_put32(@hb, 2097285);
+            lb_put32(@hb, 0);
+            mo_cmd_seg(@hb, "__PAGEZERO\0", 0, BASE, 0, 0, 0, 0, 0);
+            tvs = lk_align_up(te, PAGE);
+            mo_cmd_seg(@hb, "__TEXT\0", BASE, tvs, 0, tvs, 5, 5, 3);
+            mo_cmd_sect(@hb, "__text\0", "__TEXT\0", BASE + textstart, textend - textstart, textstart, atext, 2147484672);
+            if (L.arch == 0) { al = 0; } else { al = 2; };
+            mo_cmd_sect(@hb, "__stubs\0", "__TEXT\0", L.stubaddr, stubend - stubstart, stubstart, al, 2147484672);
+            mo_cmd_sect(@hb, "__const\0", "__TEXT\0", BASE + conststart, te - conststart, conststart, aconst, 0);
+            mo_cmd_seg(@hb, "__DATA\0", L.datavm, dataseg_vs, L.dataoff, dataseg_fs, 3, 3, 3);
+            mo_cmd_sect(@hb, "__got\0", "__DATA\0", L.datavm, gotend, L.dataoff, 3, 0);
+            mo_cmd_sect(@hb, "__data\0", "__DATA\0", L.datavm + gotend, dataend - gotend, L.dataoff + gotend, adata, 0);
+            mo_cmd_sect(@hb, "__bss\0", "__DATA\0", L.datavm + dataend, bssend - dataend, 0, abss, 1);
+            mo_cmd_seg(@hb, "__LINKEDIT\0", le_vm, lk_align_up(lk.len, PAGE), le_off, lk.len, 1, 1, 0);
+            // dyld info
+            lb_put32(@hb, 2147483682);
+            lb_put32(@hb, 48);
+            lb_put32(@hb, le_off);
+            lb_put32(@hb, rebs);
+            lb_put32(@hb, le_off + bndo);
+            lb_put32(@hb, bnds);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, 0);
+            // symbol table: no symbols
+            lb_put32(@hb, 2);
+            lb_put32(@hb, 24);
+            lb_put32(@hb, le_off + symo);
+            lb_put32(@hb, 0);
+            lb_put32(@hb, le_off + symo);
+            lb_put32(@hb, 8);
+            // dynamic symbol table: all empty
+            lb_put32(@hb, 11);
+            lb_put32(@hb, 80);
+            i = 0;
+            while (i < 18) { lb_put32(@hb, 0); i++; };
+            // the dynamic linker
+            lb_put32(@hb, 14);
+            lb_put32(@hb, 32);
+            lb_put32(@hb, 12);
+            lb_put_str(@hb, "/usr/lib/dyld\0");
+            lb_align(@hb, 8);
+            // build version: macOS 11.0
+            lb_put32(@hb, 50);
+            lb_put32(@hb, 24);
+            lb_put32(@hb, 1);
+            lb_put32(@hb, 720896);
+            lb_put32(@hb, 720896);
+            lb_put32(@hb, 0);
+            // entry point
+            lb_put32(@hb, 2147483688);
+            lb_put32(@hb, 24);
+            lb_put64(@hb, entryaddr - BASE);
+            lb_put64(@hb, 0);
+            // libSystem
+            lb_put32(@hb, 12);
+            lb_put32(@hb, 56);
+            lb_put32(@hb, 24);
+            lb_put32(@hb, 2);
+            lb_put32(@hb, 85917696);
+            lb_put32(@hb, 65536);
+            lb_put_str(@hb, "/usr/lib/libSystem.B.dylib\0");
+            lb_align(@hb, 8);
+            if (L.arch == 1)
+            {
+                lb_put32(@hb, 29);
+                lb_put32(@hb, 16);
+                lb_put32(@hb, sigoff);
+                lb_put32(@hb, siglen);
+            };
+            if (!hb.ok) { -> mo_fail(L, "out of memory\0"); };
+            if (hb.len != (int)hdr) { -> mo_fail(L, "internal error: load command size\0"); };
+            i = 0;
+            while (i < hb.len) { img.m[i] = hb.m[i]; i++; };
+            total = le_off + lk.len;
+            all = (byte*)fmalloc((int)total + 16);
+            if (all == (byte*)0) { -> mo_fail(L, "out of memory\0"); };
+            i = 0;
+            while (i < (int)le_off) { all[i] = img.m[i]; i++; };
+            i = 0;
+            while (i < lk.len) { all[(int)le_off + i] = lk.m[i]; i++; };
+            if (L.arch == 1) { mo_sign(all, sigoff, siglen, ident, tvs); };
+            if (!lk_write_exe(out, all, (int)total)) { -> mo_fail(L, "cannot write the output file\0"); };
+            ffree(all);
+            -> true;
+        };
+
+        lk_macho_link(byte** objs, int nobjs, byte* entry, byte* out) -> byte*
+        {
+            MoLink L;
+            int k, sz, tot_sec, tot_sym, n;
+            bool ok = true;
+            L.err = (byte*)0;
+            L.arch = 0;
+            L.nobj = nobjs;
+            L.nimp = 0;
+            L.ngot = 0;
+            L.nstub = 0;
+            L.nrel = 0;
+            L.nbind = 0;
+            L.nreb = 0;
+            L.o_img = (byte**)fmalloc(8 * (nobjs + 1));
+            L.o_size = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_sec0 = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_nsec = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_sym0 = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_nsym = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_symoff = (int*)fmalloc(4 * (nobjs + 1));
+            L.o_stroff = (int*)fmalloc(4 * (nobjs + 1));
+            k = 0;
+            while (k < nobjs & ok)
+            {
+                sz = 0;
+                L.o_img[k] = lk_read_file(objs[k], @sz);
+                if (L.o_img[k] == (byte*)0) { ok = mo_fail(@L, "cannot read an input object\0"); }
+                else
+                {
+                    L.o_size[k] = sz;
+                    ok = mo_count_obj(@L, k);
+                };
+                k++;
+            };
+            if (!ok) { -> L.err; };
+            tot_sec = 0;
+            tot_sym = 0;
+            k = 0;
+            while (k < nobjs)
+            {
+                L.o_sec0[k] = tot_sec;
+                L.o_sym0[k] = tot_sym;
+                tot_sec = tot_sec + L.o_nsec[k];
+                tot_sym = tot_sym + L.o_nsym[k];
+                k++;
+            };
+            L.nsec = tot_sec;
+            L.nsym = tot_sym;
+            n = tot_sec + 1;
+            L.s_obj = (int*)fmalloc(4 * n);
+            L.s_grp = (int*)fmalloc(4 * n);
+            L.s_addr0 = (i64*)fmalloc(8 * n);
+            L.s_size = (i64*)fmalloc(8 * n);
+            L.s_off = (int*)fmalloc(4 * n);
+            L.s_align = (int*)fmalloc(4 * n);
+            L.s_reloff = (int*)fmalloc(4 * n);
+            L.s_nrel = (int*)fmalloc(4 * n);
+            L.s_new = (i64*)fmalloc(8 * n);
+            n = tot_sym + 1;
+            L.y_obj = (int*)fmalloc(4 * n);
+            L.y_name = (byte**)fmalloc(8 * n);
+            L.y_type = (int*)fmalloc(4 * n);
+            L.y_sect = (int*)fmalloc(4 * n);
+            L.y_val = (i64*)fmalloc(8 * n);
+            L.y_desc = (int*)fmalloc(4 * n);
+            L.y_def = (int*)fmalloc(4 * n);
+            L.y_imp = (int*)fmalloc(4 * n);
+            L.y_got = (int*)fmalloc(4 * n);
+            L.y_addr = (i64*)fmalloc(8 * n);
+            L.y_com = (int*)fmalloc(4 * n);
+            L.y_cadr = (i64*)fmalloc(8 * n);
+            L.i_name = (byte**)fmalloc(8 * n);
+            L.i_got = (int*)fmalloc(4 * n);
+            L.i_stub = (int*)fmalloc(4 * n);
+            L.g_kind = (int*)fmalloc(4 * n);
+            L.g_ref = (int*)fmalloc(4 * n);
+            L.t_imp = (int*)fmalloc(4 * n);
+            k = 0;
+            while (k < nobjs & ok)
+            {
+                ok = mo_load_obj(@L, k);
+                k++;
+            };
+            if (!ok) { -> L.err; };
+            n = L.nrel + n + 8;
+            L.b_off = (i64*)fmalloc(8 * n);
+            L.b_imp = (int*)fmalloc(4 * n);
+            L.b_add = (i64*)fmalloc(8 * n);
+            L.r_off = (i64*)fmalloc(8 * n);
+            if (!mo_resolve_names(@L)) { -> L.err; };
+            if (!mo_scan_relocs(@L)) { -> L.err; };
+            if (!mo_link_all(@L, entry, out)) { -> L.err; };
+            -> (byte*)0;
+        };
+    };
+};
+
+#endif;

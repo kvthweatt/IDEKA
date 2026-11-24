@@ -1,0 +1,37 @@
+module A
+{
+    #import <standard.idk>;
+
+    using standard::io::console;
+
+    main() -> int
+    {
+
+        -> 0;
+    };
+}
+#build
+{
+    !+#[borrow_check] = true
+};
+
+module B
+{
+    #import <standard.idk>;
+
+    using standard::io::console;
+    
+    main() -> int
+    {
+
+        -> 0;
+    };
+}
+#build
+{
+    #[requires] = {A},
+    #[override for A] =
+    {
+        #[borrow_check] = false
+    }
+};

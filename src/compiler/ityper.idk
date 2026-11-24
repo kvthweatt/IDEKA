@@ -5581,6 +5581,17 @@ namespace IDEKA
                 st_enter_scope(this.st);
                 it = this.type_of(n.a);
                 et = this.elem_of(it);
+                switch (n.a.kind == NodeKind.RANGE_EXPRESSION)
+                {
+                    case (true) {
+                        int rw = this.width_of(this.type_of(n.a.a));
+                        int rw2 = this.width_of(this.type_of(n.a.b));
+                        switch (rw2 > rw) { case (true) { rw = rw2; } default {}; };
+                        switch (rw < 32) { case (true) { rw = 32; } default {}; };
+                        et = this.mk_int(rw, false);
+                    }
+                    default {};
+                };
                 dn = (Node*)0;
                 switch ((n.flags `& NF_DESTRUCTURE) != 0)
                 {

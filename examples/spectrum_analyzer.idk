@@ -7,7 +7,7 @@
  - R key toggles bars / waveform mode
 ///
 
-#import <standard.idk>, <math.idk>, <windows.idk>, <opengl.idk>, <threading.idk>, <fourier.idk>, <wasapi.idk>;
+#import <standard.idk>, <windows.idk>, <opengl.idk>, <threading.idk>, <fourier.idk>, <wasapi.idk>;
 
 using standard::system::windows,
       standard::math,

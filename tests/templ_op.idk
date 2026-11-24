@@ -1,0 +1,31 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+operator<T: int | uint | long | ulong | i64 | u64>(T t)[+++] -> T -> 0 # binding {:this};
+
+comptime
+{
+    for (x in 0..99)
+    {
+        print(x);
+    };
+    flush();
+};
+
+main() -> int
+{
+    u64 x = 100;
+
+    println(x);
+
+    println(x+++);
+
+    for (x in 0..99)
+    {
+        print(x);
+    };
+    flush();
+
+    -> 0;
+};

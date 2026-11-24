@@ -472,6 +472,7 @@ class IDEKAParser:
         self._pending_template_instances = []  # (kind, node) tuples: 'struct' | 'object' | 'function'
         self._parsed_objects = {}  # object_name -> ObjectDef AST node
         self._parsed_traits = {}   # trait_name -> TraitDef AST node
+        self._op_proto_binding: Dict[tuple, str] = {}  # (symbol, symbol2) -> binding of an operator prototype
         self._custom_operators: Dict[str, str] = {}  # symbol string -> base function name (binary)
         self._custom_prefix_ops: Dict[str, str] = {}   # symbol string -> func_name (prefix unary)
         self._custom_postfix_ops: Dict[str, str] = {}  # symbol string -> func_name (postfix unary)
@@ -485,6 +486,8 @@ class IDEKAParser:
         self._constras: dict = {}  # name -> (params: List[str], relations: list)
         self._function_depth = 0  # Tracks nesting depth; nested function defs are illegal
         self._loop_depth = 0      # Tracks nesting depth of for/while/do-while loops
+        self._assign_count = 0    # number of assignment nodes built so far (ternary condition check)
+        self._cond_depth = 0      # >0 while parsing an if/elif/while/do-while/for/switch condition (assignment banned)
         self._in_for_init = False # True while parsing the init clause of a for(...) header
         self._in_trait = 0        # Tracks nesting depth inside trait bodies (prototypes only)
         self._default_byte_width = default_byte_width if default_byte_width is not None else _get_byte_width(_IDEKA_config)
@@ -872,29 +875,17 @@ class IDEKAParser:
         # Consume 'operator' keyword token
         self.consume(TokenType.OPERATOR)
 
-        # Parse optional template parameter list: operator<T, K>(...)
-        # Use lookahead to confirm all angle-bracket contents are identifiers.
+        # Parse optional template parameter list: operator<T, K: int | long, :{CS}>(...)
+        # After the 'operator' keyword a '<' can only start a template parameter list, so the
+        # full function template parameter parser (constraints, constraint sets, defaults) is used.
         template_params = []
+        _op_constraints = {}
+        _op_relations = []
+        _op_defaults = {}
+        _op_no_default = set()
         if self.expect(TokenType.LESS_THAN):
-            with self._lookahead():
-                is_template = False
-                self.advance()  # consume '<'
-                if self.expect(TokenType.IDENTIFIER):
-                    self.advance()
-                    while self.expect(TokenType.COMMA):
-                        self.advance()
-                        if not self.expect(TokenType.IDENTIFIER):
-                            break
-                        self.advance()
-                    if self.expect(TokenType.GREATER_THAN):
-                        is_template = True
-            if is_template:
-                self.advance()  # consume '<'
-                template_params.append(self.consume(TokenType.IDENTIFIER).value)
-                while self.expect(TokenType.COMMA):
-                    self.advance()
-                    template_params.append(self.consume(TokenType.IDENTIFIER).value)
-                self.consume(TokenType.GREATER_THAN)
+            (template_params, _op_constraints, _op_relations,
+             _op_defaults, _op_no_default) = self._parse_template_param_list(allow_codify=False)
 
         self.consume(TokenType.LEFT_PAREN)
         _tmpl_scope_ctx = self._template_scope(template_params if template_params else [])
@@ -975,6 +966,44 @@ class IDEKAParser:
 
         unary_binding = None  # None | 'prefix' | 'postfix' -- set in non-prototype path
 
+        def _parse_op_binding():
+            """Optional '# binding {:this}' (postfix) or '# binding {this:}' (prefix) before the
+            terminating ';' of an operator definition. Returns 'prefix', 'postfix' or None."""
+            if not self.expect(TokenType.TAG):
+                return None
+            next_tok = self.tokens[self.position + 1] if self.position + 1 < len(self.tokens) else None
+            if not (next_tok and next_tok.type == TokenType.IDENTIFIER and next_tok.value == 'binding'):
+                return None
+            if symbol2 is not None:
+                self.error("Operator takes a single parameter and defines two symbols (circumfix) and cannot have a #binding{:}"
+                           if len(params) == 1 else
+                           "Operator defines two symbols and cannot have a #binding{:}")
+            if len(params) != 1:
+                self.error("# binding on an operator definition is only valid for unary operators (exactly one parameter)")
+            self.advance()  # consume TAG (#)
+            self.advance()  # consume 'binding'
+            self.consume(TokenType.LEFT_BRACE)
+            result = None
+            if self.expect(TokenType.COLON):
+                # {:this} -- postfix
+                self.advance()
+                self.consume(TokenType.THIS)
+                result = 'postfix'
+            elif self.expect(TokenType.THIS):
+                # {this:} -- prefix
+                self.advance()
+                self.consume(TokenType.COLON)
+                result = 'prefix'
+            else:
+                self.error("Unary # binding must be {:this} for postfix or {this:} for prefix")
+            self.consume(TokenType.RIGHT_BRACE)
+            return result
+
+        def _check_unary_needs_binding():
+            """One parameter, one symbol, not variadic and no binding: neither unary nor circumfix."""
+            if unary_binding is None and symbol2 is None and len(params) == 1 and not _is_variadic_op:
+                self.error("Operator takes a single parameter and defines one symbol (unary) and must have a #binding{:}")
+
         # For variadic operators, append a hidden __op_count parameter so the body
         # can read the operator-token count via the operator's own symbol.
         _is_variadic_op = any(getattr(p, '_is_variadic_sentinel', False) for p in params)
@@ -992,8 +1021,16 @@ class IDEKAParser:
             # Keep is_variadic=True so codegen emits a proper vararg function.
             params = _hidden_params + [p for p in params if not getattr(p, '_is_variadic_sentinel', False)]
 
-        if self.expect(TokenType.SEMICOLON):
-            self.advance()
+        _nt = self.tokens[self.position + 1] if self.position + 1 < len(self.tokens) else None
+        _proto_binding = (self.expect(TokenType.TAG) and _nt is not None
+                          and _nt.type == TokenType.IDENTIFIER and _nt.value == 'binding')
+        if self.expect(TokenType.SEMICOLON) or _proto_binding:
+            # Prototype; a unary one carries its '# binding' before the ';'
+            unary_binding = _parse_op_binding()
+            _check_unary_needs_binding()
+            if unary_binding is not None:
+                self._op_proto_binding[(symbol, symbol2)] = unary_binding
+            self.consume(TokenType.SEMICOLON)
             body = Block([])
             is_prototype = True
         elif self.expect(TokenType.RETURN_ARROW):
@@ -1010,6 +1047,8 @@ class IDEKAParser:
             self.advance()  # consume '->'
             expr = self.expression()
             self._variadic_op_body_symbol = _prev_vop_sym
+            unary_binding = _parse_op_binding() or self._op_proto_binding.get((symbol, symbol2))
+            _check_unary_needs_binding()
             self.consume(TokenType.SEMICOLON)
             body = Block([ReturnStatement(expr)])
             is_prototype = False
@@ -1048,28 +1087,9 @@ class IDEKAParser:
                                                 _post_contract_names, _post_contract_arities)
             # Parse optional unary binding: # binding {:this}  or  # binding {this:}
             # Must be checked BEFORE consuming the terminating ';'.
-            # Only valid when the operator has exactly one parameter.
-            if self.expect(TokenType.TAG):
-                next_tok = self.tokens[self.position + 1] if self.position + 1 < len(self.tokens) else None
-                if next_tok and next_tok.type == TokenType.IDENTIFIER and next_tok.value == 'binding':
-                    if len(params) != 1:
-                        self.error("# binding on an operator definition is only valid for unary operators (exactly one parameter)")
-                    self.advance()  # consume TAG (#)
-                    self.advance()  # consume 'binding'
-                    self.consume(TokenType.LEFT_BRACE)
-                    if self.expect(TokenType.COLON):
-                        # {:this} -- postfix
-                        self.advance()  # consume ':'
-                        self.consume(TokenType.THIS)
-                        unary_binding = 'postfix'
-                    elif self.expect(TokenType.THIS):
-                        # {this:} -- prefix
-                        self.advance()  # consume 'this'
-                        self.consume(TokenType.COLON)
-                        unary_binding = 'prefix'
-                    else:
-                        self.error("Unary # binding must be {:this} for postfix or {this:} for prefix")
-                    self.consume(TokenType.RIGHT_BRACE)
+            # A definition needs no binding when its prototype declared one.
+            unary_binding = _parse_op_binding() or self._op_proto_binding.get((symbol, symbol2))
+            _check_unary_needs_binding()
             self.consume(TokenType.SEMICOLON)
             is_prototype = False
 
@@ -1130,7 +1150,11 @@ class IDEKAParser:
                 is_prototype=is_prototype,
                 no_mangle=False
             ).set_location(tok.line, tok.column)
-            self._templates.register(symbol, 'operator', template_params, func_def)
+            self._templates.register(symbol, 'operator', template_params, func_def,
+                                     constraints=_op_constraints or {},
+                                     relational=_op_relations or [],
+                                     defaults=_op_defaults or {},
+                                     no_default=_op_no_default or set())
             return None
 
         return FunctionDef(
@@ -1158,6 +1182,7 @@ class IDEKAParser:
                   Literal(len(operands), DataType.SINT),
                   Literal(bool(is_leading), DataType.BOOL),
                   Literal(bool(is_trailing), DataType.BOOL)]
+        self._try_instantiate_custom_template_op(func_name, operands, 4)
         return FunctionCall(func_name, hidden + operands).set_location(tok.line, tok.column)
 
     def custom_op_expression(self) -> Expression:
@@ -1237,6 +1262,7 @@ class IDEKAParser:
                         self.advance()
                     right = self.multiplicative_expression()
                     func_name = self._custom_ternary_ops[(matched_left, matched_right)]
+                    self._try_instantiate_custom_template_op(func_name, [expr, mid, right])
                     expr = FunctionCall(func_name, [expr, mid, right]).set_location(tok.line, tok.column)
                     continue
 
@@ -1247,6 +1273,7 @@ class IDEKAParser:
                 self.advance()
             right = self.multiplicative_expression()
             func_name = self._custom_operators[matched_symbol]
+            self._try_instantiate_custom_template_op(func_name, [expr, right])
             expr = FunctionCall(func_name, [expr, right])
 
         return expr
@@ -7112,7 +7139,7 @@ class IDEKAParser:
         if self.expect(TokenType.IF):
             self.advance()
             self.consume(TokenType.LEFT_PAREN, "Expected '(' after 'if' in block-if statement")
-            condition = self.expression()
+            condition = self.condition_expression()
             self.consume(TokenType.RIGHT_PAREN, "Expected ')' after condition in block-if statement")
 
             # Optional else block - but NOT an immediate bare block (that would
@@ -7136,6 +7163,8 @@ class IDEKAParser:
     def block(self) -> Block:
         tok = self.current_token
         self.consume(TokenType.LEFT_BRACE)
+        saved_cond_depth = self._cond_depth
+        self._cond_depth = 0
         
         statements = []
         while not self.expect(TokenType.RIGHT_BRACE):
@@ -7149,6 +7178,7 @@ class IDEKAParser:
                     statements.append(stmt)
                     self._last_stmt = stmt
         
+        self._cond_depth = saved_cond_depth
         self.consume(TokenType.RIGHT_BRACE)
         
         return Block(statements).set_location(tok.line, tok.column)
@@ -7481,7 +7511,7 @@ class IDEKAParser:
         tok = self.current_token
         self.consume(TokenType.IF)
         self.consume(TokenType.LEFT_PAREN)
-        condition = self.expression()
+        condition = self.condition_expression()
         self.consume(TokenType.RIGHT_PAREN)
         then_block = self.block_or_single_stmt()
 
@@ -7494,7 +7524,7 @@ class IDEKAParser:
                 self.advance()  # consume 'if'
 
             self.consume(TokenType.LEFT_PAREN)
-            elif_condition = self.expression()
+            elif_condition = self.condition_expression()
             self.consume(TokenType.RIGHT_PAREN)
             elif_block = self.block_or_single_stmt()
             elif_blocks.append((elif_condition, elif_block))
@@ -7514,7 +7544,7 @@ class IDEKAParser:
         tok = self.current_token
         self.consume(TokenType.WHILE)
         self.consume(TokenType.LEFT_PAREN)
-        condition = self.expression()
+        condition = self.condition_expression()
         self.consume(TokenType.RIGHT_PAREN)
         self._loop_depth += 1
         body = self.block()
@@ -7541,7 +7571,7 @@ class IDEKAParser:
             # Do-while loop
             self.advance()
             self.consume(TokenType.LEFT_PAREN)
-            condition = self.expression()
+            condition = self.condition_expression()
             self.consume(TokenType.RIGHT_PAREN)
             self.consume(TokenType.SEMICOLON)
             return DoWhileLoop(body, condition).set_location(tok.line, tok.column)
@@ -7664,7 +7694,7 @@ class IDEKAParser:
             
             condition = None
             if not self.expect(TokenType.SEMICOLON):
-                condition = self.expression()
+                condition = self.condition_expression()
             self.consume(TokenType.SEMICOLON)
             
             update = None
@@ -7686,7 +7716,7 @@ class IDEKAParser:
         tok = self.current_token
         self.consume(TokenType.SWITCH)
         self.consume(TokenType.LEFT_PAREN)
-        expression = self.expression()
+        expression = self.condition_expression()
         self.consume(TokenType.RIGHT_PAREN)
         self.consume(TokenType.LEFT_BRACE)
         
@@ -7923,7 +7953,7 @@ class IDEKAParser:
         tok = self.current_token
         self.consume(TokenType.ASSERT)
         self.consume(TokenType.LEFT_PAREN)
-        condition = self.expression()
+        condition = self.condition_expression()
         
         message = None
         if self.expect(TokenType.COMMA):
@@ -8151,6 +8181,23 @@ class IDEKAParser:
         self.consume(TokenType.RIGHT_BRACE)
         return statements
 
+    def condition_expression(self) -> Expression:
+        """
+        Expression in a conditional context (if/elif/while/do-while/for/switch).
+        Assignment of any kind is rejected here so that `if (x = 1)` cannot
+        silently compile when `==` was intended.
+        """
+        self._cond_depth += 1
+        try:
+            return self.expression()
+        finally:
+            self._cond_depth -= 1
+
+    def _reject_cond_assign(self, tok):
+        self._assign_count += 1
+        if self._cond_depth > 0:
+            self.error("Assignment is not allowed inside a condition; use '==' to compare")
+
     def expression(self) -> Expression:
         """
         expression -> assignment_expression
@@ -8168,6 +8215,7 @@ class IDEKAParser:
         expr = self.ternary_expression()
         
         if self.expect(TokenType.ASSIGN):
+            self._reject_cond_assign(tok)
             self.advance()
             if self.expect(TokenType.DITTO):
                 import copy
@@ -8199,12 +8247,14 @@ class IDEKAParser:
                          TokenType.BITAND_ASSIGN, TokenType.BITOR_ASSIGN, TokenType.BITNAND_ASSIGN, TokenType.BITNOR_ASSIGN,
                          TokenType.OR_ASSIGN, TokenType.AND_ASSIGN):
             # Handle compound assignments
+            self._reject_cond_assign(tok)
             op_token = self.current_token.type
             self.advance()
             value = self.assignment_expression()
             return CompoundAssignment(expr, op_token, value).set_location(tok.line, tok.column)
         elif self.expect(TokenType.ADDRESS_ASSIGN):
             # `x @= expr;` is sugar for `x = @expr;`
+            self._reject_cond_assign(tok)
             addr_tok = self.current_token
             self.advance()
             rhs = self.assignment_expression()
@@ -8212,6 +8262,7 @@ class IDEKAParser:
             return Assignment(expr, value).set_location(tok.line, tok.column)
         elif self.expect(TokenType.TERNARY_ASSIGN):
             # Handle ternary assignment: x ?= value  (assign value to x only if x == 0)
+            self._reject_cond_assign(tok)
             self.advance()
             value = self.assignment_expression()
             return TernaryAssign(expr, value).set_location(tok.line, tok.column)
@@ -8223,9 +8274,12 @@ class IDEKAParser:
         ternary_expression -> logical_or_expression ('?' expression ':' ternary_expression)?
         """
         tok = self.current_token
+        assign_mark = self._assign_count
         expr = self.null_coalesce_expression()
         
         if self.expect(TokenType.QUESTION):
+            if self._assign_count != assign_mark:
+                self.error("Assignment is not allowed inside a condition; use '==' to compare")
             self.advance()
             true_expr = self.expression()  # The value if true
             self.consume(TokenType.COLON, "Expected ':' in ternary expression")
@@ -8718,6 +8772,7 @@ class IDEKAParser:
                         self.advance()
                     operand = self.unary_expression()
                     func_name = self._custom_prefix_ops[matched_sym]
+                    self._try_instantiate_custom_template_op(func_name, [operand])
                     return FunctionCall(func_name, [operand]).set_location(tok.line, tok.column)
             if self._custom_circumfix_ops:
                 left_syms = {lsym: lsym for lsym, _ in self._custom_circumfix_ops}
@@ -8734,6 +8789,7 @@ class IDEKAParser:
                     for _ in range(right_len):
                         self.advance()
                     func_name = self._custom_circumfix_ops[(matched_left, matched_right)]
+                    self._try_instantiate_custom_template_op(func_name, [operand])
                     return FunctionCall(func_name, [operand]).set_location(tok.line, tok.column)
             return self.postfix_expression()
     
@@ -9670,7 +9726,7 @@ class IDEKAParser:
         resolved alias types (e.g. u64 -> DATA/64-bit) to lose their bit_width.
         """
         entry = self._templates.lookup(func_name)
-        if entry is None or entry.kind not in ('function',):
+        if entry is None or entry.kind not in ('function', 'operator'):
             self.error(f"Unknown template function '{func_name}'")
         template_params = entry.params
         template_func = entry.node
@@ -9862,7 +9918,11 @@ class IDEKAParser:
                     if arg_ts is not None and arg_ts.dict_capacity:
                         concrete_func.return_type.dict_capacity = arg_ts.dict_capacity
                         break
-            concrete_func.name = func_name  # Keep original name; normal mangling handles uniqueness
+            if entry.kind == 'operator':
+                # An operator keeps its mangled operator__ name; the registry key is the symbol.
+                concrete_func.name = template_func.name
+            else:
+                concrete_func.name = func_name  # Keep original name; normal mangling handles uniqueness
             if getattr(template_func, '_is_comptime_only', False):
                 concrete_func._is_comptime_only = True
             concrete_func.no_mangle = False
@@ -10137,7 +10197,7 @@ class IDEKAParser:
             return
         self._resolve_template_operator(op_symbol, [lts, rts])
 
-    def _resolve_template_operator(self, op_symbol: str, arg_type_specs: list):
+    def _resolve_template_operator(self, op_symbol: str, arg_type_specs: list, hidden: int = 0):
         """
         Instantiate a template operator for the given concrete operand TypeSystems.
         `op_symbol` is the raw operator symbol string (e.g. '+').
@@ -10160,8 +10220,11 @@ class IDEKAParser:
         # template param bindings by matching the function's declared parameter
         # typespecs against the concrete operand typespecs from the call site.
         # e.g. operator<T>(Ring<T>* dst, Ring<T>* src): T is inferred from dst/src.
-        if len(arg_type_specs) != len(template_func.parameters):
-            #import sys as _sys; _sys.stderr.write(f'[DEBUG rto] bail operand count {len(arg_type_specs)} != param count {len(template_func.parameters)}\n'); _sys.stderr.flush()
+        # A variadic operator carries hidden leading parameters (count, operand count, flags)
+        # that are not operands; only the declared parameters after them take operand types.
+        _op_params = template_func.parameters[hidden:]
+        if len(arg_type_specs) != len(_op_params):
+            #import sys as _sys; _sys.stderr.write(f'[DEBUG rto] bail operand count {len(arg_type_specs)} != param count {len(_op_params)}\n'); _sys.stderr.flush()
             return  # Wrong number of operands entirely - cannot instantiate
 
         # Keep the original call-site operand types for the primitive guard below.
@@ -10174,7 +10237,7 @@ class IDEKAParser:
             # by unifying each function parameter's declared typespec with the
             # corresponding concrete operand typespec from the call site.
             inferred: dict = {}
-            for func_param, concrete_ts in zip(template_func.parameters, arg_type_specs):
+            for func_param, concrete_ts in zip(_op_params, arg_type_specs):
                 decl_ts = func_param.type_spec
                 if decl_ts is None:
                     continue
@@ -10247,28 +10310,43 @@ class IDEKAParser:
                 #import sys as _sys; _sys.stderr.write(f'[DEBUG rto] bail all-primitive\n'); _sys.stderr.flush()
                 return  # All-primitive instantiation - skip to avoid overriding builtins
 
-        # Build a stable mangle key so each unique pair of concrete types is only
-        # instantiated once.
+        # A built-in symbol is overloaded for some types only: operands that do not satisfy a
+        # declared type constraint simply do not use this template, they are not an error.
+        if op_symbol in _builtin_op_values and entry.constraints:
+            for _i, _pname in enumerate(template_params):
+                _allowed = entry.constraints.get(_pname)
+                if not _allowed or _i >= len(arg_type_specs):
+                    continue
+                if not any(self._ts_matches(arg_type_specs[_i], _a) for _a, _ in _allowed):
+                    return
+
+        # Constraints, relations, deduplication and the pending instance all go through the
+        # same path as a function template.
         type_names = [self._type_system_to_mangle_str(ts) for ts in arg_type_specs]
-        mangle_key = template_func.name + '__tmpl__' + '__'.join(type_names)
+        self._resolve_template_call(op_symbol, type_names, arg_type_specs)
 
-        if self._templates.is_emitted(op_symbol, mangle_key):
-            return
-        self._templates.mark_emitted(op_symbol, mangle_key)
-
-        # Build the substitution mapping: template param name -> concrete TypeSystem
-        mapping = self._build_template_mapping(template_params, type_names, arg_type_specs)
-
-        concrete_func = self._substitute_template(template_func, mapping)
-        # Keep the original mangled function name (e.g. operator__plus); the
-        # LLVM-level overload uniqueness comes from distinct parameter types.
-        concrete_func.name = template_func.name
-        concrete_func.no_mangle = False
-        # Tag with _source_namespace so pass 3 in fcodegen picks it up as a
-        # template instantiation and emits it after all namespace functions are
-        # registered. Without this attribute the pass 3 filter silently skips it.
-        concrete_func._source_namespace = ''
-        self._pending_template_instances.append(('function', concrete_func))
+    def _try_instantiate_custom_template_op(self, func_name: str, args: list, hidden: int = 0):
+        """
+        Called where a call to a custom operator (infix, prefix, postfix, circumfix, ternary)
+        has just been built.  `func_name` is the operator__ name.  When it belongs to a
+        template operator and every operand type is known, instantiate it.
+        """
+        for _key, _entry in self._templates.items():
+            if _entry.kind == 'operator' and _entry.node.name == func_name:
+                if hidden:
+                    # variadic: the operands past the declared parameters are C varargs
+                    _nfixed = len(_entry.node.parameters) - hidden
+                    if len(args) < _nfixed:
+                        return
+                    args = args[:_nfixed]
+                _specs = []
+                for _a in args:
+                    _ts = self._infer_type_from_expr(_a)
+                    if _ts is None:
+                        return
+                    _specs.append(_ts)
+                self._resolve_template_operator(_key, _specs, hidden)
+                return
 
     def _infer_type_from_expr(self, expr) -> 'TypeSystem | None':
         """
@@ -10684,6 +10762,17 @@ class IDEKAParser:
                     # Create MemberAccess node - codegen will determine if it's
                     # StructFieldAccess or object member based on type
                     expr = MemberAccess(expr, member).set_location(tok.line, tok.column)
+            elif (self._custom_postfix_ops and self.expect(TokenType.INCREMENT, TokenType.DECREMENT)
+                  and self._match_custom_unary_op(self._custom_postfix_ops)[0] is not None):
+                # A registered custom postfix operator that starts with ++ or -- (such as +++)
+                # takes precedence over the built-in postfix increment and decrement.
+                matched_sym, matched_len = self._match_custom_unary_op(self._custom_postfix_ops)
+                tok = self.current_token
+                for _ in range(matched_len):
+                    self.advance()
+                func_name = self._custom_postfix_ops[matched_sym]
+                self._try_instantiate_custom_template_op(func_name, [expr])
+                expr = FunctionCall(func_name, [expr]).set_location(tok.line, tok.column)
             elif self.expect(TokenType.INCREMENT):
                 # Postfix increment - but not if ++ begins a registered custom operator
                 tok = self.current_token
@@ -10736,7 +10825,7 @@ class IDEKAParser:
                 tok = self.current_token
                 self.advance()
                 self.consume(TokenType.LEFT_PAREN, "Expected '(' after 'if' in if-expression")
-                condition = self.expression()
+                condition = self.condition_expression()
                 self.consume(TokenType.RIGHT_PAREN, "Expected ')' after condition in if-expression")
 
                 # Check for else clause
@@ -10757,6 +10846,7 @@ class IDEKAParser:
                 for _ in range(matched_len):
                     self.advance()
                 func_name = self._custom_postfix_ops[matched_sym]
+                self._try_instantiate_custom_template_op(func_name, [expr])
                 expr = FunctionCall(func_name, [expr]).set_location(tok.line, tok.column)
             else:
                 break

@@ -1,0 +1,827 @@
+// Author: Karac V. Thweatt
+//
+// iasm_macho.idk - Mach-O 64 bit relocatable object writer for the IDEKA assembler (x86-64 and arm64)
+//
+// Library, no main. Works on the result of iasm_finish (iasm_core.idk) for x86-64 and on an assembled A6 (iasm_a64.idk)
+// for arm64. Both assemblers produce ELF flavored sections, symbols and relocations, so one serializer handles
+// both: each side is first copied into a small neutral model (MmObj), and mm_image turns the model into the object.
+//
+// Usage:
+//
+//     iasm_finish(a);
+//     iasm_write_macho(a, "out.o");       // x86-64, returns false on error
+//     a6_write_macho(a6, "out.o");        // arm64
+//
+// Mapping from the ELF flavored input:
+//   - every symbol name gets the C leading underscore
+//   - executable sections are __TEXT, writable sections are __DATA, NOBITS sections are zero fill
+//   - read only sections are __TEXT,__const, or __DATA,__const when they hold absolute addresses
+//   - .eh_frame, debug and note sections are left out
+//   - relocations against a section (an ELF section symbol) become section relative Mach-O relocations
+//
+// The objects are read by ilink_macho.idk.
+
+#ifndef IDEKA_IASM_BUF
+#import "src/compiler/iasm_buf.idk";
+#endif;
+
+#ifndef IDEKA_IASM_MACHO
+#def IDEKA_IASM_MACHO 1;
+
+// neutral relocation kinds
+#def MMK_ABS64 1;
+#def MMK_BRANCH 2;        // x86 call and jmp
+#def MMK_SIGNED 3;        // x86 rip relative data
+#def MMK_GOTLOAD 4;       // x86 rip relative through the GOT
+#def MMK_BR26 5;          // arm64 bl and b
+#def MMK_PAGE21 6;
+#def MMK_PAGEOFF12 7;
+#def MMK_GOTPAGE21 8;
+#def MMK_GOTPAGEOFF12 9;
+
+namespace IDEKA
+{
+    namespace iasm
+    {
+        struct MmSec
+        {
+            byte* name;               // Mach-O section name
+            byte* seg;                // segment name
+            byte* d;                  // contents, a private copy
+            i64 size, addr, flags;
+            int align;                // power of two
+            bool nobits, code;
+            int off, reloff, nrel;
+            int src;                  // index in the source assembler
+        };
+
+        struct MmSym
+        {
+            byte* name;               // with the leading underscore
+            int sec;                  // index in the neutral sections, -1 none
+            i64 val;                  // offset in the section, size for a common symbol, value for an absolute one
+            bool ext, weak, undef, common, abs;
+            int align;                // power of two, for common symbols
+            int grp, out;
+        };
+
+        struct MmRel
+        {
+            int sec, kind, sym;       // sym: a neutral symbol index, or -1 - section for a section relative target
+            i64 off, add;
+        };
+
+        struct MmObj
+        {
+            MmSec* secs;
+            int nsec;
+            MmSym* syms;
+            int nsyms;
+            MmRel* rels;
+            int nrel;
+            byte* err;
+            int arch;                 // 0 x86-64, 1 arm64
+            int* secmap;              // source section to neutral section, -1 dropped
+        };
+
+        mm_align_up(i64 v, i64 al) -> i64
+        {
+            if (al <= 1) { -> v; };
+            -> ((v + al - 1) / al) * al;
+        };
+
+        mm_w32(byte* p, int o, i64 v) -> void
+        {
+            p[o] = v `& 255;
+            p[o + 1] = (v >> 8) `& 255;
+            p[o + 2] = (v >> 16) `& 255;
+            p[o + 3] = (v >> 24) `& 255;
+            ->;
+        };
+
+        mm_w64(byte* p, int o, i64 v) -> void
+        {
+            mm_w32(p, o, v);
+            mm_w32(p, o + 4, v >> 32);
+            ->;
+        };
+
+        mm_r32(byte* p, int o) -> i64
+        {
+            i64 v = p[o + 3] `& 255;
+            v = (v << 8) `| (p[o + 2] `& 255);
+            v = (v << 8) `| (p[o + 1] `& 255);
+            v = (v << 8) `| (p[o] `& 255);
+            -> v;
+        };
+
+        mm_fail(MmObj* m, byte* msg) -> bool
+        {
+            if (m.err == (byte*)0) { m.err = msg; };
+            -> false;
+        };
+
+        mm_log2(i64 v) -> int
+        {
+            int k = 0;
+            while (((i64)1 << k) < v & k < 30) { k++; };
+            -> k;
+        };
+
+        mm_starts(byte* s, byte* p) -> bool
+        {
+            int i = 0;
+            while (p[i] != 0)
+            {
+                if (s[i] != p[i]) { -> false; };
+                i++;
+            };
+            -> true;
+        };
+
+        // True for ELF sections that have no place in a Mach-O object
+        mm_dropped(byte* name, i64 flags) -> bool
+        {
+            if ((flags `& 2) == 0) { -> true; };
+            if (mm_starts(name, ".eh_frame\0")) { -> true; };
+            if (mm_starts(name, ".debug\0")) { -> true; };
+            if (mm_starts(name, ".note\0")) { -> true; };
+            if (mm_starts(name, ".comment\0")) { -> true; };
+            if (mm_starts(name, ".llvm\0")) { -> true; };
+            -> false;
+        };
+
+        // Mach-O section name for an ELF one, at most 16 bytes
+        mm_secname(byte* elf) -> byte*
+        {
+            byte* r = (byte*)fmalloc(24);
+            int i = 0;
+            int n = 2;
+            if (ia_streq(elf, ".text\0")) { -> ia_dup("__text\0", 6); };
+            if (ia_streq(elf, ".data\0")) { -> ia_dup("__data\0", 6); };
+            if (ia_streq(elf, ".bss\0")) { -> ia_dup("__bss\0", 5); };
+            if (ia_streq(elf, ".rodata\0")) { -> ia_dup("__const\0", 7); };
+            r[0] = 95;
+            r[1] = 95;
+            if (elf[0] == 46) { i = 1; };
+            while (elf[i] != 0 & n < 15)
+            {
+                r[n] = elf[i];
+                if (r[n] == 46) { r[n] = 95; };
+                n++;
+                i++;
+            };
+            r[n] = 0;
+            -> r;
+        };
+
+        mm_name_taken(MmObj* m, byte* seg, byte* nm, int upto) -> bool
+        {
+            int i = 0;
+            while (i < upto)
+            {
+                if (ia_streq(m.secs[i].seg, seg) & ia_streq(m.secs[i].name, nm)) { -> true; };
+                i++;
+            };
+            -> false;
+        };
+
+        // Adds a neutral section made from an ELF flavored one. Returns its index or -1 when it is dropped.
+        mm_add_section(MmObj* m, int src, byte* name, i64 flags, bool nobits, int align, byte* d, i64 size, bool has_abs) -> int
+        {
+            MmSec* s;
+            byte* nm;
+            int k, n, ln;
+            if (mm_dropped(name, flags)) { m.secmap[src] = -1; -> -1; };
+            if ((flags `& 1024) != 0) { mm_fail(m, "thread local storage is not supported\0"); -> -1; };
+            k = m.nsec;
+            s = @m.secs[k];
+            s.src = src;
+            s.nobits = nobits;
+            s.code = (flags `& 4) != 0;
+            s.size = size;
+            s.align = mm_log2((i64)align);
+            s.off = 0;
+            s.reloff = 0;
+            s.nrel = 0;
+            s.addr = 0;
+            s.d = (byte*)0;
+            if (!nobits & size > 0)
+            {
+                s.d = (byte*)fmalloc((int)size + 16);
+                n = 0;
+                while (n < (int)size) { s.d[n] = d[n]; n++; };
+            };
+            if (s.code) { s.seg = ia_dup("__TEXT\0", 6); s.flags = 2147484672; }
+            elif (nobits) { s.seg = ia_dup("__DATA\0", 6); s.flags = 1; }
+            elif ((flags `& 1) != 0) { s.seg = ia_dup("__DATA\0", 6); s.flags = 0; }
+            elif (has_abs) { s.seg = ia_dup("__DATA\0", 6); s.flags = 0; }
+            else { s.seg = ia_dup("__TEXT\0", 6); s.flags = 0; };
+            nm = mm_secname(name);
+            // a name already used in the segment gets a trailing digit
+            n = 0;
+            while (mm_name_taken(m, s.seg, nm, k) & n < 10)
+            {
+                ln = ia_strlen(nm);
+                if (ln > 14) { ln = 14; };
+                nm[ln] = 48 + n;
+                nm[ln + 1] = 0;
+                n++;
+            };
+            s.name = nm;
+            m.secmap[src] = k;
+            m.nsec++;
+            -> k;
+        };
+
+        mm_add_sym(MmObj* m, byte* name, int sec, i64 val, bool ext, bool weak, bool undef, bool common, bool abs, int align) -> int
+        {
+            MmSym* y = @m.syms[m.nsyms];
+            int n = ia_strlen(name);
+            byte* nm = (byte*)fmalloc(n + 4);
+            int i = 0;
+            nm[0] = 95;
+            while (i < n) { nm[i + 1] = name[i]; i++; };
+            nm[n + 1] = 0;
+            y.name = nm;
+            y.sec = sec;
+            y.val = val;
+            y.ext = ext;
+            y.weak = weak;
+            y.undef = undef;
+            y.common = common;
+            y.abs = abs;
+            y.align = align;
+            y.grp = 0;
+            y.out = -1;
+            m.nsyms++;
+            -> m.nsyms - 1;
+        };
+
+        mm_add_rel(MmObj* m, int sec, i64 off, int kind, int sym, i64 add) -> void
+        {
+            MmRel* r = @m.rels[m.nrel];
+            r.sec = sec;
+            r.off = off;
+            r.kind = kind;
+            r.sym = sym;
+            r.add = add;
+            m.nrel++;
+            ->;
+        };
+
+        // ELF x86-64 relocation type to neutral kind, 0 when it cannot be expressed
+        mm_kind_x86(int t) -> int
+        {
+            if (t == 1) { -> MMK_ABS64; };
+            if (t == 4) { -> MMK_BRANCH; };
+            if (t == 2) { -> MMK_SIGNED; };
+            if (t == 9 | t == 41 | t == 42) { -> MMK_GOTLOAD; };
+            -> 0;
+        };
+
+        // ELF AArch64 relocation type to neutral kind
+        mm_kind_a64(int t) -> int
+        {
+            if (t == 257) { -> MMK_ABS64; };
+            if (t == 282 | t == 283) { -> MMK_BR26; };
+            if (t == 275) { -> MMK_PAGE21; };
+            if (t == 277 | t == 278 | t == 284 | t == 285 | t == 286 | t == 299) { -> MMK_PAGEOFF12; };
+            if (t == 311) { -> MMK_GOTPAGE21; };
+            if (t == 312) { -> MMK_GOTPAGEOFF12; };
+            -> 0;
+        };
+
+        // ===== the x86-64 assembler =====
+
+        #ifndef IDEKA_NO_X64
+        mm_x86_listed(Asm* a, int si) -> bool
+        {
+            ISym* s = @a.syms[si];
+            if (s.name[0] == 0) { -> false; };
+            if (s.kind == IA_SK_COMMON) { -> true; };
+            if (s.defined)
+            {
+                if (s.temp) { -> s.used; };
+                -> true;
+            };
+            if (s.used | (s.declared & s.bind != IA_SB_LOCAL)) { -> true; };
+            -> false;
+        };
+
+        mm_from_x86(Asm* a, MmObj* m) -> bool
+        {
+            int i, j, k, kd, sec, ref, ssec;
+            Sect* s;
+            ISym* y;
+            bool has_abs;
+            i64 pos;
+            if (!a.finished) { -> mm_fail(m, "assembly is not finished\0"); };
+            m.arch = 0;
+            m.secs = (MmSec*)fmalloc(sizeof(MmSec) * (a.nsec + 2));
+            m.syms = (MmSym*)fmalloc(sizeof(MmSym) * (a.nsyms + 2));
+            m.secmap = (int*)fmalloc(4 * (a.nsec + 2));
+            m.nsec = 0;
+            m.nsyms = 0;
+            m.nrel = 0;
+            k = 0;
+            i = 0;
+            while (i < a.nsec) { k = k + a.secs[i].nrel; i++; };
+            m.rels = (MmRel*)fmalloc(sizeof(MmRel) * (k + 2));
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                has_abs = false;
+                j = 0;
+                while (j < s.nrel) { if (s.rel[j].type == 1) { has_abs = true; }; j++; };
+                mm_add_section(m, i, s.name, s.flags, s.stype == IA_SHT_NOBITS, s.align, s.out, s.size, has_abs);
+                if (m.err != (byte*)0) { -> false; };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsyms)
+            {
+                y = @a.syms[i];
+                y.outidx = -1;
+                if (mm_x86_listed(a, i))
+                {
+                    if (y.kind == IA_SK_COMMON) { y.outidx = mm_add_sym(m, y.name, -1, y.size, true, false, false, true, false, mm_log2((i64)y.align)); }
+                    elif (y.kind == IA_SK_ABS) { y.outidx = mm_add_sym(m, y.name, -1, y.val, y.bind != IA_SB_LOCAL, false, false, false, true, 0); }
+                    elif (y.defined)
+                    {
+                        ssec = m.secmap[y.sec];
+                        if (ssec >= 0)
+                        {
+                            pos = as_sym_pos(a, i);
+                            y.outidx = mm_add_sym(m, y.name, ssec, pos, y.bind != IA_SB_LOCAL, y.bind == IA_SB_WEAK, false, false, false, 0);
+                        };
+                    }
+                    else { y.outidx = mm_add_sym(m, y.name, -1, 0, true, y.bind == IA_SB_WEAK, true, false, false, 0); };
+                };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                sec = m.secmap[i];
+                if (sec >= 0)
+                {
+                    j = 0;
+                    while (j < s.nrel)
+                    {
+                        kd = mm_kind_x86(s.rel[j].type);
+                        if (kd == 0) { -> mm_fail(m, "relocation type not supported in Mach-O output\0"); };
+                        ref = s.rel[j].sym;
+                        if (ref < 0)
+                        {
+                            ssec = m.secmap[0 - 1 - ref];
+                            if (ssec < 0) { -> mm_fail(m, "relocation against a dropped section\0"); };
+                            ref = -1 - ssec;
+                        }
+                        else
+                        {
+                            ref = a.syms[ref].outidx;
+                            if (ref < 0) { -> mm_fail(m, "relocation against a symbol that is not in the table\0"); };
+                        };
+                        mm_add_rel(m, sec, s.rel[j].off, kd, ref, s.rel[j].add);
+                        j++;
+                    };
+                };
+                i++;
+            };
+            -> true;
+        };
+        #endif;
+
+        // ===== the arm64 assembler =====
+
+        #ifndef IDEKA_NO_A64
+        mm_from_a64(A6* a, MmObj* m) -> bool
+        {
+            int i, j, k, kd, sec, ref, ssec;
+            A6Sec* s;
+            A6Sym* y;
+            bool has_abs;
+            if (!a6_finish(a)) { -> mm_fail(m, "assembly is not finished\0"); };
+            m.arch = 1;
+            m.secs = (MmSec*)fmalloc(sizeof(MmSec) * (a.nsec + 2));
+            m.syms = (MmSym*)fmalloc(sizeof(MmSym) * (a.nsyms + 2));
+            m.secmap = (int*)fmalloc(4 * (a.nsec + 2));
+            m.nsec = 0;
+            m.nsyms = 0;
+            m.nrel = 0;
+            k = 0;
+            i = 0;
+            while (i < a.nsec) { k = k + a.secs[i].nrel; i++; };
+            m.rels = (MmRel*)fmalloc(sizeof(MmRel) * (k + 2));
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                has_abs = false;
+                j = 0;
+                while (j < s.nrel) { if (s.rel[j].type == 257) { has_abs = true; }; j++; };
+                mm_add_section(m, i, s.name, s.flags, s.nobits, s.align, s.d.m, s.len, has_abs);
+                if (m.err != (byte*)0) { -> false; };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsyms)
+            {
+                y = @a.syms[i];
+                y.eidx = -1;
+                if (a6_sym_listed(y))
+                {
+                    if (y.comm) { y.eidx = mm_add_sym(m, y.name, -1, y.size, true, false, false, true, false, mm_log2(y.calign)); }
+                    elif (y.isdef)
+                    {
+                        ssec = m.secmap[y.sec];
+                        if (ssec >= 0) { y.eidx = mm_add_sym(m, y.name, ssec, y.val, y.bind != 0, y.bind == 2, false, false, false, 0); };
+                    }
+                    else { y.eidx = mm_add_sym(m, y.name, -1, 0, true, y.bind == 2, true, false, false, 0); };
+                };
+                i++;
+            };
+            i = 0;
+            while (i < a.nsec)
+            {
+                s = @a.secs[i];
+                sec = m.secmap[i];
+                if (sec >= 0)
+                {
+                    j = 0;
+                    while (j < s.nrel)
+                    {
+                        kd = mm_kind_a64(s.rel[j].type);
+                        if (kd == 0) { -> mm_fail(m, "relocation type not supported in Mach-O output\0"); };
+                        ref = s.rel[j].sym;
+                        if (ref < 0)
+                        {
+                            ssec = m.secmap[0 - ref - 1];
+                            if (ssec < 0) { -> mm_fail(m, "relocation against a dropped section\0"); };
+                            ref = -1 - ssec;
+                        }
+                        else
+                        {
+                            ref = a.syms[ref].eidx;
+                            if (ref < 0) { -> mm_fail(m, "relocation against a symbol that is not in the table\0"); };
+                        };
+                        mm_add_rel(m, sec, s.rel[j].off, kd, ref, s.rel[j].add);
+                        j++;
+                    };
+                };
+                i++;
+            };
+            -> true;
+        };
+        #endif;
+
+        // ===== the object =====
+
+        // Number of relocation entries a neutral relocation needs
+        mm_rel_entries(MmObj* m, MmRel* r) -> int
+        {
+            if (m.arch == 1 & r.kind != MMK_ABS64 & r.add != 0)
+            {
+                if (r.kind == MMK_BR26 & r.sym < 0) { -> 1; };
+                -> 2;
+            };
+            -> 1;
+        };
+
+        mm_put_name16(ElfBuf* o, byte* n) -> void
+        {
+            int i = 0;
+            while (n[i] != 0 & i < 16) { eb_put8(o, n[i]); i++; };
+            while (i < 16) { eb_put8(o, 0); i++; };
+            ->;
+        };
+
+        // One relocation entry: address, then symbol number, pcrel, length, extern and type
+        mm_put_rel(ElfBuf* o, i64 addr, i64 symnum, int pcrel, int len, int ext, int type) -> void
+        {
+            i64 w = (symnum `& 16777215) `| ((i64)pcrel << 24) `| ((i64)len << 25) `| ((i64)ext << 27) `| ((i64)type << 28);
+            eb_put32(o, addr);
+            eb_put32(o, w);
+            ->;
+        };
+
+        mm_image(MmObj* m, ElfBuf* o) -> bool
+        {
+            ElfBuf str;
+            ElfBuf sy;
+            int i, j, k, nl, ne, nu, ncmds, hdr, cmdsz, dataoff, ord, symoff, stroff, reloff, ext, sn, ty, nb;
+            i64 addr, total, endsec, ad, stored, secp, targ;
+            int* order;
+            MmSym* y;
+            MmSec* s;
+            MmRel* r;
+            if (m.nsec == 0) { -> mm_fail(m, "no sections to write\0"); };
+            // symbols in groups: local, external defined, undefined
+            order = (int*)fmalloc(4 * (m.nsyms + 2));
+            nl = 0; ne = 0; nu = 0;
+            i = 0;
+            while (i < m.nsyms)
+            {
+                y = @m.syms[i];
+                if (y.undef | y.common) { y.grp = 2; nu++; }
+                elif (y.ext) { y.grp = 1; ne++; }
+                else { y.grp = 0; nl++; };
+                i++;
+            };
+            ord = 0;
+            k = 0;
+            while (k < 3)
+            {
+                i = 0;
+                while (i < m.nsyms)
+                {
+                    if (m.syms[i].grp == k) { order[ord] = i; m.syms[i].out = ord; ord++; };
+                    i++;
+                };
+                k++;
+            };
+            // addresses of the sections inside the one segment: contents, then zero fill
+            addr = 0;
+            k = 0;
+            while (k < 2)
+            {
+                i = 0;
+                while (i < m.nsec)
+                {
+                    s = @m.secs[i];
+                    if ((k == 0 & !s.nobits) | (k == 1 & s.nobits))
+                    {
+                        addr = mm_align_up(addr, (i64)1 << s.align);
+                        s.addr = addr;
+                        addr = addr + s.size;
+                    };
+                    i++;
+                };
+                k++;
+            };
+            total = addr;
+            // header and load commands
+            cmdsz = 72 + 80 * m.nsec + 24 + 24 + 80;
+            ncmds = 4;
+            hdr = 32 + cmdsz;
+            dataoff = (int)mm_align_up((i64)hdr, 16);
+            endsec = 0;
+            i = 0;
+            while (i < m.nsec)
+            {
+                s = @m.secs[i];
+                if (!s.nobits)
+                {
+                    s.off = dataoff + (int)s.addr;
+                    if (s.addr + s.size > endsec) { endsec = s.addr + s.size; };
+                }
+                else { s.off = 0; };
+                i++;
+            };
+            // patch the stored values into the section copies
+            i = 0;
+            while (i < m.nrel)
+            {
+                r = @m.rels[i];
+                s = @m.secs[r.sec];
+                ext = 1;
+                targ = 0;
+                if (r.sym < 0) { ext = 0; targ = m.secs[-1 - r.sym].addr; };
+                if (s.d == (byte*)0) { -> mm_fail(m, "relocation in a section without contents\0"); };
+                secp = s.addr + r.off;
+                if (r.kind == MMK_ABS64)
+                {
+                    stored = r.add;
+                    if (ext == 0) { stored = targ + r.add; };
+                    mm_w64(s.d, (int)r.off, stored);
+                }
+                elif (m.arch == 0)
+                {
+                    if (r.kind == MMK_GOTLOAD & ext == 0) { -> mm_fail(m, "got relocation against a section\0"); };
+                    if (ext == 1) { stored = r.add + 4; }
+                    else { stored = (targ + r.add) - (secp + 4); };
+                    mm_w32(s.d, (int)r.off, stored);
+                }
+                else
+                {
+                    if ((r.kind == MMK_GOTPAGE21 | r.kind == MMK_GOTPAGEOFF12) & (ext == 0 | r.add != 0)) { -> mm_fail(m, "got relocation with an addend\0"); };
+                    if (r.kind == MMK_BR26 & ext == 0)
+                    {
+                        // the instruction holds the distance to the target in the object
+                        stored = (((targ + r.add) - secp) >> 2) `& 67108863;
+                        mm_w32(s.d, (int)r.off, (mm_r32(s.d, (int)r.off) `& 4227858432) `| stored);
+                    };
+                };
+                i++;
+            };
+            eb_init(o);
+            eb_init(@str);
+            eb_init(@sy);
+            if (!o.ok) { -> mm_fail(m, "out of memory\0"); };
+            eb_put8(@str, 0);
+            // header
+            eb_put32(o, 4277009103);
+            if (m.arch == 0) { eb_put32(o, 16777223); eb_put32(o, 3); } else { eb_put32(o, 16777228); eb_put32(o, 0); };
+            eb_put32(o, 1);
+            eb_put32(o, ncmds);
+            eb_put32(o, cmdsz);
+            eb_put32(o, 0);
+            eb_put32(o, 0);
+            // the one segment
+            eb_put32(o, 25);
+            eb_put32(o, 72 + 80 * m.nsec);
+            mm_put_name16(o, "\0");
+            eb_put64(o, 0);
+            eb_put64(o, total);
+            eb_put64(o, dataoff);
+            eb_put64(o, endsec);
+            eb_put32(o, 7);
+            eb_put32(o, 7);
+            eb_put32(o, m.nsec);
+            eb_put32(o, 0);
+            // where the relocations go: after the contents
+            reloff = dataoff + (int)endsec;
+            reloff = (int)mm_align_up((i64)reloff, 8);
+            i = 0;
+            while (i < m.nsec)
+            {
+                s = @m.secs[i];
+                s.reloff = 0;
+                s.nrel = 0;
+                j = 0;
+                while (j < m.nrel)
+                {
+                    if (m.rels[j].sec == i) { s.nrel = s.nrel + mm_rel_entries(m, @m.rels[j]); };
+                    j++;
+                };
+                if (s.nrel > 0) { s.reloff = reloff; reloff = reloff + s.nrel * 8; };
+                mm_put_name16(o, s.name);
+                mm_put_name16(o, s.seg);
+                eb_put64(o, s.addr);
+                eb_put64(o, s.size);
+                eb_put32(o, s.off);
+                eb_put32(o, s.align);
+                eb_put32(o, s.reloff);
+                eb_put32(o, s.nrel);
+                eb_put32(o, s.flags);
+                eb_put32(o, 0);
+                eb_put32(o, 0);
+                eb_put32(o, 0);
+                i++;
+            };
+            symoff = (int)mm_align_up((i64)reloff, 8);
+            // symbol table entries
+            i = 0;
+            while (i < m.nsyms)
+            {
+                y = @m.syms[order[i]];
+                eb_put32(@sy, eb_put_str(@str, y.name));
+                if (y.common) { ty = 1; sn = 0; ad = y.val; }
+                elif (y.undef) { ty = 1; sn = 0; ad = 0; }
+                elif (y.abs) { ty = 2; if (y.ext) { ty = 3; }; sn = 0; ad = y.val; }
+                else
+                {
+                    ty = 14;
+                    if (y.ext) { ty = 15; };
+                    sn = y.sec + 1;
+                    ad = m.secs[y.sec].addr + y.val;
+                };
+                eb_put8(@sy, ty);
+                eb_put8(@sy, sn);
+                nb = 0;
+                if (y.weak & y.undef) { nb = 64; }
+                elif (y.weak) { nb = 128; };
+                if (y.common) { nb = y.align * 256; };
+                eb_put16(@sy, nb);
+                eb_put64(@sy, ad);
+                i++;
+            };
+            stroff = symoff + sy.len;
+            // build version, symtab, dysymtab
+            eb_put32(o, 50);
+            eb_put32(o, 24);
+            eb_put32(o, 1);
+            eb_put32(o, 720896);
+            eb_put32(o, 720896);
+            eb_put32(o, 0);
+            eb_put32(o, 2);
+            eb_put32(o, 24);
+            eb_put32(o, symoff);
+            eb_put32(o, m.nsyms);
+            eb_put32(o, stroff);
+            eb_put32(o, str.len);
+            eb_put32(o, 11);
+            eb_put32(o, 80);
+            eb_put32(o, 0);
+            eb_put32(o, nl);
+            eb_put32(o, nl);
+            eb_put32(o, ne);
+            eb_put32(o, nl + ne);
+            eb_put32(o, nu);
+            i = 0;
+            while (i < 12) { eb_put32(o, 0); i++; };
+            // section contents
+            while (o.len < dataoff) { eb_put8(o, 0); };
+            i = 0;
+            while (i < m.nsec)
+            {
+                s = @m.secs[i];
+                if (!s.nobits)
+                {
+                    while (o.len < s.off) { eb_put8(o, 0); };
+                    if (s.size > 0) { eb_put_n(o, s.d, (int)s.size); };
+                };
+                i++;
+            };
+            // relocations
+            i = 0;
+            while (i < m.nsec)
+            {
+                s = @m.secs[i];
+                if (s.nrel > 0)
+                {
+                    while (o.len < s.reloff) { eb_put8(o, 0); };
+                    j = 0;
+                    while (j < m.nrel)
+                    {
+                        r = @m.rels[j];
+                        if (r.sec == i)
+                        {
+                            ext = 1;
+                            if (r.sym < 0) { ext = 0; sn = 1 + (-1 - r.sym); } else { sn = m.syms[r.sym].out; };
+                            if (m.arch == 0)
+                            {
+                                if (r.kind == MMK_ABS64) { mm_put_rel(o, r.off, sn, 0, 3, ext, 0); }
+                                elif (r.kind == MMK_BRANCH) { mm_put_rel(o, r.off, sn, 1, 2, ext, 2); }
+                                elif (r.kind == MMK_SIGNED) { mm_put_rel(o, r.off, sn, 1, 2, ext, 1); }
+                                else { mm_put_rel(o, r.off, sn, 1, 2, ext, 3); };
+                            }
+                            else
+                            {
+                                if (r.kind != MMK_ABS64 & r.add != 0 & !(r.kind == MMK_BR26 & ext == 0))
+                                {
+                                    // an explicit addend entry comes first
+                                    mm_put_rel(o, r.off, r.add, 0, 2, 0, 10);
+                                };
+                                if (r.kind == MMK_ABS64) { mm_put_rel(o, r.off, sn, 0, 3, ext, 0); }
+                                elif (r.kind == MMK_BR26) { mm_put_rel(o, r.off, sn, 1, 2, ext, 2); }
+                                elif (r.kind == MMK_PAGE21) { mm_put_rel(o, r.off, sn, 1, 2, ext, 3); }
+                                elif (r.kind == MMK_PAGEOFF12) { mm_put_rel(o, r.off, sn, 0, 2, ext, 4); }
+                                elif (r.kind == MMK_GOTPAGE21) { mm_put_rel(o, r.off, sn, 1, 2, ext, 5); }
+                                else { mm_put_rel(o, r.off, sn, 0, 2, ext, 6); };
+                            };
+                        };
+                        j++;
+                    };
+                };
+                i++;
+            };
+            while (o.len < symoff) { eb_put8(o, 0); };
+            eb_put_n(o, sy.m, sy.len);
+            eb_put_n(o, str.m, str.len);
+            ffree((byte*)order);
+            -> o.ok;
+        };
+
+        mm_write_file(byte* path, ElfBuf* o) -> bool
+        {
+            void* f = fopen(path, g"wb\0");
+            int wrote;
+            if (f == (void*)0) { -> false; };
+            wrote = fwrite(o.m, 1, o.len, f);
+            fclose(f);
+            -> wrote == o.len;
+        };
+
+        #ifndef IDEKA_NO_X64
+        iasm_write_macho(Asm* a, byte* path) -> bool
+        {
+            MmObj m;
+            ElfBuf o;
+            m.err = (byte*)0;
+            if (!mm_from_x86(a, @m)) { if (a.err == (byte*)0) { a.err = m.err; }; -> false; };
+            if (!mm_image(@m, @o)) { if (a.err == (byte*)0) { a.err = m.err; }; -> false; };
+            if (!mm_write_file(path, @o)) { a.err = g"cannot write the output file\0"; -> false; };
+            -> true;
+        };
+        #endif;
+
+        #ifndef IDEKA_NO_A64
+        a6_write_macho(A6* a, byte* path) -> bool
+        {
+            MmObj m;
+            ElfBuf o;
+            m.err = (byte*)0;
+            if (!mm_from_a64(a, @m)) { a6_fail(a, m.err); -> false; };
+            if (!mm_image(@m, @o)) { a6_fail(a, m.err); -> false; };
+            if (!mm_write_file(path, @o)) { a6_fail(a, "cannot write the output file\0"); -> false; };
+            -> true;
+        };
+        #endif;
+    };
+};
+
+#endif;

@@ -1,0 +1,22 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+IDKC_SYMTABLE st;
+
+comptime
+{
+    st = compiler.symbol_table;
+};
+
+main() -> int
+{
+    println(st.entries);
+
+    for (x in st.entry)
+    {
+        print(f"{x.name}, {x.kind}, {x.type.base_type}\n");
+    };
+    flush();
+    -> 0;
+};

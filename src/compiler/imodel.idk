@@ -61,6 +61,7 @@ namespace IDEKA
             bool vararg, defined;
             int* loff;      // declared structs: bit offset of each member, null when unset
             int lbits;      // declared structs: the size in bits their layout computed, 0 when unset
+            int* lslot;     // declared structs: bits each member occupies, its width or its alignment when that is larger
         };
 
         // A value: ty and the operand text (without the type), plus the IDEKA type
