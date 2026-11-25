@@ -39,36 +39,36 @@ namespace IDEKA
             // objects, including archive members pulled in
             int nobj, ocap;
             byte** o_img;
-            int* o_size;
-            int* o_nsec;
-            int* o_nsym;
-            int* o_sec0;
-            int* o_sym0;
-            int* o_symoff;
-            int* o_stroff;
-            int* o_secoff;
+            int* o_size,
+                 o_nsec,
+                 o_nsym,
+                 o_sec0,
+                 o_sym0,
+                 o_symoff,
+                 o_stroff,
+                 o_secoff;
             int nsec, nsym;
             // sections of all objects
             int* s_obj;
             byte** s_name;
             i64* s_chars;
-            int* s_rawsize;
-            int* s_rawptr;
-            int* s_relptr;
-            int* s_nrel;
-            int* s_align;
-            int* s_grp;
-            int* s_goff;
+            int* s_rawsize,
+                 s_rawptr,
+                 s_relptr,
+                 s_nrel,
+                 s_align,
+                 s_grp,
+                 s_goff;
             i64* s_rva;
             // symbols of all objects (raw index, auxiliary entries included)
             byte** y_name;
             int* y_obj;
             i64* y_val;
-            int* y_sec;
-            int* y_cls;
-            int* y_def;
-            int* y_imp;
-            int* y_kind;
+            int* y_sec,
+                 y_cls,
+                 y_def,
+                 y_imp,
+                 y_kind;
             i64* y_rva;
             int* y_weak;
             // libraries

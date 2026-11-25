@@ -172,7 +172,7 @@ namespace IDEKA
         inline pp_is_word(int c) -> bool -> (c >= 'a' & c <= 'z') | (c >= 'A' & c <= 'Z') | (c >= '0' & c <= '9') | c == '_';
 
         // Characters that end a token in _substitute_constants
-        inline pp_is_delim(int c) -> bool -> c == '.' | c == ',' | c == ';' | c == ':' | c == '(' | c == ')' | c == '[' | c == ']' | c == '{' | c == '}' | c == '+' | c == '-' | c == '*' | c == '/' | c == '%' | c == '=' | c == '!' | c == '<' | c == '>' | c == '|' | c == '&' | c == '^' | c == '~';
+        inline pp_is_delim(int c) -> bool -> c == '.' | c == ',' | c == ';' | c == ':' | c == '(' | c == ')' | c == '[' | c == ']' | c == '{' | c == '}' | c == '+' | c == '-' | c == '*' | c == '/' | c == '%' | c == '=' | c == '!' | c == '<' | c == '>' | c == '|' | c == '&' | c == '^' | c == '~' | c == '`' | c == '?' | c == '@';
 
         // Length in bytes of the Unicode whitespace character at s[i], 0 if none
         // (the set str.isspace() accepts).
@@ -1604,6 +1604,7 @@ namespace IDEKA
             Buf errb;       // error message
             Buf srcpath, fbuf;
             Buf sc;         // _substitute_constants result
+            Buf cj;         // a #psub call joined from several lines
             Buf ma;         // macro expansion, current text
             Buf mc;         // macro expansion, pass output
             Buf x1, x2;
@@ -1618,6 +1619,7 @@ namespace IDEKA
             IntVec files;       // pool offset of every processed file, index is the file id
             IntVec lib_dirs;    // pool offsets
             IntVec dir_stack;   // pool offsets
+            IntVec hide;        // constants being expanded right now (entry indexes)
             IntVec map_file;    // line_map: file id per output line
             IntVec map_line;    // line_map: local line number per output line
             IntVec aoff, alen;
@@ -1639,6 +1641,7 @@ namespace IDEKA
                 this.srcpath.__init();
                 this.fbuf.__init();
                 this.sc.__init();
+                this.cj.__init();
                 this.ma.__init();
                 this.mc.__init();
                 this.x1.__init();
@@ -1654,6 +1657,7 @@ namespace IDEKA
                 this.files.__init();
                 this.lib_dirs.__init();
                 this.dir_stack.__init();
+                this.hide.__init();
                 this.map_file.__init();
                 this.map_line.__init();
                 this.aoff.__init();
@@ -1718,6 +1722,7 @@ namespace IDEKA
                 this.srcpath.__exit();
                 this.fbuf.__exit();
                 this.sc.__exit();
+                this.cj.__exit();
                 this.ma.__exit();
                 this.mc.__exit();
                 this.x1.__exit();
@@ -1733,6 +1738,7 @@ namespace IDEKA
                 this.files.__exit();
                 this.lib_dirs.__exit();
                 this.dir_stack.__exit();
+                this.hide.__exit();
                 this.map_file.__exit();
                 this.map_line.__exit();
                 this.aoff.__exit();
@@ -2002,7 +2008,7 @@ namespace IDEKA
 
             alloc_ok() -> bool
             {
-                switch (!this.pool.ok | !this.outb.ok | !this.errb.ok | !this.fbuf.ok | !this.sc.ok)
+                switch (!this.pool.ok | !this.outb.ok | !this.errb.ok | !this.fbuf.ok | !this.sc.ok | !this.cj.ok)
                 {
                     case (true) { -> false; }
                     default
@@ -2017,7 +2023,7 @@ namespace IDEKA
                                     case (true) { -> false; }
                                     default
                                     {
-                                        switch (!this.js.ok | !this.jv.ok | !this.files.ok | !this.lib_dirs.ok | !this.dir_stack.ok)
+                                        switch (!this.js.ok | !this.jv.ok | !this.files.ok | !this.lib_dirs.ok | !this.dir_stack.ok | !this.hide.ok)
                                         {
                                             case (true) { -> false; }
                                             default
@@ -2954,6 +2960,73 @@ namespace IDEKA
 
             // ===== LINES =====
 
+            // True when s[0, n) holds a call NAME( of a #psub whose closing parenthesis is not in it
+            has_open_call(byte* s, int n) -> bool
+            {
+                int i = 0;
+                int j, k, c, depth, q;
+                while (i < n)
+                {
+                    c = (int)s[i];
+                    if ((c >= 65 & c <= 90) | (c >= 97 & c <= 122) | c == 95)
+                    {
+                        j = i;
+                        while (j < n)
+                        {
+                            c = (int)s[j];
+                            if ((c >= 65 & c <= 90) | (c >= 97 & c <= 122) | c == 95 | (c >= 48 & c <= 57)) { j++; } else { break; };
+                        };
+                        if (j < n)
+                        {
+                            if (s[j] == 40 & this.psubs.find(s + i, j - i) >= 0)
+                            {
+                                k = j + 1;
+                                depth = 1;
+                                q = 0;
+                                while (k < n & depth > 0)
+                                {
+                                    c = (int)s[k];
+                                    if (q != 0)
+                                    {
+                                        if (c == 92) { k++; } elif (c == q) { q = 0; };
+                                    }
+                                    elif (c == 34 | c == 39) { q = c; }
+                                    elif (c == 40) { depth++; }
+                                    elif (c == 41) { depth--; };
+                                    k++;
+                                };
+                                if (depth > 0) { -> true; };
+                                i = k;
+                                continue;
+                            };
+                        };
+                        i = j;
+                    }
+                    else
+                    {
+                        i++;
+                    };
+                };
+                -> false;
+            };
+
+            // Joins line i with the lines after it while a #psub call on it is still open.
+            // Returns the number of lines joined; the text is in cj when that is above 0.
+            join_open_call(LineList* ll, int i) -> int
+            {
+                int k = 0;
+                if (!this.has_open_call(ll.text + ll.off[i], ll.len[i])) { -> 0; };
+                this.cj.clear();
+                this.cj.put_n(ll.text + ll.off[i], ll.len[i]);
+                while (this.has_open_call(this.cj.mem, this.cj.len) & i + k + 1 < ll.n)
+                {
+                    k++;
+                    this.cj.put(32);
+                    this.cj.put_n(ll.text + ll.off[i + k], ll.len[i + k]);
+                };
+                -> k;
+            };
+
             // FXPreprocessor._process_line. Returns the next line index, or -1 on error.
             process_line(LineList* ll, int i) -> int
             {
@@ -3615,14 +3688,27 @@ namespace IDEKA
                                                                                             default {};
                                                                                         };
 
-                                                                                        // Regular line
-                                                                                        switch (!this.substitute_constants(text + lo, hi - lo))
+                                                                                        // Regular line. A #psub call that runs over several lines is joined
+                                                                                        // into one; the lines it used up become empty output lines.
+                                                                                        np = this.join_open_call(ll, i);
+                                                                                        switch (np > 0)
+                                                                                        {
+                                                                                            case (true) { have = this.substitute_constants(this.cj.mem, this.cj.len); }
+                                                                                            default { have = this.substitute_constants(text + lo, hi - lo); };
+                                                                                        };
+                                                                                        switch (!have)
                                                                                         {
                                                                                             case (true) { -> -1; }
                                                                                             default
                                                                                             {
                                                                                                 this.emit(this.sub_ptr, this.sub_len, this.cur_lineno);
-                                                                                                -> i + 1;
+                                                                                                tcount = 0;
+                                                                                                while (tcount < np)
+                                                                                                {
+                                                                                                    tcount++;
+                                                                                                    this.emit_blank(this.cur_lineno + tcount);
+                                                                                                };
+                                                                                                -> i + 1 + np;
                                                                                             };
                                                                                         };
                                                                                     };
@@ -4407,11 +4493,15 @@ namespace IDEKA
                 };
             };
 
-            // Appends token s[ts, te) to sc, replaced by its constant when it names one
+            // Appends token s[ts, te) to sc, replaced by its constant when it names one.
+            // A constant that is already being expanded is not expanded again inside its
+            // own expansion (the C rule): its token is written with a leading 0x01 paint
+            // byte so later passes skip it. process() removes the paint when it is done.
             flush_token(byte* s, int ts, int te, bool in_quotes) -> void
             {
                 int e = -1;
-                int w, a, b;
+                int w, a, b, k;
+                bool hidden;
                 byte* v;
                 switch (!in_quotes)
                 {
@@ -4425,8 +4515,29 @@ namespace IDEKA
                 }
                     default
                     {
+                        hidden = false;
+                        k = 0;
+                        while (k < this.hide.len)
+                        {
+                            switch (this.hide.arr[k] == e)
+                            {
+                                case (true) { hidden = true; break; }
+                                default {};
+                            };
+                            k++;
+                        };
+                        switch (hidden)
+                        {
+                            case (true) {
+                            this.sc.put(1);
+                            -> this.sc.put_n(s + ts, te - ts);
+                        }
+                            default {};
+                        };
                         v = this.consts.val_ptr(e);
                         w = this.consts.val_len(e);
+                        a = 0;
+                        b = w;
                         switch (w > 0)
                         {
                             case (true) {
@@ -4447,54 +4558,25 @@ namespace IDEKA
                                 a = 0;
                                 b = w;
                                 pp_trim(v, @a, @b);
-                                -> this.sc.put_n(v + a, b - a);
                             }
                                 default {};
                             };
                         }
                             default {};
                         };
-                        -> this.sc.put_n(v, w);
+                        this.hide.push(e);
+                        this.subst_text(v + a, b - a);
+                        this.hide.pop();
                     };
                 };
             };
 
-            // FXPreprocessor._substitute_constants. The result is sub_ptr/sub_len,
-            // valid until the next call.
-            substitute_constants(byte* s, int n) -> bool
+            // The token scan of FXPreprocessor._substitute_constants over t[0, tn), appended to sc
+            subst_text(byte* t, int tn) -> void
             {
-                int i, w, ts, a, b, c;
+                int i = 0;
+                int w, ts, c;
                 bool in_quotes;
-                switch (!this.expand_macros(s, n))
-                {
-                    case (true) { -> false; }
-                    default
-                    {
-                        byte* t = this.ex_ptr;
-                        int tn = this.ex_len;
-                        this.sub_ptr = t;
-                        this.sub_len = tn;
-                        switch (tn == 0)
-                        {
-                            case (true) { -> true; }
-                            default
-                            {
-                                a = 0;
-                                b = tn;
-                                pp_trim(t, @a, @b);
-                                switch (b - a == 1)
-                                {
-                                    case (true) {
-                                    switch (t[a] == 59)
-                                    {
-                                        case (true) { -> true; }
-                                        default {};
-                                    };
-                                }
-                                    default {};
-                                };
-
-                                this.sc.clear();
                                 ts = -1;
                                 in_quotes = false;
                                 while (i < tn)
@@ -4557,7 +4639,45 @@ namespace IDEKA
                                     case (true) { this.flush_token(t, ts, tn, in_quotes); }
                                     default {};
                                 };
+            };
 
+            // FXPreprocessor._substitute_constants. The result is sub_ptr/sub_len,
+            // valid until the next call.
+            substitute_constants(byte* s, int n) -> bool
+            {
+                int i, w, ts, a, b, c;
+                bool in_quotes;
+                switch (!this.expand_macros(s, n))
+                {
+                    case (true) { -> false; }
+                    default
+                    {
+                        byte* t = this.ex_ptr;
+                        int tn = this.ex_len;
+                        this.sub_ptr = t;
+                        this.sub_len = tn;
+                        switch (tn == 0)
+                        {
+                            case (true) { -> true; }
+                            default
+                            {
+                                a = 0;
+                                b = tn;
+                                pp_trim(t, @a, @b);
+                                switch (b - a == 1)
+                                {
+                                    case (true) {
+                                    switch (t[a] == 59)
+                                    {
+                                        case (true) { -> true; }
+                                        default {};
+                                    };
+                                }
+                                    default {};
+                                };
+
+                                this.sc.clear();
+                                this.subst_text(t, tn);
                                 this.sub_ptr = this.sc.mem;
                                 this.sub_len = this.sc.len;
                                 -> true;
@@ -4677,6 +4797,23 @@ namespace IDEKA
                                     this.outb.clear();
                                     this.outb.put_n(this.passb.mem, this.passb.len);
                                 };
+
+                                // remove the paint bytes written by flush_token
+                                ls = 0;
+                                le = 0;
+                                while (ls < this.outb.len)
+                                {
+                                    switch (this.outb.mem[ls] != 1)
+                                    {
+                                        case (true) {
+                                        this.outb.mem[le] = this.outb.mem[ls];
+                                        le++;
+                                    }
+                                        default {};
+                                    };
+                                    ls++;
+                                };
+                                this.outb.len = le;
 
                                 switch (this.verbose)
                                 {

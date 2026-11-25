@@ -513,6 +513,8 @@ namespace IDEKA
             Node* fnd;
             IRType* fret;
             IRBlock* brk, cont;
+            IRBlock* sw_brk;         // end of the switch a `break switch` leaves
+            bool sw_used;
             IRValue* exc_flag;      // innermost try block exception flag and value slots
             IRValue* exc_value;
             IRBlock* exc_handler;
@@ -611,6 +613,7 @@ namespace IDEKA
                 this.fnd = (Node*)0;
                 this.fret = (IRType*)0;
                 this.brk = (IRBlock*)0;
+                this.sw_brk = (IRBlock*)0;
                 this.exc_flag = (IRValue*)0;
                 this.exc_value = (IRValue*)0;
                 this.exc_handler = (IRBlock*)0;
@@ -987,6 +990,9 @@ namespace IDEKA
             ginit_eval(Node* e, byte* ns, i64* out) -> bool
             {
                 i64 l, r;
+                byte* ek, ef;
+                IRType* et;
+                void* ep;
                 switch (e.kind)
                 {
                     case (NodeKind.LITERAL)
@@ -1003,11 +1009,48 @@ namespace IDEKA
                         -> false;
                     }
                     case (NodeKind.IDENTIFIER) { -> this.const_by_name(ns, e.text, out); }
+                    case (NodeKind.CAST_EXPRESSION)
+                    {
+                        // a cast to a pointer or integer type keeps the constant's value: ((void*)0), (ulong)5
+                        switch (e.ts == (TypeSpec*)0) { case (true) { -> false; } default {}; };
+                        switch (!this.ginit_eval(e.a, ns, @l)) { case (true) { -> false; } default {}; };
+                        switch (ts_is_pointer(e.ts)) { case (true) { *out = l; -> true; } default {}; };
+                        switch (e.ts.custom_typename != (byte*)0 | ts_is_array(e.ts)) { case (true) { -> false; } default {}; };
+                        switch (e.ts.base_type == DataType.SINT | e.ts.base_type == DataType.UINT | e.ts.base_type == DataType.SLONG |
+                                e.ts.base_type == DataType.ULONG | e.ts.base_type == DataType.CHAR | e.ts.base_type == DataType.BYTE)
+                        {
+                            case (true) { *out = l; -> true; }
+                            default { -> false; };
+                        };
+                    }
+                    case (NodeKind.TERNARY_OP)
+                    {
+                        switch (!this.ginit_eval(e.a, ns, @l)) { case (true) { -> false; } default {}; };
+                        switch (l != (i64)0) { case (true) { -> this.ginit_eval(e.b, ns, out); } default {}; };
+                        -> this.ginit_eval(e.c, ns, out);
+                    }
+                    case (NodeKind.MEMBER_ACCESS)
+                    {
+                        // Enum.MEMBER of an integer enum
+                        switch (e.a == (Node*)0) { case (true) { -> false; } default {}; };
+                        switch (e.a.kind != NodeKind.IDENTIFIER) { case (true) { -> false; } default {}; };
+                        ek = this.find_enum_key(e.a.text);
+                        switch (ek == (byte*)0) { case (true) { -> false; } default {}; };
+                        et = (IRType*)nm_get(this.enums, ek);
+                        switch (et.kind != LK.INT) { case (true) { -> false; } default {}; };
+                        ef = join3(ek, g".\0", e.text);
+                        ep = nm_get(this.enumvals, ef);
+                        ffree(ef);
+                        switch (ep == (void*)0) { case (true) { -> false; } default {}; };
+                        *out = ((i64*)ep)[0];
+                        -> true;
+                    }
                     case (NodeKind.UNARY_OP)
                     {
                         switch (!this.ginit_eval(e.a, ns, @l)) { case (true) { -> false; } default {}; };
                         switch (e.op == Operator.SUB) { case (true) { *out = (i64)0 - l; -> true; } default {}; };
                         switch (e.op == Operator.NOT) { case (true) { *out = `!l; -> true; } default {}; };
+            switch (e.op == Operator.BITNOT) { case (true) { *out = `!l; -> true; } default {}; };
                         -> false;
                     }
                     case (NodeKind.BINARY_OP)
@@ -1033,7 +1076,13 @@ namespace IDEKA
                                 switch (*out != (i64)0 & ((*out < (i64)0) != (r < (i64)0))) { case (true) { *out = *out + r; } default {}; };
                                 -> true;
                             }
-                            case (Operator.AND) { *out = l `& r; -> true; }
+                            case (Operator.EQUAL) { switch (l == r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.NOT_EQUAL) { switch (l != r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.LESS_THAN) { switch (l < r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.LESS_EQUAL) { switch (l <= r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.GREATER_THAN) { switch (l > r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.GREATER_EQUAL) { switch (l >= r) { case (true) { *out = 1; } default { *out = 0; }; }; -> true; }
+                case (Operator.AND) { *out = l `& r; -> true; }
                             case (Operator.OR) { *out = l `| r; -> true; }
                             case (Operator.XOR) { *out = l `^| r; -> true; }
                             case (Operator.BITAND) { *out = l `& r; -> true; }
@@ -4275,6 +4324,18 @@ namespace IDEKA
                                                                                                                                        case (true) { -> this.global_array_init(ini, lt); }
                                                                                                                                        default
                                                                                                                                        {
+                                                                                                                                                          switch (ini.kind == NodeKind.ADDRESS_OF & lt.kind == LK.PTR)
+                                                                                                                                                          {
+                                                                                                                                                              case (true) {
+                                                                                                                                                                  r = this.global_addr_init(ini, lt);
+                                                                                                                                                                  switch (this.bad | r != (byte*)0)
+                                                                                                                                                                  {
+                                                                                                                                                                      case (true) { -> r; }
+                                                                                                                                                                      default {};
+                                                                                                                                                                  };
+                                                                                                                                                              }
+                                                                                                                                                              default {};
+                                                                                                                                                          };
                                                                                                                                                           switch (ini.kind == NodeKind.CAST_EXPRESSION | ini.kind == NodeKind.FUNCTION_CALL | ini.kind == NodeKind.METHOD_CALL)
                                                                                                                                                           {
                                                                                                                                                               case (true) {
@@ -4513,6 +4574,37 @@ namespace IDEKA
                     default {};
                 };
                 -> this.mod.find_global(name);
+            };
+
+            // The address of a global variable or function as a pointer constant: `cdecl{}* f(...) -> T = @name;`.
+            // The pointer type must be the type of the target, there is no cast.
+            global_addr_init(Node* ini, IRType* lt) -> byte*
+            {
+                IDKC_SYMENTRY* se;
+                byte* sm;
+                IRFunc* fn;
+                IRGlobal* gv;
+                IRValue* sv = (IRValue*)0;
+                if (ini.a == (Node*)0) { -> (byte*)0; };
+                if (ini.a.kind != NodeKind.IDENTIFIER | ini.a.text == (byte*)0) { -> (byte*)0; };
+                se = st_lookup_any(this.st, ini.a.text, this.cur_ns);
+                if (se == (IDKC_SYMENTRY*)0) { -> (byte*)0; };
+                sm = sym_mangled(se);
+                fn = this.mod.find_function(sm);
+                if (fn != (IRFunc*)0) { sv = fn.self; }
+                else
+                {
+                    gv = this.mod.find_global(sm);
+                    if (gv != (IRGlobal*)0) { sv = gv.self; };
+                };
+                ffree(sm);
+                if (sv == (IRValue*)0) { -> (byte*)0; };
+                if (!lt_eq(sv.ty, lt))
+                {
+                    this.unsup(ini, g"address initializer does not match the type of the target\0");
+                    -> (byte*)0;
+                };
+                -> sv.text;
             };
 
             global_ident_init(byte* name) -> byte*
@@ -5190,10 +5282,45 @@ namespace IDEKA
             // Constant text of an integer member value, or null when it is not a plain integer
             global_member_value(Node* v, IRType* ft) -> byte*
             {
+                int ai;
+                bool ok;
                 Buf ab;
                 i64 x;
                 byte* r;
                 this.gmv_full = false;
+                // an array member of integers: [a, b, c], short lists are padded with zeros
+                switch (ft.kind == LK.ARRAY & v.kind == NodeKind.ARRAY_LITERAL)
+                {
+                    case (true)
+                    {
+                        switch (ft.elem.kind != LK.INT | node_count(v, 0) > ft.count) { case (true) { -> (byte*)0; } default {}; };
+                        ab.__init();
+                        defer ab.__exit();
+                        ab.put_str(g"[\0");
+                        ai = 0;
+                        while (ai < ft.count)
+                        {
+                            switch (ai > 0) { case (true) { ab.put_str(g", \0"); } default {}; };
+                            x = 0;
+                            switch (ai < node_count(v, 0))
+                            {
+                                case (true)
+                                {
+                                    switch (!this.ginit_eval(node_child(v, 0, ai), this.cur_ns, @x)) { case (true) { -> (byte*)0; } default {}; };
+                                }
+                                default {};
+                            };
+                            lt_text(@ab, ft.elem);
+                            ab.put(32);
+                            put_i64(@ab, x);
+                            ai++;
+                        };
+                        ab.put(93);
+                        r = this.mod.own(ab.mem);
+                        -> r;
+                    }
+                    default {};
+                };
                 switch (v.kind == NodeKind.STRING_LITERAL & ft.kind == LK.PTR)
                 {
                     case (true) {
@@ -5207,6 +5334,26 @@ namespace IDEKA
                 }
                     default
                     {
+                        // A pointer member set to a constant zero (NULL, 0) is the null pointer
+                        switch (ft.kind == LK.PTR)
+                        {
+                            case (true)
+                            {
+                                switch (this.ginit_eval(v, this.cur_ns, @x))
+                                {
+                                    case (true)
+                                    {
+                                        switch (x == (i64)0)
+                                        {
+                                            case (true) { -> this.mod.own(g"null\0"); }
+                                            default {};
+                                        };
+                                    }
+                                    default {};
+                                };
+                            }
+                            default {};
+                        };
                         switch (ft.kind != LK.INT)
                         {
                             case (true) { -> (byte*)0; }
@@ -5226,17 +5373,20 @@ namespace IDEKA
                                     };
                                 }
                                     default {
-                                        switch (v.kind != NodeKind.IDENTIFIER)
+                                        // A name that holds an integer, else any constant expression (`VT_INT | 1`, `Opt.A`)
+                                        ok = false;
+                                        switch (v.kind == NodeKind.IDENTIFIER)
                                         {
-                                            case (true) { -> (byte*)0; }
-                                            default
+                                            case (true) { ok = this.parse_int_text(this.global_ident_init(v.text), @x); }
+                                            default {};
+                                        };
+                                        switch (!ok)
+                                        {
+                                            case (true)
                                             {
-                                                switch (!this.parse_int_text(this.global_ident_init(v.text), @x))
-                                                {
-                                                    case (true) { -> (byte*)0; }
-                                                    default {};
-                                                };
-                                            };
+                                                switch (!this.ginit_eval(v, this.cur_ns, @x)) { case (true) { -> (byte*)0; } default {}; };
+                                            }
+                                            default {};
                                         };
                                     };
                                 };
@@ -5804,6 +5954,8 @@ namespace IDEKA
                 TypeSpec* ts = n.ts;
                 IRType* lt;
                 IRGlobal* gl;
+                IRGlobal* xg;
+                bool was_ext = false;
                 byte* m, it;
                 switch (n.text == (byte*)0)
                 {
@@ -5879,7 +6031,17 @@ namespace IDEKA
                                                     default
                                                     {
                                                         m = mangle_namespace_name(ns, n.text);
-                                                        switch (this.global_dup(m))
+                                                        // An extern declaration of this name came first: this definition
+                                                        // is the variable it declared, not a second one
+                                                        xg = this.mod.find_global(m);
+                                                        if (xg != (IRGlobal*)0)
+                                                        {
+                                                            if (xg.init == (byte*)0 & xg.linkage != (byte*)0)
+                                                            {
+                                                                was_ext = cstr_eq(xg.linkage, g"external\0");
+                                                            };
+                                                        };
+                                                        switch (this.global_dup(m) & !was_ext)
                                                         {
                                                             case (true) {
                                                             -> ffree(m);
@@ -5904,7 +6066,18 @@ namespace IDEKA
                                                                 }
                                                                     default
                                                                     {
-                                                                        gl = this.mod.add_global(lt, m, it);
+                                                                        if (was_ext)
+                                                                        {
+                                                                            gl = xg;
+                                                                            // the definition's type is the variable's type
+                                                                            gl.ty = lt;
+                                                                            gl.self.ty = this.mod.t_ptr(lt);
+                                                                            gl.init = this.mod.own(it);
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            gl = this.mod.add_global(lt, m, it);
+                                                                        };
                                                                         gl.linkage = this.mod.own(g"internal\0");
                                                                         gl.self.spec = ts;
                                                                         switch (nm_get(this.gvars, m) == (void*)0)
@@ -6450,7 +6623,7 @@ namespace IDEKA
                                                 while (i < c)
                                                 {
                                                     k = node_child(ini, 0, i).kind;
-                                                    switch (k == NodeKind.STRING_LITERAL | k == NodeKind.ARRAY_LITERAL | k == NodeKind.STRUCT_LITERAL)
+                                                    switch ((k == NodeKind.STRING_LITERAL & lt.elem.kind != LK.PTR) | k == NodeKind.ARRAY_LITERAL | k == NodeKind.STRUCT_LITERAL)
                                                     {
                                                         case (true) { -> false; }
                                                         default
@@ -7820,7 +7993,9 @@ namespace IDEKA
                                                 }
                                                     default {};
                                                 };
-                                                this.unsup(site, g"argument type mismatch\0");
+                                                this.sc.clear();
+                                                this.sc.put_str(f"argument type mismatch: arg {idx} got {this.mod.type_str(vt)} expected {this.mod.type_str(expected)} in call {site.text}\0");
+                                                this.unsup(site, this.mod.own(this.sc.mem));
                                                 -> v;
                                             };
                                         };
@@ -8078,7 +8253,7 @@ namespace IDEKA
                 switch (lv == (LVar*)0)
                 {
                     case (true) {
-                    this.unsup(n, g"identifier not local\0");
+                    this.unsup(n, join3(g"identifier not local: \0", n.text, g"\0"));
                     -> (IRValue*)0;
                 }
                     default
@@ -9565,6 +9740,11 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                         case (true) { might_ptr = true; }
                                                                         default {};
                                                                     };
+                                                                    switch (op == Operator.SUB & lp & rp)
+                                                                    {
+                                                                        case (true) { might_ptr = true; }
+                                                                        default {};
+                                                                    };
                                                                 }
                                                                     default {};
                                                                 };
@@ -9892,7 +10072,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                     switch (lhs.ty.kind != LK.INT | rhs.ty.kind != LK.INT)
                                                                     {
                                                                         case (true) {
-                                                                        this.unsup(n, g"arithmetic operand types\0");
+                                                                        this.sc.clear(); this.sc.put_str(f"arithmetic operand types: {this.mod.type_str(lhs.ty)} and {this.mod.type_str(rhs.ty)}\0"); this.unsup(n, this.mod.own(this.sc.mem));
                                                                         -> (IRValue*)0;
                                                                     }
                                                                         default {};
@@ -9981,7 +10161,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                             switch (lhs.ty.kind != LK.INT | rhs.ty.kind != LK.INT)
                                                                             {
                                                                                 case (true) {
-                                                                                this.unsup(n, g"comparison operand types\0");
+                                                                                this.sc.clear(); this.sc.put_str(f"comparison operand types: {this.mod.type_str(lhs.ty)} and {this.mod.type_str(rhs.ty)}\0"); this.unsup(n, this.mod.own(this.sc.mem));
                                                                                 -> (IRValue*)0;
                                                                             }
                                                                                 default {};
@@ -10006,7 +10186,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                                     switch (lhs.ty.kind != LK.INT | rhs.ty.kind != LK.INT)
                                                                                     {
                                                                                         case (true) {
-                                                                                        this.unsup(n, g"bitwise operand types\0");
+                                                                                        this.sc.clear(); this.sc.put_str(f"bitwise operand types: {this.mod.type_str(lhs.ty)} and {this.mod.type_str(rhs.ty)}\0"); this.unsup(n, this.mod.own(this.sc.mem));
                                                                                         -> (IRValue*)0;
                                                                                     }
                                                                                         default {};
@@ -10321,6 +10501,63 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // __builtin_va_start(ap, last), __builtin_va_end(ap), __builtin_va_copy(dst, src):
+            // the C va_list is storage the intrinsic fills, so each argument is passed as its address
+            x_va_builtin(Node* n) -> IRValue*
+            {
+                int argc = node_count(n, 0);
+                IRValue* a;
+                IRValue* b;
+                IRFunc* f;
+                bool is_copy = cstr_eq(n.text, g"__builtin_va_copy\0");
+                bool is_end = cstr_eq(n.text, g"__builtin_va_end\0");
+                switch (argc < 1 | (is_copy & argc < 2))
+                {
+                    case (true) {
+                    this.unsup(n, join3(g"too few arguments: \0", n.text, g"\0"));
+                    -> (IRValue*)0;
+                }
+                    default {};
+                };
+                a = this.visit(node_child(n, 0, 0));
+                switch (this.bad | a == (IRValue*)0 | a.ty.kind != LK.PTR)
+                {
+                    case (true) {
+                    this.unsup(n, join3(g"va_list argument is not addressable: \0", n.text, g"\0"));
+                    -> (IRValue*)0;
+                }
+                    default {};
+                };
+                a = this.mod.cast(g"bitcast\0", a, this.t_i8p, g"va_ap\0");
+                this.mod.ia[0] = a;
+                switch (is_copy)
+                {
+                    case (true) {
+                    b = this.visit(node_child(n, 0, 1));
+                    switch (this.bad | b == (IRValue*)0 | b.ty.kind != LK.PTR)
+                    {
+                        case (true) {
+                        this.unsup(n, join3(g"va_list argument is not addressable: \0", n.text, g"\0"));
+                        -> (IRValue*)0;
+                    }
+                        default {};
+                    };
+                    this.mod.ia[1] = this.mod.cast(g"bitcast\0", b, this.t_i8p, g"va_src\0");
+                    f = this.va_intrinsic(g"llvm.va_copy\0", 2);
+                    -> this.mod.call(f.self, this.mod.ia, 2, (byte*)0);
+                }
+                    default
+                    {
+                        switch (is_end)
+                        {
+                            case (true) { f = this.va_intrinsic(g"llvm.va_end\0", 1); }
+                            default { f = this.va_intrinsic(g"llvm.va_start\0", 1); };
+                        };
+                        -> this.mod.call(f.self, this.mod.ia, 1, (byte*)0);
+                    };
+                };
+            };
+
             x_call(Node* n) -> IRValue*
             {
                 int argc = node_count(n, 0);
@@ -10345,11 +10582,22 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 }
                     default {};
                 };
+                switch (n.text != (byte*)0)
+                {
+                    case (true) {
+                    switch (cstr_eq(n.text, g"__builtin_va_start\0") | cstr_eq(n.text, g"__builtin_va_end\0") | cstr_eq(n.text, g"__builtin_va_copy\0"))
+                    {
+                        case (true) { -> this.x_va_builtin(n); }
+                        default {};
+                    };
+                }
+                    default {};
+                };
                 switch (n.text3 == (byte*)0)
                 {
                     case (true) {
                     if (!this.bad) { this.bad_detail = n.text; };
-                    this.unsup(n, g"call target not resolved\0");
+                    this.unsup(n, join3(g"call target not resolved: \0", n.text, g"\0"));
                     -> (IRValue*)0;
                 }
                     default
@@ -12114,6 +12362,45 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 -> r;
             };
 
+            // Two-way join of values: a phi, or for an aggregate on the machine backends a stack slot made in the
+            // block that holds the branch (dom), written on both edges and read back after the join. An aggregate
+            // cannot travel through a phi there.
+            phi2(IRValue* av, IRBlock* ab, IRValue* bv, IRBlock* bb, IRBlock* dom, byte* nm) -> IRValue*
+            {
+                IRBlock* jb = this.mod.cur_block();
+                IRValue* slot;
+                IRValue** pv;
+                IRBlock** pb;
+                void* tl;
+                switch (this.is_aggregate_ty(av.ty) & this.mod.kind != BK.LLVM)
+                {
+                    case (true) {
+                        tl = this.pop_term(dom);
+                        this.mod.position(this.fn, dom);
+                        slot = this.mod.alloca(av.ty, g"agg_join\0");
+                        this.push_term(dom, tl);
+                        tl = this.pop_term(ab);
+                        this.mod.position(this.fn, ab);
+                        this.mod.store(av, slot);
+                        this.push_term(ab, tl);
+                        tl = this.pop_term(bb);
+                        this.mod.position(this.fn, bb);
+                        this.mod.store(bv, slot);
+                        this.push_term(bb, tl);
+                        this.mod.position(this.fn, jb);
+                        -> this.mod.load(slot, g"agg_join_val\0");
+                    }
+                    default {};
+                };
+                pv = (IRValue**)this.zbuf(2);
+                pb = (IRBlock**)this.zbuf(2);
+                pv[0] = av;
+                pv[1] = bv;
+                pb[0] = ab;
+                pb[1] = bb;
+                -> this.mod.phi(av.ty, pv, pb, 2, nm);
+            };
+
             // Array pointer decays to an element pointer in front of the block terminator
             tern_decay(IRValue* v, IRBlock* eb, IRBlock* mb) -> IRValue*
             {
@@ -12183,7 +12470,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 SInfo* si;
                 Node** exprs;
                 IRValue** vals;
-                IRValue* fv, res;
+                IRValue* fv, res, slot;
                 IRType* ft;
                 Buf cb;
                 int nf, np, nn, i, j;
@@ -12438,6 +12725,24 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             }
                                                 default {};
                                             };
+                                            // A string for a char array member is copied into it: zero filled when shorter,
+                                            // cut at the member size (no terminator) when not shorter
+                                            switch (fv.ty.kind == LK.PTR & fv.ty.elem.kind == LK.ARRAY & ft.kind == LK.ARRAY & ft.elem.kind == LK.INT & fv.ty.elem.elem.kind == LK.INT)
+                                            {
+                                                case (true) {
+                                                    slot = this.mod.alloca_here(ft, g"str_member\0");
+                                                    switch (fv.ty.elem.count <= ft.count)
+                                                    {
+                                                        case (true) { this.array_widen(slot, fv, ft); }
+                                                        default {
+                                                            fv = this.mod.cast(g"bitcast\0", fv, this.ptr_of(ft), g"str_member_ptr\0");
+                                                            this.mod.store(this.mod.load(fv, g"str_member_cut\0"), slot);
+                                                        };
+                                                    };
+                                                    fv = this.mod.load(slot, g"str_member_val\0");
+                                                }
+                                                default {};
+                                            };
                                             res = this.mod.insertvalue(res, fv, i, (byte*)0);
                                             i++;
                                         };
@@ -12456,7 +12761,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRValue* cv, tv, fv, phi;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* tb, fb, mb, te, fe;
+                IRBlock* tb, fb, mb, te, fe, db;
                 void* tl;
                 bool tp, fpp;
                 cv = this.cond_value(n.a);
@@ -12468,6 +12773,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         tb = this.mod.append_block(this.fn, g"ternary_true\0");
                         fb = this.mod.append_block(this.fn, g"ternary_false\0");
                         mb = this.mod.append_block(this.fn, g"ternary_merge\0");
+                        db = this.mod.cur_block();
                         this.mod.cbr(cv, tb, fb);
 
                         this.mod.position(this.fn, tb);
@@ -12607,7 +12913,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 pv[1] = fv;
                                                 pb[0] = te;
                                                 pb[1] = fe;
-                                                phi = this.mod.phi(tv.ty, pv, pb, 2, g"ternary_result\0");
+                                                phi = this.phi2(tv, te, fv, fe, db, g"ternary_result\0");
                                                 -> phi;
                                             };
                                         };
@@ -12772,7 +13078,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRValue* cv, tv, fv, phi;
                 IRValue** pv;
                 IRBlock** pb;
-                IRBlock* tb, fb, mb, te, fe;
+                IRBlock* tb, fb, mb, te, fe, db;
         bool isstr = false;
                 cv = this.cond_value(n.b);
                 switch (this.bad) { case (true) { -> (IRValue*)0; } default
@@ -12780,6 +13086,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         tb = this.mod.append_block(this.fn, g"ifexpr_value\0");
                         fb = this.mod.append_block(this.fn, g"ifexpr_else\0");
                         mb = this.mod.append_block(this.fn, g"ifexpr_merge\0");
+                        db = this.mod.cur_block();
                         this.mod.cbr(cv, tb, fb);
 
                         this.mod.position(this.fn, tb);
@@ -12927,7 +13234,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         pv[1] = fv;
                                                         pb[0] = te;
                                                         pb[1] = fe;
-                                                        phi = this.mod.phi(tv.ty, pv, pb, 2, g"ifexpr_result\0");
+                                                        phi = this.phi2(tv, te, fv, fe, db, g"ifexpr_result\0");
                                                         switch (isstr)
                                                         {
                                                             case (true) { phi.flags = phi.flags `| VF_STRING_VALUE; }
@@ -14824,7 +15131,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp�");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -15933,11 +16240,13 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int c = node_count(n, 0);
                 PtrVec* outer = this.defers;
                 this.defers = (PtrVec*)0;
+                // names declared in a block end with it, an inner declaration shadows the outer one
+                this.push_scope();
                 while (i < c)
                 {
-                    switch (this.mod.is_terminated())
+                    switch (this.mod.is_terminated() & node_child(n, 0, i).kind != NodeKind.LABEL_STATEMENT)
                     {
-                        case (true) { break; }
+                        case (true) { i++; }
                         default
                         {
                             this.visit(node_child(n, 0, i));
@@ -15963,6 +16272,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                     default {};
                 };
                 this.defers = outer;
+                this.pop_scope();
                 ->;
             };
 
@@ -16189,12 +16499,39 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // A union variable assigned in one branch of an if is not assigned in the others: each branch
+            // starts from the state before the if, and afterwards the union of what the branches assigned
+            union_branch_end(int base, PtrVec* acc) -> void
+            {
+                int i = base;
+                while (i < this.inited_unions.len)
+                {
+                    pv_push(acc, this.inited_unions.items[i]);
+                    i++;
+                };
+                this.inited_unions.len = base;
+            };
+
+            union_branch_merge(int base, PtrVec* acc) -> void
+            {
+                int i;
+                this.inited_unions.len = base;
+                while (i < acc.len)
+                {
+                    pv_push(this.inited_unions, acc.items[i]);
+                    i++;
+                };
+                pv_free(acc);
+            };
+
             s_if(Node* n) -> void
             {
                 IRValue* cv;
                 IRBlock* then_b, else_b, merge_b, et, ee;
                 int i;
                 int ne = node_count(n, 0);
+                int ub = this.inited_unions.len;
+                PtrVec* ua = pv_new();
                 cv = this.cond_value(n.a);
                 switch (this.bad)
                 {
@@ -16207,6 +16544,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         this.mod.cbr(cv, then_b, else_b);
                         this.mod.position(this.fn, then_b);
                         this.visit(n.b);
+                        this.union_branch_end(ub, ua);
                         switch (this.bad)
                         {
                             case (true) { ->; }
@@ -16235,6 +16573,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             this.mod.cbr(cv, et, ee);
                                             this.mod.position(this.fn, et);
                                             this.visit(node_child(n, 1, i));
+                                            this.union_branch_end(ub, ua);
                                             switch (this.bad)
                                             {
                                                 case (true) { ->; }
@@ -16256,6 +16595,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                 {
                                     case (true) {
                                     this.visit(n.c);
+                                    this.union_branch_end(ub, ua);
                                     switch (this.bad)
                                     {
                                         case (true) { ->; }
@@ -16269,6 +16609,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     case (true) { this.mod.br(merge_b); }
                                     default {};
                                 };
+                                this.union_branch_merge(ub, ua);
                                 -> this.mod.position(this.fn, merge_b);
                             };
                         };
@@ -16323,6 +16664,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRGlobal* g;
                 byte* nm, sfx;
                 int i, ln, ls, c0;
+                i64 fv;
                 bool hit;
                 switch (e.kind == NodeKind.UNARY_OP)
                 {
@@ -16414,6 +16756,19 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     default {};
                                 };
                             }
+                            default {};
+                        };
+                    }
+                    default {};
+                };
+                // A case label is a constant: fold `K - 1`, `A | B` and the like at compile time
+                switch (e.kind == NodeKind.BINARY_OP)
+                {
+                    case (true)
+                    {
+                        switch (this.ginit_eval(e, this.cur_ns, @fv))
+                        {
+                            case (true) { -> this.mod.c_int(this.t_i32, fv); }
                             default {};
                         };
                     }
@@ -16995,6 +17350,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRValue** vals;
                 IRBlock** blocks, bodies;
                 IRBlock* merge_b, dflt_b;
+                IRBlock* osw;
+                bool osu;
                 bool merge_reach;
                 switch (n.a.kind == NodeKind.TYPE_OF)
                 {
@@ -17092,6 +17449,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         };
                                                         merge_reach = dflt_b == merge_b;
                                                         this.mod.switch_to(sv, dflt_b, vals, blocks, ncase);
+                                                        osw = this.sw_brk;
+                                                        osu = this.sw_used;
+                                                        this.sw_brk = merge_b;
+                                                        this.sw_used = false;
                                                         i = 0;
                                                         while (i < nc)
                                                         {
@@ -17112,6 +17473,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                 };
                                                             };
                                                         };
+                                                        if (this.sw_used) { merge_reach = true; };
+                                                        this.sw_brk = osw;
+                                                        this.sw_used = osu;
                                                         this.mod.position(this.fn, merge_b);
                                                         // Every case terminates and a default exists: nothing can reach the merge block
                                                         if (!merge_reach) { this.mod.unreachable(); };
@@ -17422,6 +17786,12 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         {
                                             case (true) {
                                             this.collect_labels(n.b, f);
+                                            c = node_count(n, 1);
+                                            while (i < c)
+                                            {
+                                                this.collect_labels(node_child(n, 1, i), f);
+                                                i++;
+                                            };
                                             -> this.collect_labels(n.c, f);
                                         }
                                             default
@@ -17436,7 +17806,19 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             case (true) { -> this.collect_labels(n.d, f); }
                                                             default
                                                             {
+                                                                switch (k == NodeKind.SWITCH_STATEMENT)
+                                                                {
+                                                                case (true) {
+                                                                c = node_count(n, 0);
+                                                                while (i < c)
+                                                                {
+                                                                this.collect_labels(node_child(n, 0, i).b, f);
+                                                                i++;
+                                                                };
                                                                 ->;
+                                                                }
+                                                                default { ->; };
+                                                                };
                                                             };
                                                         };
                                                     };
@@ -17456,7 +17838,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRBlock* tb = (IRBlock*)nm_get(this.labels, n.text);
                 switch (tb == (IRBlock*)0)
                 {
-                    case (true) { -> this.unsup(n, g"label not collected\0"); }
+                    case (true) { -> this.unsup(n, join3(g"label not collected: \0", n.text, g"\0")); }
                     default
                     {
                         switch (!this.mod.is_terminated())
@@ -17474,7 +17856,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 IRBlock* tb = (IRBlock*)nm_get(this.labels, n.text);
                 switch (tb == (IRBlock*)0)
                 {
-                    case (true) { -> this.unsup(n, g"goto to undefined label\0"); }
+                    case (true) { -> this.unsup(n, join3(g"goto to undefined label: \0", n.text, g"\0")); }
                     default
                     {
                         switch (!this.mod.is_terminated())
@@ -18631,7 +19013,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                 }
                                                                     default
                                                                     {
-                                                                        this.unsup(n, g"unary operator\0");
+                                                                        this.sc.clear(); this.sc.put_str(f"unary operator on {this.mod.type_str(v.ty)}\0"); this.unsup(n, this.mod.own(this.sc.mem));
                                                                         -> (IRValue*)0;
                                                                     };
                                                                 };
@@ -19773,6 +20155,31 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // `(x) - 1`, `(x) + 1` and `(x) * y` read as a cast of `-1`, `+1` or `*y` to the type x when
+            // x names no type. A variable in that position is the left operand of a binary operator.
+            cast_is_binary(Node* n) -> bool
+            {
+                TypeSpec* t = n.ts;
+                IDKC_SYMENTRY* e;
+                switch (t.custom_typename == (byte*)0 | t.pointer_depth > 0 | n.a == (Node*)0)
+                {
+                    case (true) { -> false; }
+                    default {};
+                };
+                switch (!(n.a.kind == NodeKind.POINTER_DEREF | (n.a.kind == NodeKind.UNARY_OP & (n.a.op == Operator.ADD | n.a.op == Operator.SUB))))
+                {
+                    case (true) { -> false; }
+                    default {};
+                };
+                switch (this.find_var(t.custom_typename) == (LVar*)0)
+                {
+                    case (true) { -> false; }
+                    default {};
+                };
+                e = st_lookup_any(this.st, t.custom_typename, this.cur_ns);
+                -> e == (IDKC_SYMENTRY*)0 | e.kind_id == SymbolKind.VARIABLE;
+            };
+
             x_cast(Node* n) -> IRValue*
             {
                 IRType* tt, st;
@@ -19780,6 +20187,25 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 LVar* lv;
                 TypeSpec* tsp = n.ts;
                 bool su, tu;
+                Node* idn;
+                Node* rhs;
+                switch (this.cast_is_binary(n))
+                {
+                    case (true) {
+                    idn = node_new(NodeKind.IDENTIFIER, n.line, n.col);
+                    idn.text = this.mod.own(tsp.custom_typename);
+                    switch (n.a.kind == NodeKind.POINTER_DEREF)
+                    {
+                        case (true) { n.op = Operator.MUL; rhs = n.a.a; }
+                        default { n.op = n.a.op; rhs = n.a.a; };
+                    };
+                    n.kind = NodeKind.BINARY_OP;
+                    n.a = idn;
+                    n.b = rhs;
+                    -> this.visit(n);
+                }
+                    default {};
+                };
                 tt = this.lower(tsp, true, n.line);
                 switch (this.nerrors > this.body_errs)
                 {
@@ -21143,6 +21569,18 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             union_key_of(IRType* t) -> byte*
             {
                 int i;
+                // Each union owns its type object, and a type built from a union's name keeps it:
+                // identity tells apart two unions whose layouts are the same
+                while (i < this.unions.count)
+                {
+                    switch ((IRType*)this.unions.vals[i] == t)
+                    {
+                        case (true) { -> this.unions.keys[i]; }
+                        default {};
+                    };
+                    i++;
+                };
+                i = 0;
                 while (i < this.unions.count)
                 {
                     switch (lt_eq((IRType*)this.unions.vals[i], t))
@@ -21165,7 +21603,10 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 int i, c;
                 switch (ud == (Node*)0)
                 {
-                    case (true) { -> (IRType*)0; }
+                    case (true) {
+                        this.bad_detail = join3(g"union not registered: \0", key, g"\0");
+                        -> (IRType*)0;
+                    }
                     default
                     {
                         c = node_count(ud, 0);
@@ -21174,7 +21615,15 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             mem = node_child(ud, 0, i);
                             switch (cstr_eq(mem.text, name))
                             {
-                                case (true) { -> this.lower(mem.ts, false, ud.line); }
+                                case (true) {
+                                    IRType* lt = this.lower(mem.ts, false, ud.line);
+                                    switch (lt == (IRType*)0)
+                                    {
+                                        case (true) { this.bad_detail = join3(g"union member type unresolved: \0", name, g"\0"); }
+                                        default {};
+                                    };
+                                    -> lt;
+                                }
                                 default
                                 {
                                     i++;
@@ -21215,7 +21664,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         switch (mt == (IRType*)0)
                         {
                             case (true) {
-                            this.unsup(n, g"union member not found\0");
+                            this.unsup(n, join3(g"union member not found: \0", n.text, g"\0"));
                             -> (IRValue*)0;
                         }
                             default
@@ -21249,6 +21698,43 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         };
                     };
                 };
+            };
+
+            // Address of a union member: the union's storage seen as the member's type
+            union_member_ptr(Node* n, IRValue* obj, byte* key) -> IRValue*
+            {
+                Node* ud = (Node*)nm_get(this.union_defs, key);
+                bool tagged = ud.text2 != (byte*)0;
+                IRType* mt = this.union_member(key, n.text);
+                IRValue* dp, cp;
+                switch (mt == (IRType*)0)
+                {
+                    case (true) {
+                    this.unsup(n, join3(g"union member not found: \0", n.text, g"\0"));
+                    -> (IRValue*)0;
+                }
+                    default {};
+                };
+                this.sc.clear();
+                this.sc.put_str(f"union_as_{n.text}\0");
+                switch (tagged)
+                {
+                    case (true) {
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = this.ci32(1);
+                    dp = this.mod.gep(obj, this.mod.ia, 2, true, g"union_data_ptr\0");
+                    cp = this.mod.cast(g"bitcast\0", dp, this.mod.t_ptr(mt), this.sc.mem);
+                }
+                    default {
+                    cp = this.mod.cast(g"bitcast\0", obj, this.mod.t_ptr(mt), this.sc.mem);
+                    switch (this.sty(mt))
+                    {
+                        case (true) { cp.flags = cp.flags `| VF_UNION_STRUCT; }
+                        default {};
+                    };
+                };
+                };
+                -> cp;
             };
 
             // AssignmentTypeHandler.handle_union_member_assignment
@@ -21287,21 +21773,29 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         }
                             default
                             {
-                                while (i < this.inited_unions.len)
+                                // Entries are (object, member) pairs in write order. Writing a member other than the one
+                                // written last is a switch and is allowed. Writing the same member again is an error.
+                                i = this.inited_unions.len - 2;
+                                while (i >= 0)
                                 {
                                     switch (this.inited_unions.items[i] == (void*)obj)
                                     {
                                         case (true) {
-                                        this.unsup(t, g"union variable is immutable after initialization\0");
-                                        -> (IRValue*)0;
-                                    }
-                                        default
-                                        {
-                                            i++;
-                                        };
+                                            switch (cstr_eq((byte*)this.inited_unions.items[i + 1], t.text))
+                                            {
+                                                case (true) {
+                                                    this.unsup(t, g"union variable is immutable after initialization\0");
+                                                    -> (IRValue*)0;
+                                                }
+                                                default {};
+                                            };
+                                            i = 0 - 1;
+                                        }
+                                        default { i = i - 2; };
                                     };
                                 };
                                 pv_push(this.inited_unions, (void*)obj);
+                                pv_push(this.inited_unions, (void*)t.text);
                                 this.sc.clear();
                                 this.sc.put_str(f"union_as_{t.text}\0");
                                 switch (tagged)
@@ -21649,7 +22143,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     switch (idx < 0)
                                     {
                                         case (true) {
-                                        this.unsup(n, g"field not found\0");
+                                        this.unsup(n, join3(join3(g"field not found: \0", si.name, g".\0"), field, g"\0"));
                                         -> (IRValue*)0;
                                     }
                                         default {};
@@ -21838,7 +22332,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (idx < 0)
                                                             {
                                                                 case (true) {
-                                                                this.unsup(n, g"member not found\0");
+                                                                this.unsup(n, join3(g"member not found: \0", n.text, g"\0"));
                                                                 -> (IRValue*)0;
                                                             }
                                                                 default {};
@@ -21877,7 +22371,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         }
                                                             default
                                                             {
-                                                                this.unsup(n, g"member access on unsupported type\0");
+                                                                this.sc.clear(); this.sc.put_str(f"member access on unsupported type: {n.text} of {this.mod.type_str(obj2.ty)}\0"); this.unsup(n, this.mod.own(this.sc.mem));
                                                                 -> (IRValue*)0;
                                                             };
                                                         };
@@ -21939,6 +22433,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 SInfo* si;
                 int idx;
                 byte* ekey;
+                byte* ukey;
                 switch (o.kind == NodeKind.IDENTIFIER)
                 {
                     case (true) {
@@ -22043,11 +22538,17 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         switch (this.is_struct_ptr_ty(obj.ty))
                         {
                             case (true) {
+                            ukey = this.union_key_of(obj.ty.elem);
+                            switch (ukey != (byte*)0)
+                            {
+                                case (true) { -> this.union_member_ptr(n, obj, ukey); }
+                                default {};
+                            };
                             si = this.sinfo_of(obj.ty.elem);
                             switch (si == (SInfo*)0)
                             {
                                 case (true) {
-                                this.unsup(n, g"member pointer of unnamed struct\0");
+                                this.unsup(n, join3(g"member pointer of unnamed struct: \0", n.text, g"\0"));
                                 -> (IRValue*)0;
                             }
                                 default {};
@@ -22056,7 +22557,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             switch (idx < 0)
                             {
                                 case (true) {
-                                this.unsup(n, g"member not found\0");
+                                this.unsup(n, join3(g"member not found: \0", n.text, g"\0"));
                                 -> (IRValue*)0;
                             }
                                 default {};
@@ -23929,9 +24430,29 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                                                                                                                                                                                                                                                                                                                                                                                                                             case (true) { this.s_return(n); -> (IRValue*)0; }
                                                                                                                                                                                                                                                                                                                                                                                                                                                             default
                                                                                                                                                                                                                                                                                                                                                                                                                                                             {
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                switch (k == NodeKind.BREAK_STATEMENT)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                switch (k == NodeKind.BREAK_STATEMENT | k == NodeKind.BREAK_SWITCH_STATEMENT)
                                                                                                                                                                                                                                                                                                                                                                                                                                                                 {
                                                                                                                                                                                                                                                                                                                                                                                                                                                                     case (true) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    switch (k == NodeKind.BREAK_SWITCH_STATEMENT)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    case (true) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    switch (this.sw_brk == (IRBlock*)0)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    case (true) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    this.unsup(n, g"break switch outside switch\0");
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    -> (IRValue*)0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    default {};
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    };
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    switch (!this.mod.is_terminated())
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    case (true) { this.mod.br(this.sw_brk); this.sw_used = true; }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    default {};
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    };
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    -> (IRValue*)0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    default {};
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    };
                                                                                                                                                                                                                                                                                                                                                                                                                                                                     switch (this.brk == (IRBlock*)0)
                                                                                                                                                                                                                                                                                                                                                                                                                                                                     {
                                                                                                                                                                                                                                                                                                                                                                                                                                                                         case (true) {

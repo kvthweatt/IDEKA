@@ -524,6 +524,16 @@ namespace IDEKA
             byte* func;
         };
 
+        // A label or goto seen in the function being parsed, for the loop scope rule:
+        // a label inside a loop can only be reached by a goto inside that same loop.
+        struct LblRec
+        {
+            byte* name;
+            int loop;               // label: id of the loop it is in, 0 for none
+            int n;                  // goto: how many loops enclose it
+            int* loops;             // goto: their ids, outermost first
+        };
+
         // One registered template (iparser.py TemplateEntry plus the registry bookkeeping)
         struct TemplateEntry
         {
@@ -606,6 +616,10 @@ namespace IDEKA
             byte* eof_msg;          // text for EOF inside a statement list, null for the generic error
             int function_depth, loop_depth, in_comptime, in_trait, in_fn_stringify, async_errs;
             int assign_count;       // assignment nodes built so far (ternary condition check)
+            int loop_serial, loop_n;    // loop ids handed out, loops enclosing the token being parsed
+            int* loop_ids;              // ids of the enclosing loops, outermost first (first 256)
+            PtrVec* lbls;               // LblRec of each label in the function being parsed
+            PtrVec* gtos;               // LblRec of each goto in it
             int cond_depth;         // >0 while parsing an if/elif/while/do-while/for/switch condition (assignment banned)
             bool in_for_init;       // parsing the init clause of a for loop
             bool failed, verbose;
@@ -688,6 +702,11 @@ namespace IDEKA
                 this.block_out = (NodeVec*)0;
                 this.root_inits = (NodeVec*)0;
                 this.strs = pv_new();
+                this.loop_serial = 0;
+                this.loop_n = 0;
+                this.loop_ids = (int*)fmalloc((u64)256 * (u64)((sizeof(int) + 7) / 8));
+                this.lbls = pv_new();
+                this.gtos = pv_new();
                 this.sb.__init();
                 this.st = (IDKC_SYMTABLE*)0;
                 this.default_byte_width = 8;
@@ -758,6 +777,10 @@ namespace IDEKA
                     ffree((byte*)this.strs.items[si]);
                     si++;
                 };
+                this.lbl_reset();
+                pv_free(this.lbls);
+                pv_free(this.gtos);
+                ffree((byte*)this.loop_ids);
                 pv_free(this.strs);
                 pv_free(this.trait_defs);
                 int ci;
@@ -9285,7 +9308,15 @@ namespace IDEKA
                                                 switch (t.custom_typename != (byte*)0 & this.st != (IDKC_SYMTABLE*)0)
                                                 {
                                                     case (true) {
-                                                    TypeSpec* rs = st_get_type_spec(this.st, t.custom_typename);
+                                                    TypeSpec* rs = (TypeSpec*)0;
+                                                    IDKC_SYMENTRY* ae = st_lookup_any(this.st, t.custom_typename, (byte*)0);
+                                                    switch (ae != (IDKC_SYMENTRY*)0)
+                                                    {
+                                                        case (true) {
+                                                        switch (ae.kind_id == SymbolKind.TYPE) { case (true) { rs = (TypeSpec*)ae.ts; } default {}; };
+                                                    }
+                                                        default {};
+                                                    };
                                                     switch (rs != (TypeSpec*)0)
                                                     {
                                                         case (true) {
@@ -14411,9 +14442,116 @@ namespace IDEKA
             loop_block() -> Node*
             {
                 this.loop_depth++;
+                this.loop_serial++;
+                if (this.loop_n < 256) { this.loop_ids[this.loop_n] = this.loop_serial; };
+                this.loop_n++;
                 Node* b = this.block();
+                this.loop_n--;
                 this.loop_depth--;
                 -> b;
+            };
+
+            // Number of enclosing loops that are tracked in loop_ids
+            tracked_loops() -> int
+            {
+                if (this.loop_n > 256) { -> 256; };
+                -> this.loop_n;
+            };
+
+            // Forget the labels and gotos of the function that was just parsed
+            lbl_reset() -> void
+            {
+                int i = 0;
+                LblRec* r;
+                while (i < this.lbls.len)
+                {
+                    ffree((byte*)this.lbls.items[i]);
+                    i++;
+                };
+                this.lbls.len = 0;
+                i = 0;
+                while (i < this.gtos.len)
+                {
+                    r = (LblRec*)this.gtos.items[i];
+                    if (r.n > 0) { ffree((byte*)r.loops); };
+                    ffree((byte*)r);
+                    i++;
+                };
+                this.gtos.len = 0;
+            };
+
+            // A label inside a loop is only reachable from a goto inside that same loop.
+            // Called once a function body is parsed; clears the records.
+            lbl_check() -> void
+            {
+                int gi = 0;
+                int li, k;
+                bool inside;
+                LblRec* g;
+                LblRec* l;
+                LblRec* hit;
+                while (gi < this.gtos.len)
+                {
+                    g = (LblRec*)this.gtos.items[gi];
+                    hit = (LblRec*)0;
+                    li = this.lbls.len;
+                    while (li > 0 & hit == (LblRec*)0)
+                    {
+                        li--;
+                        l = (LblRec*)this.lbls.items[li];
+                        if (cstr_eq(l.name, g.name)) { hit = l; };
+                    };
+                    if (hit != (LblRec*)0)
+                    {
+                        if (hit.loop != 0)
+                        {
+                            inside = false;
+                            k = 0;
+                            while (k < g.n)
+                            {
+                                if (g.loops[k] == hit.loop) { inside = true; };
+                                k++;
+                            };
+                            if (!inside)
+                            {
+                                this.error(g"'goto' cannot jump into a loop: its label is inside a loop and is only reachable from inside that loop\0");
+                            };
+                        };
+                    };
+                    gi++;
+                };
+                this.lbl_reset();
+            };
+
+            // Records label (is_label) or goto name with the loops around it
+            lbl_note(byte* name, bool is_label) -> void
+            {
+                LblRec* r = (LblRec*)fmalloc((u64)((sizeof(LblRec) + 7) / 8));
+                int k = 0;
+                int t = this.tracked_loops();
+                r.name = name;
+                r.loop = 0;
+                r.n = 0;
+                r.loops = (int*)0;
+                if (is_label)
+                {
+                    if (t > 0) { r.loop = this.loop_ids[t - 1]; };
+                    pv_push(this.lbls, (void*)r);
+                }
+                else
+                {
+                    r.n = t;
+                    if (t > 0)
+                    {
+                        r.loops = (int*)fmalloc((u64)t * (u64)((sizeof(int) + 7) / 8));
+                        while (k < t)
+                        {
+                            r.loops[k] = this.loop_ids[k];
+                            k++;
+                        };
+                    };
+                    pv_push(this.gtos, (void*)r);
+                };
             };
 
             // block_statement -> block (('if' '(' expression ')') ('else' block)? ';' | ';')
@@ -15525,16 +15663,12 @@ namespace IDEKA
                     default
                     {
                         this.consume(TokenType.LABEL);
-                        switch (!this.failed & this.loop_depth > 0)
-                        {
-                            case (true) {
-                            this.error(g"'label' is not permitted inside a loop body\0");
-                        }
-                            default {};
-                        };
                         switch (!this.failed)
                         {
-                            case (true) { n.text = this.ident(); }
+                            case (true) {
+                            n.text = this.ident();
+                            if (!this.failed) { this.lbl_note(n.text, true); };
+                        }
                             default {};
                         };
                         switch (!this.failed)
@@ -15559,7 +15693,10 @@ namespace IDEKA
                         this.consume(TokenType.GOTO);
                         switch (!this.failed)
                         {
-                            case (true) { n.text = this.ident(); }
+                            case (true) {
+                            n.text = this.ident();
+                            if (!this.failed) { this.lbl_note(n.text, false); };
+                        }
                             default {};
                         };
                         switch (!this.failed)
@@ -18271,8 +18408,10 @@ namespace IDEKA
                                                                                                     default
                                                                                                     {
                                                                                                         this.function_depth++;
+                                                                                                        this.lbl_reset();
                                                                                                         f.a = this.block();
                                                                                                         this.function_depth--;
+                                                                                                        this.lbl_check();
                                                                                                         this.end_body();
                                                                                                         switch (this.failed)
                                                                                                         {

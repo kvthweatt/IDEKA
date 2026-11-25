@@ -4716,6 +4716,7 @@ struct MI
             {
                 IRValue* v = this.s_res(ix);
                 int w, r, t;
+                i64 sv;
                 bool sgn = true;
                 int sc;
                 MI* mi;
@@ -4727,7 +4728,13 @@ struct MI
                     {
                         // sign extend a narrow constant from its width
                         t = (int)this.scv;
-                        if (w == 32) { m.imm = m.imm + (i64)t * (i64)esz; }
+                        if (w == 32)
+                        {
+                            // the constant is kept as its 32 bit pattern: sign extend it from bit 31
+                            sv = this.scv `& (i64)4294967295;
+                            if (sv > (i64)2147483647) { sv = sv - (i64)4294967296; };
+                            m.imm = m.imm + sv * (i64)esz;
+                        }
                         else
                         {
                             if (w < 32)
