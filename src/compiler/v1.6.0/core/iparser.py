@@ -486,6 +486,10 @@ class IDEKAParser:
         self._constras: dict = {}  # name -> (params: List[str], relations: list)
         self._function_depth = 0  # Tracks nesting depth; nested function defs are illegal
         self._loop_depth = 0      # Tracks nesting depth of for/while/do-while loops
+        self._loop_serial = 0     # Source order id handed to each loop
+        self._loop_stack: list = []   # ids of the loops enclosing the token being parsed
+        self._fn_labels: dict = {}    # label name -> (id of the loop it is in or 0, line, col) for this function
+        self._fn_gotos: list = []     # (name, ids of the loops around the goto, line, col) for this function
         self._assign_count = 0    # number of assignment nodes built so far (ternary condition check)
         self._cond_depth = 0      # >0 while parsing an if/elif/while/do-while/for/switch condition (assignment banned)
         self._in_for_init = False # True while parsing the init clause of a for(...) header
@@ -3503,8 +3507,10 @@ class IDEKAParser:
                 if param.name:
                     self.symbol_table.define(param.name, SymbolKind.VARIABLE, param.type_spec)
             self._function_depth += 1
+            self._fn_labels, self._fn_gotos = {}, []
             body = self.block()
             self._function_depth -= 1
+            self._check_label_scopes()
             # Prepend pre-contract statements to the top of the function body
             if contract_stmts:
                 body.statements = contract_stmts + body.statements
@@ -7546,9 +7552,9 @@ class IDEKAParser:
         self.consume(TokenType.LEFT_PAREN)
         condition = self.condition_expression()
         self.consume(TokenType.RIGHT_PAREN)
-        self._loop_depth += 1
+        self._enter_loop()
         body = self.block()
-        self._loop_depth -= 1
+        self._exit_loop()
         self.consume(TokenType.SEMICOLON)
         return WhileLoop(condition, body).set_location(tok.line, tok.column)
     
@@ -7562,9 +7568,9 @@ class IDEKAParser:
         """
         tok = self.current_token
         self.consume(TokenType.DO)
-        self._loop_depth += 1
+        self._enter_loop()
         body = self.block()
-        self._loop_depth -= 1
+        self._exit_loop()
         
         # Check if this is a do-while or plain do
         if self.expect(TokenType.WHILE):
@@ -7669,9 +7675,9 @@ class IDEKAParser:
             self.consume(TokenType.IN)
             iterable = self.expression()
             self.consume(TokenType.RIGHT_PAREN)
-            self._loop_depth += 1
+            self._enter_loop()
             body = self.block()
-            self._loop_depth -= 1
+            self._exit_loop()
             self.consume(TokenType.SEMICOLON)
 
             return ForInLoop(variables, iterable, body, is_destructure=is_destructure_for_in, is_bit=is_bit_for_in).set_location(tok.line, tok.column)
@@ -7702,9 +7708,9 @@ class IDEKAParser:
                 update = ExpressionStatement(self.expression())
             
             self.consume(TokenType.RIGHT_PAREN)
-            self._loop_depth += 1
+            self._enter_loop()
             body = self.block()
-            self._loop_depth -= 1
+            self._exit_loop()
             self.consume(TokenType.SEMICOLON)
             
             return ForLoop(init, condition, update, body).set_location(tok.line, tok.column)
@@ -7901,15 +7907,37 @@ class IDEKAParser:
         self.consume(TokenType.SEMICOLON)
         return ContinueStatement().set_location(tok.line, tok.column)
 
+    def _enter_loop(self):
+        self._loop_depth += 1
+        self._loop_serial += 1
+        self._loop_stack.append(self._loop_serial)
+
+    def _exit_loop(self):
+        self._loop_depth -= 1
+        self._loop_stack.pop()
+
+    def _check_label_scopes(self):
+        """A label inside a loop can only be reached by a goto inside that same loop.
+        Called when a function body has been parsed; clears the per function records."""
+        labels, gotos = self._fn_labels, self._fn_gotos
+        self._fn_labels, self._fn_gotos = {}, []
+        for name, loops, line, col in gotos:
+            info = labels.get(name)
+            if info is None:
+                continue   # codegen reports a goto to an undefined label
+            label_loop = info[0]
+            if label_loop != 0 and label_loop not in loops:
+                self.error(f"'goto {name}' cannot jump into a loop: label '{name}' "
+                           f"(line {info[1]}) is inside a loop and is only reachable from inside that loop")
+
     def label_statement(self) -> LabelStatement:
         """
         label_statement -> 'label' IDENTIFIER ':'
         """
         tok = self.current_token
         self.consume(TokenType.LABEL)
-        if self._loop_depth > 0:
-            self.error("'label' is not permitted inside a loop body")
         name = self.consume(TokenType.IDENTIFIER).value
+        self._fn_labels[name] = (self._loop_stack[-1] if self._loop_stack else 0, tok.line, tok.column)
         self.consume(TokenType.COLON)
         return LabelStatement(name).set_location(tok.line, tok.column)
 
@@ -7920,6 +7948,7 @@ class IDEKAParser:
         tok = self.current_token
         self.consume(TokenType.GOTO)
         name = self.consume(TokenType.IDENTIFIER).value
+        self._fn_gotos.append((name, tuple(self._loop_stack), tok.line, tok.column))
         self.consume(TokenType.SEMICOLON)
         return GotoStatement(name).set_location(tok.line, tok.column)
 

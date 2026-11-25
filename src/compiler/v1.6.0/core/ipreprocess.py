@@ -84,6 +84,7 @@ class FXPreprocessor:
                 new_lines.append(new_line)
             
             combined_source = '\n'.join(new_lines)
+        combined_source = combined_source.replace(self._PAINT, '')
         ending = "es." if iteration > 1 else "."
         if self.verbose:
             print(f"[PREPROCESSOR] Completed after {iteration} constant pass{ending}")
@@ -854,6 +855,11 @@ class FXPreprocessor:
             args.append(''.join(current))
         return args
 
+    # A token that names a constant which is already being expanded is "painted" with
+    # this byte so later passes leave it alone (the C rule: a constant is not expanded
+    # again inside its own expansion). The byte is removed when processing finishes.
+    _PAINT = '\x01'
+
     def _substitute_constants(self, line: str) -> str:
         """Expand macros then substitute scalar constants."""
         # First pass: expand any #psub parameterized macros
@@ -862,12 +868,25 @@ class FXPreprocessor:
         # Second pass: scalar constant substitution
         if not line or line.strip() == ';':
             return line
-        
-        # Split line into tokens, preserving whitespace structure
+        return self._subst_tokens(line, frozenset())
+
+    def _constant_text(self, name: str, hidden) -> str:
+        """Fully expanded value of constant `name`, with every constant in `hidden`
+        (the constants currently being expanded) painted instead of expanded."""
+        if name in hidden:
+            return self._PAINT + name
+        constant_value = self.constants[name]
+        # Remove trailing semicolon if it's at the end
+        if constant_value.endswith(';'):
+            constant_value = constant_value.rstrip(';').strip()
+        return self._subst_tokens(constant_value, hidden | {name})
+
+    def _subst_tokens(self, line: str, hidden) -> str:
+        """Replace every constant token in `line`, preserving whitespace structure."""
         result_parts = []
         in_quotes = False
         current_token = ""
-        
+
         for char in line:
             if char == '"':
                 in_quotes = not in_quotes
@@ -875,32 +894,22 @@ class FXPreprocessor:
             elif char.isspace() or char in '.,;:()[]{}+-*/%=!<>|&^~':
                 # End of token
                 if current_token:
-                    # Check if token is a constant
                     if not in_quotes and current_token in self.constants:
-                        # Get constant value and strip trailing semicolon if present
-                        constant_value = self.constants[current_token]
-                        # Remove trailing semicolon if it's at the end
-                        if constant_value.endswith(';'):
-                            constant_value = constant_value.rstrip(';').strip()
-                        result_parts.append(constant_value)
+                        result_parts.append(self._constant_text(current_token, hidden))
                     else:
                         result_parts.append(current_token)
                     current_token = ""
                 result_parts.append(char)
             else:
                 current_token += char
-        
+
         # Handle last token
         if current_token:
             if not in_quotes and current_token in self.constants:
-                constant_value = self.constants[current_token]
-                # Remove trailing semicolon if it's at the end
-                if constant_value.endswith(';'):
-                    constant_value = constant_value.rstrip(';').strip()
-                result_parts.append(constant_value)
+                result_parts.append(self._constant_text(current_token, hidden))
             else:
                 result_parts.append(current_token)
-        
+
         return ''.join(result_parts)
 
 
