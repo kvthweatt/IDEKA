@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IDEKA Language Server (flsp.py)
+IDEKA Language Server (ilsp.py)
 Full-featured LSP server for the IDEKA programming language.
 
 Features:
@@ -23,8 +23,8 @@ Requirements:
     pip install pygls lsprotocol
 
 Usage:
-    python flsp.py          # stdio mode (default, for editors)
-    python flsp.py --tcp    # TCP mode on port 2087 (for debugging)
+    python ilsp.py          # stdio mode (default, for editors)
+    python ilsp.py --tcp    # TCP mode on port 2087 (for debugging)
 
 Environment variables:
     IDEKA_SRCDIR   Path to IDEKA compiler source directory (default: same dir as this script)
@@ -35,7 +35,7 @@ Editor config examples
 Neovim (init.lua):
     vim.lsp.start({
         name = "IDEKA",
-        cmd  = { "python3", "/path/to/flsp.py" },
+        cmd  = { "python3", "/path/to/ilsp.py" },
         filetypes = { "IDEKA" },
         root_dir = vim.fn.getcwd(),
     })
@@ -48,7 +48,7 @@ Helix (languages.toml):
 
     [language-server.IDEKA-lsp]
     command = "python3"
-    args    = ["/path/to/flsp.py"]
+    args    = ["/path/to/ilsp.py"]
 """
 
 import sys

@@ -16,7 +16,7 @@ Features:
 
 Usage:
     python iide.py [file ...]
-    python iide.py --lsp /path/to/flsp.py [file ...]
+    python iide.py --lsp /path/to/ilsp.py [file ...]
 
 Environment:
     IDEKA_SRCDIR   Path to IDEKA compiler source (passed to LSP server)
@@ -1338,8 +1338,8 @@ def _ansi_to_richtext(text: str, default_color: str) -> List[tuple]:
 
 class ReplWidget(QWidget):
     """
-    Embedded IDEKA REPL. Drives frepl.ReplSession._run_block directly,
-    bypassing frepl's raw-terminal input layer.
+    Embedded IDEKA REPL. Drives irepl.ReplSession._run_block directly,
+    bypassing irepl's raw-terminal input layer.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1425,7 +1425,7 @@ class ReplWidget(QWidget):
         try:
             import sys, os
             sys.path.insert(0, str(Path(__file__).parent))
-            from frepl import ReplSession, _run_block, _val_repr, _print_result
+            from irepl import ReplSession, _run_block, _val_repr, _print_result
             self._session      = ReplSession()
             self._run_block    = _run_block
             self._val_repr     = _val_repr
@@ -1528,7 +1528,7 @@ class _ReplRunWorker(QThread):
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
-            from frepl import _parse_comptime_blocks, _wrap_comptime, \
+            from irepl import _parse_comptime_blocks, _wrap_comptime, \
                                _print_new_emissions, _val_repr, FVMCodegenError
             from idkvm import VMError
             wrapped = _wrap_comptime(self._source)
@@ -2437,7 +2437,7 @@ class IDEKAIDE(QMainWindow):
         # ic.py outputs to build/<name>/<name>.exe relative to source file dir
         suffix   = '.exe' if sys.platform == 'win32' else ''
         binary   = str(Path(cwd) / 'build' / base / (base + suffix))
-        cmd      = [sys.executable, idkc, path] + self._build_opts.extra_flags()
+        cmd      = ["idkc", path] + self._build_opts.extra_flags()
         runner   = self._bottom.start_build(cmd, cwd)
 
         def _on_done(rc):
@@ -2524,7 +2524,7 @@ def main():
     ap = argparse.ArgumentParser(description='IDEKA IDE')
     ap.add_argument('files', nargs='*', help='Files to open')
     ap.add_argument('--lsp', default=None,
-                    help='Path to flsp.py (default: flsp.py in same directory)')
+                    help='Path to ilsp.py (default: ilsp.py in same directory)')
     args = ap.parse_args()
 
     app = QApplication(sys.argv)
@@ -2534,8 +2534,8 @@ def main():
     lsp_script = args.lsp
     if lsp_script is None:
         for _candidate in [
-            Path(__file__).parent / 'flsp.py',
-            Path(__file__).parent / 'scripts' / 'flsp.py',
+            Path(__file__).parent / 'ilsp.py',
+            Path(__file__).parent / 'scripts' / 'ilsp.py',
         ]:
             if _candidate.exists():
                 lsp_script = str(_candidate)

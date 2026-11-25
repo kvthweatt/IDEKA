@@ -35,6 +35,19 @@ except ImportError:
     sys.modules['llvmlite.ir']              = _ir_stub
     sys.modules['llvmlite.ir.instructions'] = types.ModuleType('llvmlite.ir.instructions')
 
+from pathlib import Path
+
+# Resolve compiler root: prefer IDEKA_SRCDIR env var, fall back to script location
+IDEKA_SRCDIR = Path(os.environ.get("IDEKA_SRCDIR", str(Path(__file__).resolve().parent)))
+
+# Write it back so idkc.py and iconfig.py see the same root when they're imported
+os.environ["IDEKA_SRCDIR"] = str(IDEKA_SRCDIR)
+
+# Add src/compiler and src/stdlib to Python path
+sys.path.insert(0, str(IDEKA_SRCDIR / "src" / "compiler"))
+sys.path.insert(0, str(IDEKA_SRCDIR / "src" / "stdlib"))
+sys.path.insert(0, str(IDEKA_SRCDIR / "src" / "stdlib" / "runtime"))
+
 from idkvm import IDEKAVM, Val, TTag, Op, VMError
 from ivmcodegen import FVMCodegen, FVMCodegenError
 from ilexer import IDEKALexer
