@@ -1049,7 +1049,16 @@ namespace IDEKA
                     {
                         switch (!this.ginit_eval(e.a, ns, @l)) { case (true) { -> false; } default {}; };
                         switch (e.op == Operator.SUB) { case (true) { *out = (i64)0 - l; -> true; } default {}; };
-                        switch (e.op == Operator.NOT) { case (true) { *out = `!l; -> true; } default {}; };
+                        switch (e.op == Operator.NOT)
+                        {
+                            case (true)
+                            {
+                                *out = (i64)0;
+                                switch (l == (i64)0) { case (true) { *out = (i64)1; } default {}; };
+                                -> true;
+                            }
+                            default {};
+                        };
             switch (e.op == Operator.BITNOT) { case (true) { *out = `!l; -> true; } default {}; };
                         -> false;
                     }
@@ -2395,7 +2404,7 @@ namespace IDEKA
                 while (i < n)
                 {
                     mem = node_child(ud, 0, i);
-                    mt = this.lower(mem.ts, false, ud.line);
+                    mt = this.lower(mem.ts, true, ud.line);
                     sz = this.union_size(mt);
                     switch (sz > mx)
                     {
@@ -4076,7 +4085,13 @@ namespace IDEKA
                                     };
                                     switch (e.op == Operator.NOT)
                                     {
-                                        case (true) { *ov = `!lv; *ow = lw; -> true; }
+                                        case (true)
+                                        {
+                                            *ov = (i64)0;
+                                            switch (lv == (i64)0) { case (true) { *ov = (i64)1; } default {}; };
+                                            *ow = lw;
+                                            -> true;
+                                        }
                                         default {};
                                     };
                                     switch (e.op == Operator.SUB)
@@ -7125,6 +7140,9 @@ namespace IDEKA
                         switch (nm_get(this.untied, n.a.text) != (void*)0)
                         {
                             case (true) {
+                            this.sc.clear();
+                            this.sc.put_str(f"Use after untie: variable '{n.a.text}' was moved\0");
+                            this.fail_at(n, this.sc.mem);
                             this.unsup(n, g"use after untie\0");
                             -> (IRValue*)0;
                         }
@@ -8264,6 +8282,9 @@ namespace IDEKA
                         switch (nm_get(this.untied, n.text) != (void*)0 & this.find_local(n.text) != (LVar*)0)
                         {
                             case (true) {
+                            this.sc.clear();
+                            this.sc.put_str(f"Use after untie: variable '{n.text}' was moved\0");
+                            this.fail_at(n, this.sc.mem);
                             this.unsup(n, g"use after untie\0");
                             -> (IRValue*)0;
                         }
@@ -11181,6 +11202,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         switch (nm_get(this.untied, target.text) != (void*)0)
                         {
                             case (true) {
+                            this.sc.clear();
+                            this.sc.put_str(f"Use after invalidation: '{target.text}' was previously invalidated by a tie-transfer (~) and cannot be assigned to. Redeclare '{target.text}' here.\0");
+                            this.fail_at(target, this.sc.mem);
                             this.unsup(target, g"assign to an untied variable\0");
                             -> (IRValue*)0;
                         }
@@ -15131,7 +15155,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                             switch (vt.kind == LK.STRUCT | vt.kind == LK.ISTRUCT)
                                                             {
                                                                 case (true) {
-                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp");
+                                                                tmp = this.mod.alloca_here(vt, g"bs_stmp\0");
                                                                 this.mod.store(val, tmp);
                                                                 res = this.bs_struct_slice(vt, tmp, sc, ec);
                                                                 switch (res != (IRValue*)0) { case (true) { -> res; } default {}; };
@@ -18859,21 +18883,6 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     default
                                     {
                                         if (incdec & this.bp_is(v)) { -> this.bp_incdec(n, v, op, post); };
-                                        switch (incdec & opd.kind == NodeKind.IDENTIFIER)
-                                        {
-                                            case (true) {
-                                            switch (v.ty.kind == LK.PTR & v.ty.elem.kind == LK.PTR)
-                                            {
-                                                case (true) {
-                                                this.sc.clear();
-                                                this.sc.put_str(f"{opd.text}_loaded\0");
-                                                v = this.mod.load(v, this.sc.mem);
-                                            }
-                                                default {};
-                                            };
-                                        }
-                                            default {};
-                                        };
                                         switch (op == Operator.NOT)
                                         {
                                             case (true) {
@@ -18892,7 +18901,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                             }
                                                 default {};
                                             };
-                                            -> this.mod.binop(g"xor\0", v, this.all_ones(v.ty), (byte*)0);
+                                            -> this.mod.icmp(g"eq\0", v, this.mod.c_int(v.ty, (i64)0), g"lnot\0");
                                         }
                                             default
                                             {
@@ -20085,6 +20094,91 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 -> al;
             };
 
+            // (be32)arr over an array value whose elements are as wide as the target: every element takes the target's
+            // endianness, the result is an array of the same count
+            array_endian_cast(IRValue* v, IRType* tt, TypeSpec* tsp) -> IRValue*
+            {
+                IRType* at = this.mod.t_array(tt, v.ty.count);
+                IRValue* src = this.mod.alloca_here(v.ty, g"arr_endian_src\0");
+                IRValue* res = this.mod.alloca_here(at, g"arr_endian_res\0");
+                IRValue* ep, ev;
+                int i = 0;
+                this.mod.store(v, src);
+                while (i < v.ty.count)
+                {
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = this.ci32(i);
+                    ep = this.mod.gep(src, this.mod.ia, 2, true, g"arr_endian_ep\0");
+                    ev = this.mod.load(ep, g"arr_endian_ev\0");
+                    ev.spec = v.spec;
+                    ev = this.cast_endian_fix(ev, tsp);
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = this.ci32(i);
+                    ep = this.mod.gep(res, this.mod.ia, 2, true, g"arr_endian_dp\0");
+                    this.mod.store(ev, ep);
+                    i++;
+                };
+                -> this.mod.load(res, g"arr_endian\0");
+            };
+
+            // (byte[N])arr over an array value of the same total width: the bytes of every element, most significant first,
+            // the order a scalar gives in (byte[N])x
+            array_reinterpret(Node* n, IRValue* v, IRType* tt) -> IRValue*
+            {
+                IRType* se = v.ty.elem;
+                IRType* te = tt.elem;
+                int sb = this.pack_bits(se) * v.ty.count;
+                int tb = this.pack_bits(te) * tt.count;
+                IRValue* src;
+                IRValue* res;
+                IRValue* ep, ev, sh, bv, dp;
+                int i = 0;
+                int j, k, shift;
+                switch (se.kind != LK.INT | te.kind != LK.INT | sb == 0 | sb != tb | se.width < te.width | (se.width % te.width) != 0)
+                {
+                    case (true) {
+                    this.unsup(n, g"cast between arrays of different widths\0");
+                    -> (IRValue*)0;
+                }
+                    default {};
+                };
+                k = se.width / te.width;
+                src = this.mod.alloca_here(v.ty, g"arr_reint_src\0");
+                res = this.mod.alloca_here(tt, g"arr_reint_res\0");
+                this.mod.store(v, src);
+                while (i < v.ty.count)
+                {
+                    this.mod.ia[0] = this.ci32(0);
+                    this.mod.ia[1] = this.ci32(i);
+                    ep = this.mod.gep(src, this.mod.ia, 2, true, g"arr_reint_ep\0");
+                    ev = this.mod.load(ep, g"arr_reint_ev\0");
+                    j = 0;
+                    while (j < k)
+                    {
+                        shift = (k - 1 - j) * te.width;
+                        sh = ev;
+                        switch (shift > 0)
+                        {
+                            case (true) { sh = this.mod.binop(g"lshr\0", ev, this.mod.c_int(se, shift), g"arr_reint_sh\0"); }
+                            default {};
+                        };
+                        bv = sh;
+                        switch (te.width < se.width)
+                        {
+                            case (true) { bv = this.mod.cast(g"trunc\0", sh, te, g"arr_reint_b\0"); }
+                            default {};
+                        };
+                        this.mod.ia[0] = this.ci32(0);
+                        this.mod.ia[1] = this.ci32(i * k + j);
+                        dp = this.mod.gep(res, this.mod.ia, 2, true, g"arr_reint_dp\0");
+                        this.mod.store(bv, dp);
+                        j++;
+                    };
+                    i++;
+                };
+                -> this.mod.load(res, g"arr_reint\0");
+            };
+
             unpack_to_array(Node* n, IRValue* v, IRType* at) -> IRValue*
             {
                 IRType* et = at.elem;
@@ -20262,6 +20356,14 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                         st = v.ty;
                                                         if (this.bp_is(v)) { -> this.bp_cast(v, tt, n); };
                                                         if (this.bp_is_ty(tt) & st.kind == LK.PTR) { -> this.bp_from_ptr(v, tt); };
+                if (st.kind == LK.ARRAY & tt.kind == LK.INT & st.elem.kind == LK.INT & st.elem.width == tt.width)
+                {
+                    -> this.array_endian_cast(v, tt, tsp);
+                };
+                if (st.kind == LK.ARRAY & tt.kind == LK.ARRAY & !lt_eq(st, tt))
+                {
+                    -> this.array_reinterpret(n, v, tt);
+                };
                                                         switch (lt_eq(st, tt))
                                                         {
                                                             case (true) {
@@ -21616,7 +21718,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             switch (cstr_eq(mem.text, name))
                             {
                                 case (true) {
-                                    IRType* lt = this.lower(mem.ts, false, ud.line);
+                                    IRType* lt = this.lower(mem.ts, true, ud.line);
                                     switch (lt == (IRType*)0)
                                     {
                                         case (true) { this.bad_detail = join3(g"union member type unresolved: \0", name, g"\0"); }
@@ -21691,6 +21793,8 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                     };
                                 };
                                 };
+                                // An array member is its own address, as it is for a struct member
+                                switch (mt.kind == LK.ARRAY) { case (true) { -> cp; } default {}; };
                                 this.sc.clear();
                                 this.sc.put_str(f"union_{n.text}_value\0");
                                 -> this.mod.load(cp, this.sc.mem);
@@ -23258,7 +23362,9 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 this.mod.store(this.mod.binop(g"add\0", kv, this.ci32(1), g"ri.next\0"), kp);
                 this.mod.br(cb);
                 this.mod.position(this.fn, eb);
-                -> this.mod.load(res, g"ri_arr\0");
+                kv = this.mod.load(res, g"ri_arr\0");
+                kv.spec = arr.spec;
+                -> kv;
             };
 
             // a[s:e]: a copy of the elements from s to e inclusive (e below s reverses), in a block of the frame followed by a
@@ -24099,13 +24205,6 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                         }
                             default
                             {
-                                switch (p.ty.kind == LK.PTR & p.ty.elem.kind == LK.PTR & p.ty.elem.elem.kind == LK.PTR)
-                                {
-                                    case (true) {
-                                    p = this.mod.load(p, g"deref_ptr_loaded\0");
-                                }
-                                    default {};
-                                };
                                 switch (p.ty.kind != LK.PTR)
                                 {
                                     case (true) {

@@ -1750,6 +1750,59 @@ namespace IDEKA
                 };
             };
 
+            // `using` adds a namespace to the lookup scope: a call to `name` considers `name` itself
+            // and `<used namespace>__name` together, as one overload set
+            ov_resolve_call(byte* name) -> PtrVec*
+            {
+                PtrVec* r = this.ov_resolve(name);
+                PtrVec* extra, merged;
+                byte* m;
+                int i, j, k;
+                bool dup, added;
+                switch (has_scope_sep(name) | this.st.using_ns.len == 0)
+                {
+                    case (true) { -> r; }
+                    default {};
+                };
+                merged = pv_new();
+                switch (r != (PtrVec*)0)
+                {
+                    case (true) {
+                    j = 0;
+                    while (j < r.len) { pv_push(merged, r.items[j]); j++; };
+                }
+                    default {};
+                };
+                while (i < this.st.using_ns.len)
+                {
+                    m = mangle_namespace_name((byte*)this.st.using_ns.items[i], name);
+                    extra = this.vis_overloads(st_overloads_of(this.st, m));
+                    ffree(m);
+                    switch (extra != (PtrVec*)0)
+                    {
+                        case (true) {
+                        j = 0;
+                        while (j < extra.len)
+                        {
+                            dup = false;
+                            k = 0;
+                            while (k < merged.len)
+                            {
+                                switch (merged.items[k] == extra.items[j]) { case (true) { dup = true; } default {}; };
+                                k++;
+                            };
+                            switch (!dup) { case (true) { pv_push(merged, extra.items[j]); added = true; } default {}; };
+                            j++;
+                        };
+                    }
+                        default {};
+                    };
+                    i++;
+                };
+                switch (added) { case (true) { -> merged; } default {}; };
+                -> r;
+            };
+
             ov_resolve(byte* name) -> PtrVec*
             {
                 PtrVec* r;
@@ -1985,6 +2038,13 @@ namespace IDEKA
                     case (true) { -> true; }
                     default
                     {
+                        // A tied parameter takes a tied variable (implicit untie); `~x` passes the untied
+                        // value, so it selects the untied overload
+                        switch (!this.tied_ok(pt, an))
+                        {
+                            case (true) { -> false; }
+                            default {};
+                        };
                         switch (!this.arg_matches(pt, at))
                         {
                             case (true) { -> false; }
@@ -2152,6 +2212,14 @@ namespace IDEKA
                                 case (true) { continue; }
                                 default
                                 {
+                                    ok = true;
+                                    j = 0;
+                                    while (j < argc & j < np)
+                                    {
+                                        switch (!this.tied_ok(o.params[j], args.items[j])) { case (true) { ok = false; } default {}; };
+                                        j++;
+                                    };
+                                    switch (!ok) { case (true) { continue; } default {}; };
                                     switch (first == (Overload*)0)
                                     {
                                         case (true) { first = o; }
@@ -3156,10 +3224,85 @@ namespace IDEKA
                 };
             };
 
+            // True when the argument is a plain identifier naming a tied variable
+            tied_var_arg(Node* an) -> bool
+            {
+                IDKC_SYMENTRY* e;
+                switch (an.kind == NodeKind.IDENTIFIER & an.text != (byte*)0)
+                {
+                    case (true) {
+                    e = st_lookup_any(this.st, an.text, (byte*)0);
+                    switch (e != (IDKC_SYMENTRY*)0)
+                    {
+                        case (true) {
+                        switch (e.kind_id == SymbolKind.VARIABLE & (TypeSpec*)e.ts != (TypeSpec*)0)
+                        {
+                            case (true) { -> (((TypeSpec*)e.ts).flags `& TS_TIED) != 0; }
+                            default {};
+                        };
+                    }
+                        default {};
+                    };
+                }
+                    default {};
+                };
+                -> false;
+            };
+
+            // A tied parameter accepts only a tied variable, an untied parameter never one
+            tied_ok(TypeSpec* pt, Node* an) -> bool
+            {
+                switch (pt == (TypeSpec*)0) { case (true) { -> true; } default {}; };
+                -> ((pt.flags `& TS_TIED) != 0) == this.tied_var_arg(an);
+            };
+
+            // Passing a tied variable to a tied parameter is an implicit untie: the argument
+            // becomes `~name`, exactly as if the tie had been written
+            implicit_untie(Overload* o, NodeVec* args) -> void
+            {
+                int j;
+                Node* an, t;
+                switch (o == (Overload*)0 | args == (NodeVec*)0)
+                {
+                    case (true) { ->; }
+                    default
+                    {
+                        while (j < args.len & j < o.nparams)
+                        {
+                            an = args.items[j];
+                            switch (o.params[j] != (TypeSpec*)0 & this.tied_var_arg(an))
+                            {
+                                case (true) {
+                                switch ((o.params[j].flags `& TS_TIED) != 0)
+                                {
+                                    case (true) {
+                                    t = node_new(NodeKind.TIE_EXPRESSION, an.line, an.col);
+                                    switch (t != (Node*)0)
+                                    {
+                                        case (true) {
+                                        t.a = an;
+                                        t.ety = an.ety;
+                                        args.items[j] = t;
+                                    }
+                                        default {};
+                                    };
+                                }
+                                    default {};
+                                };
+                            }
+                                default {};
+                            };
+                            j++;
+                        };
+                        ->;
+                    };
+                };
+            };
+
             // Contracts visit_FunctionCall enforces before resolving the call
             call_contracts(Node* n, PtrVec* list) -> void
             {
-                Overload* o = this.first_overload(list);
+                Overload* o = this.pick_overload(list, n.l0);
                 Node* an;
                 TypeSpec* pt, at;
                 IDKC_SYMENTRY* e;
@@ -3228,20 +3371,11 @@ namespace IDEKA
                                     switch (pt != (TypeSpec*)0)
                                     {
                                         case (true) {
-                                        switch (((pt.flags `& TS_TIED) != 0) & !tied_arg)
+                                        switch (((pt.flags `& TS_TIED) != 0) & !tied_arg & !this.tied_var_arg(an))
                                         {
                                             case (true) {
                                             this.ck.clear_msg();
                                             this.ck.mb.put_str(f"parameter {i} of '{n.text}' requires a tied argument (~), but a non-tied expression was passed\0");
-                                            this.report(Severity.ERROR, n);
-                                        }
-                                            default {};
-                                        };
-                                        switch (((pt.flags `& TS_TIED) == 0) & tied_arg)
-                                        {
-                                            case (true) {
-                                            this.ck.clear_msg();
-                                            this.ck.mb.put_str(f"parameter {i} of '{n.text}' is not a tied parameter, but a tie expression (~) was passed\0");
                                             this.report(Severity.ERROR, n);
                                         }
                                             default {};
@@ -3396,13 +3530,14 @@ namespace IDEKA
                         switch (this.cur_obj != (byte*)0) { case (true) { this.ov_line = 0; } default {
                             switch (this.fs_line > 0) { case (true) { this.ov_line = this.fs_line; } default { this.ov_line = n.line; }; };
                         }; };
-                        list = this.ov_resolve(n.text);
+                        list = this.ov_resolve_call(n.text);
                         this.ov_line = 0;
                         this.call_contracts(n, list);
                         o = this.pick_overload(list, n.l0);
                         switch (o != (Overload*)0)
                         {
                             case (true) {
+                            this.implicit_untie(o, n.l0);
                             this.conv_args(o, n.l0);
                             n.text3 = o.mangled;
                             -> o.ret;
@@ -3502,6 +3637,7 @@ namespace IDEKA
                                         switch (o != (Overload*)0)
                                         {
                                             case (true) {
+                                            this.implicit_untie(o, n.l0);
                                             this.conv_args(o, n.l0);
                                             n.text3 = o.mangled;
                                             -> this.ret_of_fn(o.func, e.name);

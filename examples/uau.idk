@@ -1,0 +1,19 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+println(~byte* msg) -> void
+{
+    println(~msg);
+};
+
+main() -> int
+{
+    ~byte* x = "Hello, World!";
+
+    println(x);
+
+    //println(x);
+
+    -> 0;
+};

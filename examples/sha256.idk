@@ -12,19 +12,14 @@ def main() -> int
 
     sha256_init(@ctx);
 
-    print("==== SHA256 TEST ====\n\0");
-    byte* msg = "Testing SHA256!\0";
+    println("==== SHA256 TEST ====");
+    byte* msg = "Testing SHA256!";
     
     // Calculate length manually or use strlen
     int msg_len = strlen(msg);
     
-    print("Message: \0");
-    print(msg);
-    print("\n\0");
-    print("Length: \0");
-    print(msg_len);
-    print("\n\0");
-
+    println(f"Message: {msg}\nLength: {msg_len}");
+    
     byte[32] hash;
     sha256_update(@ctx, msg, (u64)msg_len);
     sha256_final(@ctx, @hash);
@@ -60,7 +55,7 @@ def main() -> int
         
         i++;
     };
-    print("\n\0");
+    print();
 
     return 0;
 };

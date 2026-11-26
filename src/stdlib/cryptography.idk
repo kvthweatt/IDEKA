@@ -212,7 +212,7 @@ namespace standard
                     ctx.bitlen += ctx.buflen * 8;
 
                     ctx.buffer[56..63] = (byte[8])(be64)ctx.bitlen;
-                    ///
+                    /// C Equivalent
                     ctx.buffer[63] = (byte)(ctx.bitlen);
                     ctx.buffer[62] = (byte)(ctx.bitlen >> 8);
                     ctx.buffer[61] = (byte)(ctx.bitlen >> 16);
@@ -225,6 +225,8 @@ namespace standard
                     sha256_transform(ctx, ctx.buffer);
                     
                     // Convert state to byte array (big-endian)
+                    hash[0..31] = (byte[32])(be32)ctx.state[0..7];
+                    /// C Equivalent
                     hash[0..3]   = (byte[4])(be32)ctx.state[0];
                     hash[4..7]   = (byte[4])(be32)ctx.state[1];
                     hash[8..11]  = (byte[4])(be32)ctx.state[2];
@@ -233,6 +235,8 @@ namespace standard
                     hash[20..23] = (byte[4])(be32)ctx.state[5];
                     hash[24..27] = (byte[4])(be32)ctx.state[6];
                     hash[28..31] = (byte[4])(be32)ctx.state[7];
+                    ///
+
                 };
             }; // SHA256
 
