@@ -1,5 +1,7 @@
 # IDEKA on Linux - Setup Guide
 
+> For this checkout on Linux x86-64, use the [verified native workflow](../developer_workflow.md). The Python bootstrap instructions below describe an older release and refer to a `v1.5.4` directory not shipped here. Do not copy those files into this checkout.
+
 IDEKA on Linux needs Python (runs the compiler), LLVM (`llc`, optionally `opt`), the system linker (`ld`) with libc development files, and git. Clang is not required.
 
 ## Toolchain

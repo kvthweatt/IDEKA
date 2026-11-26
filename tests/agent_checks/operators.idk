@@ -1,0 +1,14 @@
+#import <standard.idk>;
+using standard::io::console;
+
+operator (int left, int right) [+++] -> int
+{
+    return left + right + 2;
+};
+
+def main() -> int
+{
+    if ((5 +++ 3) != 10) { return 1; };
+    println("custom operator: 10");
+    return 0;
+};
