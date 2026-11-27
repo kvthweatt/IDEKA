@@ -197,7 +197,7 @@ Here we immediately see a few *strange* things. Firstly, `data` is a reserved ke
 <a id="the-data-keyword"></a>
 ## **The `data` keyword**
 
-`data` is a variable bit width, primitive datatype creation keyword. Anything can cast to it, and it can cast to any primitive like char, int, float, and so on, including custom ones you've made with it. It is intended to allow you to build any basic integer type to fit their needs. Data types use big-endian byte order by default (when unspecified), bit width bust always be specified, and alignment cannot be less than the bit width.
+`data` is a variable bit width, primitive datatype creation keyword. Anything can cast to it, and it can cast to any primitive like char, int, float, and so on, including custom ones you've made with it. It is intended to allow you to build any basic integer type to fit their needs. Data types use big-endian byte order by default (when unspecified), bit width must always be specified, and alignment cannot be less than the bit width.
 
 Syntax for declaring a datatype:
 
