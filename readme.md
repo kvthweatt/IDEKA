@@ -317,6 +317,9 @@ hash[4..7]   = (byte[4])(be32)ctx.state[1];
 // ...
 hash[28..31] = (byte[4])(be32)ctx.state[7];
 ```
+turns into:
+`hash[0..31] = (byte[32])(be32)ctx.state[0..7];`
+
 
 ### Zero-copy packet parsing
 
