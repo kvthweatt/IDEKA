@@ -1,35 +1,45 @@
-<a id="IDEKA"></a>
-# IDEKA
-
-IDEKA is a compiled, general purpose programming language.
-
-If you're coming from C-like languages it will feel similar but different.  It removes a lot of C's footguns such as operator precedence being more natural, disallowing assignment inside conditional contexts like `while ((x = y.next()) != true)`, and more. If you're coming from C++ you'll get relief using templates. If you're coming from Rust you'll still have a borrow checker but not a gatekeeper - you can still turn it on and get safety when you're ready to tighten up your code. If you're coming from Python, you'll love to hear there's array comprehension and a few other Pythonic niceties. This language is a combination of everything I like from every language I've used or tried, and nothing I don't, as well as things found nowhere else like [variadic operators](#variadic-operator).
-
-IDEKA was designed primarily for reverse engineering and secondarily for general purpose software development. As a result, a lot of features are pushed into the language itself. Endianness as a type property means the compiler can reason about code and catch when you pass a big endian type to a little endian parameter or vice-versa. A set of built-in effects allow you to tag functions in ways the compiler can reason about, allowing you to write an allocator which the borrow checker can reason about as an allocator. You can also create new effects with their own properties. Interfaces are inter-object protocols which govern data flow, not simply function lists.
-
-Everything in IDEKA is **stack allocated** unless specified. If you write variable declarations inside a loop, you get multiple stack slots allocated. Hoist your declarations above and outside your loops or use singletons with `singinit`. You must manually use the heap with the `heap` keyword in declarations, or, using the standard heap allocator `fmalloc()`. A thread-safe version is a available as well, `standard::allocators::threaded::tfmalloc()`
-
-If you like IDEKA, please consider contributing to the language or joining the [IDEKA Discord server](https://discord.gg/Y9RhdWThmB) where you can ask questions, provide feedback, and talk with other IDEKA enjoyers!
-
-\- Karac
-
----
-
-## Table of Contents
+# Table of Contents
 
 - [IDEKA](#IDEKA)
+  - [The Preprocessor](#the-preprocessor)
+    - [Importing with `#import`](#importing-with-import)
+    - [Importing with `#package`](#importing-with-package)
+  - [Declaring Types & The Type System](#declaring-types)
+    - [The `data` keyword](#the-data-keyword)
+      - [The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins](#the-typeof-sizeof-alignof-and-endianof-builtins)
+      - [Direct type conversion](#direct-type-conversion)
+      - [Casting](#casting)
+      - [Mixing Signed and Unsigned Values in Expressions](#mixing-signedunsigned-in-expressions)
+      - [Endianness Handling](#endianness-handling)
+      - [`void` as a literal](#void-as-a-literal)
+    - [Pointers](#pointers)
+      - [Taking an Address](#taking-an-address)
+      - [Dereferencing](#dereferencing)
+      - [Address Equals `@=`](#address-equals)
+      - [Address Casting `(@)`](#address-casting)
+    - [Arrays](#arrays)
+      - [Pointers to Arrays](#pointers-to-arrays)
+      - [Static Array Comprehension](#static-array-comprehension)
+      - [Static Array Comprehension with Dynamic Types](#static-array-comprehension-dynamic-type)
+    - [Structs](#structs)
+      - [Struct recast with `from`](#struct-recast-with-from)
+    - [Dictionaries](#dictionaries)
   - [Functions](#functions)
-  - [Variadic functions](#variadic-functions)
-  - [Error Returns](#error-returns)
-  - [Chaining Functions](#chaining-functions)
-  - [External Functions (FFI)](#external-functions-ffi)
-  - [Exporting Functions with `export`](#exporting-functions-with-export)
-  - [Importing with `#import`](#importing-with-import)
-  - [Importing with `#package`](#importing-with-package)
-    - [Very simple preprocessor](#the-preprocessor)
+    - [Prototypes](#prototypes)
+    - [Shorthand Functions](#shorthand-functions)
+    - [i-Strings and f-Strings](#istrings-and-fstrings)
+    - [Logic with if/elif/else](#logic-with-ifelifelse)
+    - [Enumerated Lists](#enumerated-lists)
+    - [Unions](#unions)
+    - [Switching](#switching)
+    - [Tagged unions](#tagged-unions)
+    - [Chaining Functions](#chaining-functions)
+    - [Variadic functions](#variadic-functions)
+    - [Error Returns](#error-returns)
+    - [External Functions (FFI)](#external-functions-ffi)
+    - [Exporting Functions with `export`](#exporting-functions-with-export)
   - [Namespaces](#namespaces)
   - [Structs](#structs)
-  - [Struct recast with `from`](#struct-recast-with-from)
   - [Objects](#objects)
     - [Required methods](#required-methods)
   - [Deferred object cleanup with `defer`](#deferred-object-cleanup-with-defer)
@@ -38,18 +48,7 @@ If you like IDEKA, please consider contributing to the language or joining the [
     - [Protocol relationship operators](#protocol-relationship-operators)
     - [Attachment rules](#attachment-rules)
   - [Public/Private with Objects/Structs](#publicprivate-with-objects)
-  - [i-Strings and f-Strings](#istrings-and-fstrings)
-  - [Pointers](#pointers)
   - [You can also use in-line assembly directly](#you-can-also-use-inline-assembly-directly)
-  - [Logic with if/elif/else](#logic-with-ifelifelse)
-  - [The `data` keyword](#the-data-keyword)
-    - [Mixing Signed/Unsigned in Expressions](#mixing-signedunsigned-in-expressions)
-  - [Endianness Handling](#endianness-handling)
-  - [Casting](#casting)
-  - [Direct type conversion](#direct-type-conversion)
-  - [The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins](#the-typeof-sizeof-alignof-and-endianof-builtins)
-  - [`void` as a literal](#void-as-a-literal)
-  - [Arrays](#arrays)
   - [Loops](#loops)
   - [Membership testing with `in`](#membership-testing-with-in)
   - [Single-initialized variables with `singinit`](#singleinitialized-variables-with-singinit)
@@ -57,10 +56,6 @@ If you like IDEKA, please consider contributing to the language or joining the [
   - [Strict Recursion with `<~`](#strict-recursion-with)
   - [Escaping strict recursion with `escape`](#escaping-strict-recursion-with-escape)
   - [Error handling with `try`/`throw`/`catch`](#error-handling-with-trythrowcatch)
-  - [Enumerated Lists](#enumerated-lists)
-  - [Unions](#unions)
-  - [Tagged unions](#tagged-unions)
-  - [Switching](#switching)
   - [Namespace elimination with `!using` or `not using`](#namespace-elimination-with-using-or-not-using)
   - [Deprecation with `deprecate`](#deprecation-with-deprecate)
   - [Assertion with `assert()`](#assertion-with-assert)
@@ -119,7 +114,192 @@ If you like IDEKA, please consider contributing to the language or joining the [
   - [All types](#all-types)
   - [Preprocesor directives](#preprocesor-directives)
 
-<a id = "declaring-types"></a>
+---
+
+<a id="IDEKA"></a>
+# IDEKA
+
+IDEKA is a compiled, general-purpose programming language designed primarily for reverse engineering and systems programming, with general-purpose software development as a secondary focus. There is no giant runtime, in fact there's a very minimal runtime.
+
+The central idea behind IDEKA is that a programming language should give the programmer direct control over the things the machine actually works with, while giving the compiler enough information to reason about what the program is doing. Data representation, memory, object relationships, function behavior, and execution are not separate concerns to be hidden behind layers of abstraction. They are things the language should let you describe directly.
+
+That philosophy influences nearly every part of the language. IDEKA has a type system that can describe data at arbitrary bit widths, alignments, and endianness. Its ownership model gives you control over when ownership is enforced rather than making a borrow checker an unavoidable gatekeeper. Its effect system allows functions to declare properties that the compiler can track and reason about. Its interfaces describe relationships and permitted interactions between objects, rather than simply listing methods a type must implement. Its compile-time execution and code-generation facilities let the language participate in constructing the programs written in it.
+
+IDEKA is not an attempt to reproduce the syntax or philosophy of any one existing language. It takes ideas from languages such as C, C++, Rust, and Python, but combines them according to a different set of priorities. If you're coming from C-like languages, much of the syntax will feel familiar, but the behavior is not always what you expect. Operator precedence is more natural, assignment is not permitted inside conditional contexts, and declarations follow consistent type-first rules. If you're coming from C++, you'll find a template system with a different approach to expressing constraints and relationships. If you're coming from Rust, you'll recognize ownership and borrow checking, but with the ability to use those mechanisms selectively instead of treating them as mandatory for every part of a program. If you're coming from Python, you'll find conveniences such as array comprehensions alongside a language that compiles to native code. There are also features that don't have a direct equivalent in those languages, such as variadic operators.
+
+Reverse engineering is the primary reason many of these design decisions exist. Working with binaries, executable memory, hardware, foreign interfaces, and unknown data structures requires more than the ability to write ordinary application logic. It requires control over the exact representation of data and the ability to express operations at the level where that data actually exists.
+
+For example, endianness is a property of a type, not something that must be remembered and manually handled through comments or naming conventions. This allows the compiler to distinguish between big-endian and little-endian values and reason about their compatibility. The data keyword allows the creation of primitive types with explicitly defined bit widths, alignment, and endianness. Bit slices and bit indexing make individual portions of values directly accessible. Struct reinterpretation, pointers, inline assembly, and raw bytecode functions provide further access to the underlying machine representation.
+
+The same principle extends beyond data representation. IDEKA's built-in effects allow functions to declare properties that propagate through the call graph and can influence how the compiler reasons about operations. User-defined effects can introduce additional properties of their own. This even allows you to describe things such as allocator behavior in a way the borrow checker can understand. Interfaces take a similarly structural approach: rather than merely requiring a collection of functions, they define protocols between objects, specifying which interactions and data flows are permitted. These are not just documentation conventions; they are relationships the compiler can enforce.
+
+The result is a language where many things that would ordinarily require external tooling, runtime checks, conventions, or extensive boilerplate can instead be expressed directly in the language.
+
+Memory management follows the same preference for explicit control. Everything in IDEKA is stack allocated by default, unless otherwise specified. This has an important consequence: variable declarations inside loops allocate separate stack slots as the loop executes. If you want to reuse storage, declare the variable outside the loop or use a singleton with singinit. Heap allocation is explicit. You can request it with the heap keyword in a declaration or use an allocator such as `fmalloc()` from the standard library. A thread-safe counterpart is also available through `standard::allocators::threaded::tfmalloc()`.
+
+IDEKA does not attempt to make every operation safe by restricting what the programmer is allowed to express. Instead, it provides mechanisms for describing constraints, ownership, contracts, and relationships, while retaining direct access to the underlying machine when that control is needed. You can use those mechanisms to build highly constrained systems and work closer to the hardware when the task demands it.
+
+The language is still evolving, but its priorities are deliberate: make the machine accessible, make intent expressible, and give the compiler meaningful information to work with. Things you can represent in IDEKA:
+- What a value physically represents.
+- How its bits are arranged.
+- How it is aligned and interpreted.
+- Who owns it.
+- Which objects may interact.
+- How values may flow between those objects.
+- What effects a function introduces.
+- Which effects may escape.
+- Which asynchronous operations can overlap.
+- What constraints must hold during compile-time specialization.
+
+These may not all seem special until you see how IDEKA achieves them.
+
+If you like IDEKA, please consider contributing to the language or joining the [IDEKA Discord server](https://discord.gg/Y9RhdWThmB) where you can ask questions, provide feedback, and talk with other IDEKA enjoyers!
+
+\- Karac
+
+---
+
+<a id="the-preprocessor"></a>
+# The Preprocessor
+
+<a id="importing-with-import"></a>
+## **Importing with `#import`**
+
+Any file you import will take the place of the import statement.
+
+```
+#import <standard.idk>;  // <> means stdlib, "" means local to source file
+#import "mylib.idk", "foobar.idk";  // Multi-line imports are processed from left to right in the order they appear.
+```
+
+Example:  
+**`somefile.idk`**
+
+```
+int myVar = 10;
+```
+
+**`main.idk`**
+
+```
+#import "somefile.idk";  // int myVar = 10;
+
+def main() -> int
+{
+    print(myVar);
+    return 0;
+};
+```
+Output:  
+`10`
+
+<a id="importing-with-package"></a>
+## **Importing with `#package`**
+
+Packages are imported from the compiler's local FPM registry located inside `.fpm\packages`.
+
+To import a package, use the package name directly:
+```
+#package super-types, IDEKA-boost;  // these don't exist, yet..
+```
+
+You still need to perform `using` statements unless the package self-uses, meaning it has the `using` statements inside of it near the end of entrypoint file.
+
+Packages and FPM are still in development and should not be used for now.
+
+### `#def`, `#dir`, `#warn`, and `#stop`
+```
+#import <standard.idk>;
+
+#ifdef __WINDOWS__
+#def DEFAULT_CONFIG_FLAG 0x4000;
+#elif __LINUX__
+#def DEFAULT_CONFIG_FLAG 0x8000;
+#endif;
+
+#warn "This will show a warning message.";
+
+#stop "This will hard-stop compilation.";
+
+#dir "C:\\path\\to\\some\\lib";
+// Adds a path to the preprocessor's search list
+```
+
+`#def` defines a preprocessor text substitution constant. This is not a macro, just a "dumb" replacement. It is not parameterized, meaning you cannot pass anything into it.
+
+### Parameterized Substitution:
+To achieve C macro-like behavior, you can use `#psub`.  
+
+`#psub` is also "dumb" replacement, and is the other half of `#def`.
+
+Example:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+#psub test(x,y) println(x); #
+                println(y);
+
+def main() -> int
+{
+    test("Hello", "world!");
+
+    return 0;
+};
+```
+
+#### How `#psub` works
+
+**Defining**
+- `#psub name(p1, p2, ...) body` defines a parameterized substitution. It takes no terminating semicolon; any semicolons are part of the body.
+- A `#` at the end of a line continues the definition on the next line. The `#` is removed and the lines are joined with a single space, so a body is always one line.
+- The parameter list ends at the first `)`. Parameters are comma separated and each is trimmed; empty entries are skipped. The body is everything after that `)`.
+- A `#psub` with no `(`...`)` parameter list is a preprocessor error.
+- Definitions are global to the whole compilation, including imported files. Defining a name again replaces the previous definition.
+- The lines of a definition become blank lines in the output, so line numbers are preserved.
+
+**Expanding**
+- A call is the `#psub` name immediately followed by `(`, with no whitespace between them. The same name not followed by `(` is left alone, and only whole identifiers match.
+- A call must be written on a single line.
+- Arguments are split at commas that are outside nested parentheses and outside string literals (`"` and `'`). Each argument is trimmed. The argument count must equal the parameter count, otherwise the preprocessor reports `Macro 'name' expects N argument(s), got M`.
+- Each parameter name in the body is replaced, as a whole word, with its argument text. Substitution is purely textual: it does not know about strings, so parameter names inside string literals in the body are replaced too.
+- Parameters are replaced one at a time in declaration order, so an argument that contains the name of a later parameter is replaced as well:
+  ```
+  #psub add(a, b) a + b
+
+  x = add(b, 1);   // a -> b gives "b + b", then b -> 1 gives "1 + 1"
+                   // result: x = 1 + 1;
+  ```
+- The result is scanned again, so a body may call other `#psub`s. Expansion repeats until no call remains. If it does not settle within 64 passes, the preprocessor stops with `Macro expansion exceeded depth limit (64). Possible infinite recursion.`
+
+**Conditionals**
+`#ifpsub NAME` is true when the `#psub` NAME is defined, and `#ifnpsub NAME` is true when it is not. Both are closed with `#endif;`. A parameter list written after the name, as in `test2(a)` below, is ignored.
+
+You can also perform conditional logic with `#ifpsub` and `#ifnpsub`:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+#psub test(x,y) println(x); #
+                println(y);
+
+#ifnpsub test2(a)
+#warn "[Warning] #psub test2(a) not defined!";
+#endif;
+
+def main() -> int
+{
+    test("Hello", "world!");
+
+    return 0;
+};
+```
+
+---
+
+<a id="declaring-types"></a>
 ## **Declaring Types & the Type System**
 The Ideka type system is highly permissive and largely determines compatibility of types by their bit width.  
 If you have an array of 4 bytes, they can pack into a 32-bit integer; 8 bytes packs into a 64-bit integer. The type system will happily put data wherever and however you like. Type safety is achieved in a number of ways, including but not limited to [ownership and movement](#ownership-with-the-tie-operator), [object-to-object interfaces](#interfaces), [tagged unions](#tagged-unions) with [exhaustive switch](#switching), and more.
@@ -231,154 +411,47 @@ Data decays to an integer type under the hood. All data is binary, and is theref
 
 To prevent a custom type from having functions, use `data!`. See [functionless types](#functionless-types)
 
----
-
-<a id="pointers"></a>
-## **Pointers**
-
-A pointer is a variable that holds the address of another value. IDEKA uses three symbols for pointer work:
-
-| Syntax | Meaning |
-|---|---|
-| `T*` | In a type: pointer to `T` |
-| `@x` | Address-of: yields a pointer to `x` |
-| `*p` | Dereference: reads or writes the value `p` points to |
-
-When writing Ideka, you should be careful not to confuse it with C because:
+<a id="the-typeof-sizeof-alignof-and-endianof-builtins"></a>
+### **The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins**
 ```
-byte* a, b, c, d;
-```
-Is **identical** to:
-```
-byte* a;
-byte* b;
-byte* c;
-byte* d;
+data{8:8:0}* as lestr;
+signed data{13:16} as strange;
+
+sizeof(lestr);    // 8
+alignof(lestr);   // 8
+typeof(lestr);    // unsigned data{8:8}*
+endianof(lestr);  // 0
+
+sizeof(strange);   // 13
+alignof(strange);  // 16
+typeof(strange);   // signed data{13:16}
+endianof(strange); // 1
 ```
 
-This is because Ideka treats every declared item as the type used at the beginning of the definition. Pointer-ness is not attached to the name, it is attached to the type, and these names are `byte*` type. Not only does this save time writing, but is less code for the parser to have to chew through.
-
-C will give you `a` as a `byte*` while the rest are plain `byte` because you must write `byte *a, *b, *c, *d;` in C. **Ideka is not C.** This will trip you up if you are used to writing C code.
-
-### Taking an address
-
-`@` produces the address of a variable, array element, object, struct, or function. The result type is a pointer to the operand's type.
-
+<a id="direct-type-conversion"></a>
+### Direct type conversion:
+You can do function-like conversion only with built-in types like `int`, `long`, `double`, `bool`, etc.
 ```
-int idata = 0;
-int* p_idata = @idata;     // p_idata holds the address of idata
-```
+#import <standard.idk>;
 
-### Dereferencing
+using standard::io::console;
 
-`*p` accesses the pointed-to value, on either side of an assignment. Compound assignments work through the pointer.
-
-```
-*p_idata += 3;             // idata is now 3
-print(idata);              // 3
-
-string a = "Test";
-string* pa = @a;
-*pa += "ing!";
-print(a);                  // Testing!
-```
-
-## Address cast `(@)`
-
-`(@)` converts an integer into a pointer, so you do not have to write the pointer type of the cast by hand. The compiler parses `(@)expr` as a cast of `expr` to `void*`, and the result converts to the typed pointer it is assigned to.
-
-```
-uint* px = @x;
-u64 kx = (u64)px;       // address stored as an integer
-uint* py = (@)kx;       // integer back to a pointer
-
-long val = 0x4700FF33324EBA60;
-byte* some_byte = (@)val;
-```
-
-The intended width of the resulting pointer is the compiler's configured default pointer width. That is not implemented yet: currently the width is 32 bits on a 32-bit system and 64 bits on a 64-bit system.
-
-## Address-equals `@=`
-
-`@=` assigns the address of the right-hand side. `T* p @= expr;` is shorthand for `T* p = @expr;`, and `p @= expr;` is shorthand for `p = @expr;`.
-
-```
-int x = 10;
-int* px = @x;     // normal
-int* px @= x;     // address-equals, same result
-```
-
-It is cleaner when the right-hand side is itself an address:
-
-```
-int* px @= @x;
-```
-
-This is **not** an identity. `px @= @x;` is equivalent to `px = @@x;`: the right-hand side `@x` is evaluated first and yields a pointer value that lives somewhere on the stack, then the address of that pointer is taken and becomes the value of `px`. `px` therefore holds the address of a pointer, not the address of `x`. IDEKA does not allow writing `@@x` directly.
-
-### `const` and pointers
-
-```
-const int*  px; // pointer to const int: px can be repointed, *px can't be written
-const* int* px; // const pointer to int: px can't be repointed, *px can be written
-```
-
-See also **Advanced pointer manipulation** and **Function Pointers** below.
-
-<a id="mixing-signedunsigned-in-expressions"></a>
-## Mixing Signed/Unsigned in Expressions
-```
-signed data{32} as i32;
-unsigned data{32} as u32;
-
-i32 a = -10;
-u32 b = 20;
-
-// Mixed arithmetic (result type determined by widest type)
-i32 result1 = a + (i32)b;    // -10 + 20 = 10 (signed)
-u32 result2 = (u32)a + b;    // 4294967286 + 20 (unsigned, wraps)
-
-// Comparison with mixed signs
-if (a < (i32)b)  // true: -10 < 20
+def main() -> int
 {
-    print("Signed comparison");
-};
+    double d = 3.1415925658;
 
-if ((u32)a < b)  // false: 4294967286 > 20
-{
-    print("Unsigned comparison");
+    int i = int(d);
+
+    print(i);
+
+    return 0;
 };
 ```
-
-<a id="endianness-handling"></a>
-## **Endianness Handling**
-```
-data{16::0} as le16;  // Little-endian 16-bit
-data{16}    as be16;  // Big-endian default 16-bit
-
-def swap_endian_16(be value) -> data{16}
-{
-    data{16::0} v2 = value; // Explicit byte swap on assignment
-    return v2;
-};
-
-// Network byte order (big-endian) to host (little-endian)
-def network_to_host(be16 net_value) -> le16
-{
-    le16 x = net_value;     // Explicit byte swap on assignment
-    return x;
-};
-
-// Reading from network buffer
-data{8::0}[4] buf = [0x12, 0x34, 0x56, 0x78];
-be16[2] net = buf; // autopack and convert endianness
-```
-
-1. Single-endian arithmetic model - All math is performed in one endianness (big).
-2. Swapping on assignment means the compiler doesn't need to track mixed-endian states through complex expressions.
+Result:
+`3`
 
 <a id="casting"></a>
-## **Casting**
+### **Casting**
 
 Casting in IDEKA is C-like.
 
@@ -397,11 +470,12 @@ It calls `ffree()` under the hood, which uses the standard heap allocator. You s
 
 **Void casting in relation to the stack and heap**
 ```
-def example() -> void {
+def example() -> void
+{
     int stackVar = 42; // Stack allocated
 
     (void)stackVar;    // What happens here?
-}
+};
 ```
 
 In this case, `stackVar` is zeroed out and the reference invalidated.
@@ -442,11 +516,180 @@ the source and target type pair:
   the value doesn't already live in memory); casting a struct pointer to another pointer type is
   a plain reinterpretation.
 
+<a id="mixing-signedunsigned-in-expressions"></a>
+### Mixing Signed/Unsigned Values in Expressions
+```
+signed data{32} as i32;
+unsigned data{32} as u32;
+
+i32 a = -10;
+u32 b = 20;
+
+// Mixed arithmetic (result type determined by widest type)
+i32 result1 = a + (i32)b;    // -10 + 20 = 10 (signed)
+u32 result2 = (u32)a + b;    // 4294967286 + 20 (unsigned, wraps)
+
+// Comparison with mixed signs
+if (a < (i32)b)  // true: -10 < 20
+{
+    print("Signed comparison");
+};
+
+if ((u32)a < b)  // false: 4294967286 > 20
+{
+    print("Unsigned comparison");
+};
+```
+
+<a id="endianness-handling"></a>
+### **Endianness Handling**
+```
+data{16::0} as le16;  // Little-endian 16-bit
+data{16}    as be16;  // Big-endian default 16-bit
+
+def swap_endian_16(be value) -> data{16}
+{
+    data{16::0} v2 = value; // Explicit byte swap on assignment
+    return v2;
+};
+
+// Network byte order (big-endian) to host (little-endian)
+def network_to_host(be16 net_value) -> le16
+{
+    le16 x = net_value;     // Explicit byte swap on assignment
+    return x;
+};
+
+// Reading from network buffer
+data{8::0}[4] buf = [0x12, 0x34, 0x56, 0x78];
+be16[2] net = buf; // autopack and convert endianness
+```
+
+1. Single-endian arithmetic model - All math is performed in one endianness (big).
+2. Swapping on assignment means the compiler doesn't need to track mixed-endian states through complex expressions.
+
 ---
 
-<a id="direct-type-conversion"></a>
-## Direct type conversion:
-You can do function-like conversion only with built-in types like `int`, `long`, `double`, `bool`, etc.
+<a id="pointers"></a>
+## **Pointers**
+
+A pointer is a variable that holds the address of another value. IDEKA uses three symbols for pointer work:
+
+| Syntax | Meaning |
+|---|---|
+| `T*` | In a type: pointer to `T` |
+| `@x` | Address-of: yields a pointer to `x` |
+| `*p` | Dereference: reads or writes the value `p` points to |
+
+When writing Ideka, you should be careful not to confuse it with C because:
+```
+byte* a, b, c, d;
+```
+Is **identical** to:
+```
+byte* a;
+byte* b;
+byte* c;
+byte* d;
+```
+
+This is because Ideka treats every declared item as the type used at the beginning of the definition. Pointer-ness is not attached to the name, it is attached to the type, and these names are `byte*` type. Not only does this save time writing, but is less code for the parser to have to chew through.
+
+C will give you `a` as a `byte*` while the rest are plain `byte` because you must write `byte *a, *b, *c, *d;` in C. **Ideka is not C.** This will trip you up if you are used to writing C code.
+
+<a id="taking-an-address"></a>
+### Taking an address
+
+`@` produces the address of a variable, array element, object, struct, or function. The result type is a pointer to the operand's type.
+
+```
+int idata = 0;
+int* p_idata = @idata;     // p_idata holds the address of idata
+```
+
+<a id="dereferencing"></a>
+### Dereferencing
+
+`*p` accesses the pointed-to value, on either side of an assignment. Compound assignments work through the pointer.
+
+```
+*p_idata += 3;             // idata is now 3
+print(idata);              // 3
+
+string a = "Test";
+string* pa = @a;
+*pa += "ing!";
+print(a);                  // Testing!
+```
+
+<a id="address-equals"></a>
+## Address-equals `@=`
+
+`@=` assigns the address of the right-hand side. `T* p @= expr;` is shorthand for `T* p = @expr;`, and `p @= expr;` is shorthand for `p = @expr;`.
+
+```
+int x = 10;
+int* px = @x;     // normal
+int* px @= x;     // address-equals, same result
+```
+
+It is cleaner when the right-hand side is itself an address:
+
+```
+int* px @= @x;
+```
+
+This is **not** an identity. `px @= @x;` is equivalent to `px = @@x;`: the right-hand side `@x` is evaluated first and yields a pointer value that lives somewhere on the stack, then the address of that pointer is taken and becomes the value of `px`. `px` therefore holds the address of a pointer, not the address of `x`. IDEKA does not allow writing `@@x` directly.
+
+### `const` and pointers
+
+```
+const int*  px; // pointer to const int: px can be repointed, *px can't be written
+const* int* px; // const pointer to int: px can't be repointed, *px can be written
+```
+
+<a id="address-casting"></a>
+### Address casting `(@)`
+
+`(@)` converts an integer into a pointer, so you do not have to write the pointer type of the cast by hand. The compiler parses `(@)expr` as a cast of `expr` to `void*`, and the result converts to the typed pointer it is assigned to.
+
+```
+uint* px = @x;
+u64 kx = (u64)px;       // address stored as an integer
+uint* py = (@)kx;       // integer back to a pointer
+
+long val = 0x4700FF33324EBA60;
+byte* some_byte = (@)val;
+```
+
+The intended width of the resulting pointer is the compiler's configured default pointer width. That is not implemented yet: currently the width is 32 bits on a 32-bit system and 64 bits on a 64-bit system.
+
+See also **Advanced pointer manipulation** and **Function Pointers** below.
+
+<a id="advanced-pointer-manipulation"></a>
+### **Advanced pointer manipulation**
+
+<a id="taking-address-of-literals"></a>
+#### Taking address of literals
+```
+// You can take the address of a literal value
+int* p = @42;
+print(*p);  // 42
+
+// The address can be manipulated as an integer
+unsigned data{64}* as u64ptr;
+u64ptr addr = (u64ptr)p;
+addr += 8;  // Move 8 bytes forward in memory
+int* p2 = (int*)addr;
+
+// Pointer arithmetic on literal addresses
+int* base = @100;
+int* offset = base + 5;
+*offset = 200;  // Writing to calculated memory location
+```
+
+<a id="pointer-to-integer-conversions"></a>
+#### Pointer to integer conversions
 ```
 #import <standard.idk>;
 
@@ -454,45 +697,39 @@ using standard::io::console;
 
 def main() -> int
 {
-    double d = 3.1415925658;
+    uint x, y = 10, 0;
 
-    int i = int(d);
+    uint* px, py = @x, @y;
 
-    print(i);
+    // A pointer is simply a variable and its value is an address
+    // An address is a number.
+    // Therefore, we can store that address
+    //
+    u64 kx = px;
 
-    return 0;
+    // (@) is address-cast. It reinterprets the number as an address
+    // When we treat a number as an address, we call that a pointer.
+    // Therefore, we can assign this to another pointer.
+    //
+    py = (@)kx;
+
+    // py now points to x
+
+    // Dereference py to get the value at the address
+    // Cast to make sure it's the proper type to print
+
+    if (x == 10 & y == 0 & *py == x & px == py & px == (@)kx)
+    {
+        print("Success, y unchanged, py points to x.\n");
+        print((uint)*py);
+        return 0;
+    };
+
+        return 0;
 };
 ```
-Result:
-`3`
 
 ---
-
-<a id="the-typeof-sizeof-alignof-and-endianof-builtins"></a>
-## **The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins**
-```
-data{8:8:0}* as lestr;
-signed data{13:16} as strange;
-
-sizeof(lestr);    // 8
-alignof(lestr);   // 8
-typeof(lestr);    // unsigned data{8:8}*
-endianof(lestr);  // 0
-
-sizeof(strange);   // 13
-alignof(strange);  // 16
-typeof(strange);   // signed data{13:16}
-endianof(strange); // 1
-```
-
-<a id="void-as-a-literal"></a>
-## **`void` as a literal**
-```
-if (x == void) {...code...};    // If it's nothing, do something
-void x;
-if (x == !void) {...code...};   // If it's not nothing, do something
-```
-In literal context, `void` is `0`. `false` is also `0`, which means `void == false;`. Therefore, anything can be `void`-checked. 
 
 <a id="arrays"></a>
 ## **Arrays**
@@ -516,13 +753,15 @@ int[][][] z = [
               ];
 ```
 
+<a id="pointers-to-arrays"></a>
 ### Pointers to arrays
 ```
 int*[] ip_arr = [@x, @y, @z];   // Array of pointer
 int[]* ap_arr = @ip_arr;        // Pointer to array
 ```
 
-## **Static array comprehension**
+<a id="static-array-comprehension"></a>
+### **Static array comprehension**
 
 Ranges are inclusive on both ends: `1..10` is the ten values 1 through 10.
 ```
@@ -535,13 +774,13 @@ int[20] evens = [x for (int x in 1..20) if (x % 2 == 0)];
 // With type conversion
 float[sizeof(int_array)] floats = [(float)x for (int x in int_array)];
 
-// C++-style comprehension
 int[10] squares = [x ^ 2 for (int x = 1; x <= 10; x++)];
 
 // With condition
 int[20] events = [x for (int x= 1; x <= 20; x++) if (x % 2 == 0)];
 ```
 
+<a id="static-array-comprehension-dynamic-type"></a>
 ## **Static array comprehension using a dynamic type**
 ```
 #import <standard.idk>;
@@ -588,6 +827,128 @@ techniques" - `hash[0..3] = (byte[4])(be32)ctx.state[0];` relies on exactly this
 element-0-is-high-bits ordering to place the most significant byte of `ctx.state[0]` at
 `hash[0]`.
 
+<a id="membership-testing-with-in"></a>
+### **Membership testing with `in`**
+Beyond `for (x in y)`, `in` is also a general binary operator usable in any expression context -
+`if`, ternaries, `return`, assignments, anywhere a boolean is expected:
+
+```
+int x = 5;
+int[5] arr = [1, 2, 3, 4, 5];
+
+if (x in arr) { ... };          // true: 5 is an element of arr
+bool found = 3 in arr;
+```
+
+It resolves differently depending on what the needle and haystack look like:
+
+| Needle | Haystack | Behavior |
+|---|---|---|
+| single value | string (`byte*`/`char*`) | true if that single byte/char occurs anywhere in the string |
+| single value | fixed-size or decayed array | true if any element of the array equals the value |
+| array / sub-sequence | string | true if the sequence occurs as a substring |
+| array / sub-sequence | array | true if the sequence occurs as a contiguous sub-sequence anywhere in the array |
+
+```
+byte* greeting = "Hello, World!";
+if ('W' in greeting) { ... };          // true
+if ("World" in greeting) { ... };      // true - substring search
+
+int[6] nums = [1, 2, 3, 4, 5, 6];
+int[2] pair = [3, 4];
+if (pair in nums) { ... };             // true - contiguous sub-sequence
+```
+
+<a id="heap-allocation"></a>
+## **Heap allocation**
+```
+heap int x = 5;      // Allocate
+(void)x;             // Deallocate
+```
+
+`(void)` casting works on both stack and heap allocated items.  
+If you do this to a stack element, it is nulled, and all references invalidated. You will need to redeclare `x`.
+Doing this to a heap element will call `ffree()` under the hood.
+
+Allocating with `heap` calls `fmalloc(sizeof(T))` under the hood. `x` is a pointer.
+
+<a id="freeing-from-the-heap"></a>
+## **Freeing from the heap**
+IDEKA's standard heap allocator is **incompatible** with C's `malloc` and `free`.
+
+You **must** use `ffree` for anything allocated with `fmalloc`, including `heap` allocations.  
+Alternatively you may void cast.
+
+---
+
+<a id="structs"></a>
+## **Structs**
+
+Prototype / forward declaration: `struct myStruct;`  
+Definition: `struct myStruct {int x,y,z;};`  
+Instance: `myStruct newStruct;`  
+Instance with assignment: `myStruct newStruct {x = 10, y = 20, z = -5};`  
+Member access: `newStruct.x;`
+
+Structs are packed and have no padding naturally. There is no way to change this.  
+You set up padding with alignment in your data types.  
+Members of structs are aligned and tightly packed according to their width unless the types have specific alignment.  
+Structs are non-executable, and therefore cannot contain functions or objects.  
+Placing a for, do/while, if/elif/else, try/catch, or any executable statements other than variable declarations will result in a compilation error.
+
+Example:
+
+```
+struct xyzStruct
+{
+    int x,y,z;
+};
+
+struct newStruct
+{
+    xyzStruct myStruct {x = 1, y = 1, z = 1};              // structs can contain structs
+};
+```
+
+Structs are non-executable.  
+Structs cannot contain functions, or objects. This includes prototypes and definitions. Pointers are ok, including function pointers.  
+
+Structs support composition via prepending and appending other structs. Example:
+```
+struct Header
+{
+    data{16} sig;
+    data{32} filesize, reserved, dataoffset;
+};
+
+struct InfoHeader
+{
+    data{32} size, width, height;
+    data{16} planes, bitsperpixel;
+    data{32} compression, imagesize, xpixelsperm, ypixelsperm, colorsused, importantcolors;
+};
+
+struct ExtraData
+{
+    byte[64] author;
+};
+
+struct BMP : Header, InfoHeader
+{
+    // More bitmap fields
+} : ExtraData;
+```
+
+## C Compatible Structs
+If you need a C-compatible struct, you can use `cstruct` which follows standard padding and alignment rules that you would expect when handling C code.
+```
+cstruct
+{
+    int x;
+    long z;
+};
+```
+
 ## Block initialization with `{}`
 ```
 noopstr[3] test =
@@ -596,164 +957,133 @@ noopstr[3] test =
     "string 2",
     "string 3!"
 ];
+```
 
-test
+## Block assignment
+Below is an example snippet from the standard library in `runtime\allocators.idk` around line 415. If the object[at this index] is a struct, you can do block assignment instead of writing `new_tbl[rm_hole]` 4 times.
+```
+new_tbl[rm_hole]
 {
-    [0] = "New string!";    // these desugar to individual assignments
-    [1] = "Another one!";   // like test[0] = "New string!"; <- would be required here, so sugar requires it
-    [2] = "Changed again?"; //
+    .key  = new_tbl[rm_next].key;
+    .size = new_tbl[rm_next].size;
+    .kind = new_tbl[rm_next].kind;
+    .slab = new_tbl[rm_next].slab;
 };
+```
+
+<a id="struct-recast-with-from"></a>
+## **Struct recast with `from`**
+`from` reinterprets an existing value's bytes as a struct, without copying. It's the
+struct-typed counterpart to casting a byte array into an integer - useful for parsing a buffer
+into a structured view in place rather than building the struct field by field.
+
+```
+struct Header
+{
+    data{16} sig;
+    data{32} filesize;
+};
+
+byte[6] buf = [0x42, 0x4D, 0x00, 0x01, 0x02, 0x03];
+
+Header h from buf;
+// h.sig == 0x424D, h.filesize == 0x00010203
+// `buf` is no longer usable after this point.
+```
+
+The right-hand side of `from` may be a plain identifier (an array or other addressable variable)
+or an array slice (`buf[a:b]`). When the source is a slice, the compiler builds the struct view
+directly over the original buffer starting at the slice's offset - there is no intermediate copy
+of the sliced range.
+
+The total size of the source must match the struct's total byte size; a mismatch is a
+compile-time error, the same as casting one struct type to another of a different size.
+
+**By default, `from` consumes its source.** After the recast, the original identifier is removed
+from scope - referencing it again is a compile-time error. This mirrors the ownership-transfer
+behavior of the `~` tie operator: once the bytes are viewed as the new struct type, the old name
+for them is gone, so there's exactly one live name pointing at that memory.
+
+To keep the source usable after the recast, append `!` to the source expression:
+
+```
+Header h from buf!;   // buf is still valid and usable after this line
+```
+
+```
+// Recasting directly from a slice - no copy, h aliases buf[2:6]
+Header h from buf[2:6];
 ```
 
 ---
 
-<a id="importing-with-import"></a>
-## **Importing with `#import`**
+<a id="dict"></a>
+## **Dictionaries**
 
-Any file you import will take the place of the import statement.
+Definition: `dict{KeyType:ValueType} myDict`  
 
+Dictionaries keys and values can be any types except objects.
+
+Instance with initializer:
 ```
-#import <standard.idk>;  // <> means stdlib, "" means local to source file
-#import "mylib.idk", "foobar.idk";  // Multi-line imports are processed from left to right in the order they appear.
-```
-
-Example:  
-**`somefile.idk`**
-
-```
-int myVar = 10;
-```
-
-**`main.idk`**
-
-```
-#import "somefile.idk";  // int myVar = 10;
-
-def main() -> int
+dict{"":""} myDict
 {
-    if (myVar < 20)
-    {
-        // Do something ...
-    };
-    return 0;
+    "Hello": "World!",
+    "hey": "you"
 };
 ```
 
-<a id="importing-with-package"></a>
-## **Importing with `#package`**
+Access: `myDict["Hello"]`  
+Merge: `dict{"":""} merged = myDict + myDict2;`
 
-Packages are imported from the compiler's local FPM registry located inside `.fpm\packages`.
-
-To import a package, use the package name directly:
+Dictionaries are key-value stores with a homogeneous key type and homogeneous value type declared in the `dict{K:V}` type specifier.
 ```
-#package super-types, IDEKA-boost;  // these don't exist, yet..
-```
-
-You still need to perform `using` statements unless the package self-uses, meaning it has the `using` statements inside of it near the end of entrypoint file.
-
-Packages and FPM are still in development and should not be used for now.
-
----
-
-<a id="the-preprocessor"></a>
-# The Preprocessor
-```
-#import <standard.idk>;
-
-#ifdef __WINDOWS__
-#def DEFAULT_CONFIG_FLAG 0x4000;
-#elif __LINUX__
-#def DEFAULT_CONFIG_FLAG 0x8000;
-#endif;
-
-#warn "This will show a warning message.";
-
-#stop "This will hard-stop compilation.";
-
-#dir "C:\\path\\to\\some\\lib";
-// Adds a path to the preprocessor's search list
-```
-
-`#def` defines a preprocessor text substitution constant. This is not a macro, just a "dumb" replacement. It is not parameterized, meaning you cannot pass anything into it.
-
-### Parameterized Substitution:
-To achieve C macro-like behavior, you can use `#psub`.  
-
-`#psub` is also "dumb" replacement, and is the other half of `#def`.
-
-Example:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-#psub test(x,y) println(x); #
-                println(y);
-
-def main() -> int
+dict{"":""} greetings
 {
-    test("Hello", "world!");
-
-    return 0;
+    "en": "Hello",
+    "es": "Hola",
+    "jp": "Konnichiwa"
 };
+
+println(greetings["en"]); // Hello
 ```
 
-#### How `#psub` works
-
-**Defining**
-- `#psub name(p1, p2, ...) body` defines a parameterized substitution. It takes no terminating semicolon; any semicolons are part of the body.
-- A `#` at the end of a line continues the definition on the next line. The `#` is removed and the lines are joined with a single space, so a body is always one line.
-- The parameter list ends at the first `)`. Parameters are comma separated and each is trimmed; empty entries are skipped. The body is everything after that `)`.
-- A `#psub` with no `(`...`)` parameter list is a preprocessor error.
-- Definitions are global to the whole compilation, including imported files. Defining a name again replaces the previous definition.
-- The lines of a definition become blank lines in the output, so line numbers are preserved.
-
-**Expanding**
-- A call is the `#psub` name immediately followed by `(`, with no whitespace between them. The same name not followed by `(` is left alone, and only whole identifiers match.
-- A call must be written on a single line.
-- Arguments are split at commas that are outside nested parentheses and outside string literals (`"` and `'`). Each argument is trimmed. The argument count must equal the parameter count, otherwise the preprocessor reports `Macro 'name' expects N argument(s), got M`.
-- Each parameter name in the body is replaced, as a whole word, with its argument text. Substitution is purely textual: it does not know about strings, so parameter names inside string literals in the body are replaced too.
-- Parameters are replaced one at a time in declaration order, so an argument that contains the name of a later parameter is replaced as well:
-  ```
-  #psub add(a, b) a + b
-
-  x = add(b, 1);   // a -> b gives "b + b", then b -> 1 gives "1 + 1"
-                   // result: x = 1 + 1;
-  ```
-- The result is scanned again, so a body may call other `#psub`s. Expansion repeats until no call remains. If it does not settle within 64 passes, the preprocessor stops with `Macro expansion exceeded depth limit (64). Possible infinite recursion.`
-
-**Conditionals**
-`#ifpsub NAME` is true when the `#psub` NAME is defined, and `#ifnpsub NAME` is true when it is not. Both are closed with `#endif;`. A parameter list written after the name, as in `test2(a)` below, is ignored.
-
-You can also perform conditional logic with `#ifpsub` and `#ifnpsub`:
+Dictionaries can be passed to and returned from functions using the templated `dict{T:U}` type:
 ```
-#import <standard.idk>;
-
-using standard::io::console;
-
-#psub test(x,y) println(x); #
-                println(y);
-
-#ifnpsub test2(a)
-#warn "[Warning] #psub test2(a) not defined!";
-#endif;
-
-def main() -> int
-{
-    test("Hello", "world!");
-
-    return 0;
-};
+def foo<T,U>(dict{T:U} d) -> dict{T:U} -> d;
 ```
+
+Dictionaries can be merged with `+`:
+```
+dict{"":""} a { "x": "1" };
+dict{"":""} b { "y": "2" };
+dict{"":""} c = a + b;
+```
+
+
+### Inline dict literals with `d{}`
+
+A `d{}` expression creates an anonymous dict inline without declaring a named variable. The result can be immediately accessed with `[key]`:
+
+`byte* status = d{true:"Logged In", false:"Guest"}[a.logged_in];`
+
+When all keys and values are compile-time constants, the entire expression folds at compile time and is baked directly into the binary with no runtime cost.
+```
+// Compile-time constant -- no runtime dict lookup
+byte* msg = d{///some computed dictionary///}[///some computed result index///];
+```
+
+The `[key]` access on a `d{}` expression is handled by the existing array access postfix, so the inline dict participates naturally in any expression context.
 
 ---
 
 <a id="functions"></a>
 ## **Functions**
 
-You cannot define a function within a function. They must be module, namespace, object, or top level.
+Functions are where everything happens in your programs at runtime. You cannot define a function within a function. They must be module, namespace, object, or top level. The compiler performs dead code elimination (DCE) after parsing and before any subsequent passes like type checking which reduces the overall work the later passes have to perform.
 
-Prototype:
+<a id="prototype-functions"></a>
+### Prototypes:
 ```
 // Single declaration
 def name(parameters) -> void;
@@ -767,7 +1097,7 @@ Prototype signatures do not need a variable name, only types like `def foo(int,i
 
 Signature:
 ```
-def name (parameters) -> return_type
+calling_convention name (parameters) -> return_type
 {
     return return_value;
 };
@@ -775,7 +1105,7 @@ def name (parameters) -> return_type
 
 Example:
 ```
-def myAdd(int x, int y) -> int
+cdecl myAdd(int x, int y) -> int
 {
     return x + y;
 };
@@ -862,6 +1192,675 @@ IDEKA already has a lot of semicolons, and braces. Like an `if` that has one sta
 `foo(int x) -> int -> x / 2;`
 
 This creates a very nice, almost mathematical-looking line of code.
+
+---
+
+<a id="istrings-and-fstrings"></a>
+### **i-Strings and f-Strings**
+
+**f-string Example**
+```
+#import <standard.idk>;
+
+using standard::io::console,
+      standard::strings;
+
+def main() -> int
+{
+    string h = "Hello";
+    string w = "World!";
+    print(f"{h} {w}");
+    return 0;
+};
+```
+Result:
+`Hello World!`
+
+**i-string Example**  
+The brackets are replaced with the results of the statements in order respective to the statements' position in the statement array in i-strings.  
+This allows you to write clean interpolated strings without strange formatting. It keeps code out of the string making them easier to read.  
+```
+#import <standard.idk>; // imports types.idk
+
+using standard::io::console;
+
+def bar() -> noopstr { return "World"; };    // We get the non-OOP string type from the types library
+
+def main() -> int
+{
+    println(i"Hello {} {}" : {bar() + "!"; "test";});
+
+    x = i"Bar {}":{bar()};     // "Bar World!"
+
+    noopstr a = "Hello", b = "World!",
+            c = f"{a} {b}";    // "Hello World!"
+
+    println(c);
+
+    return 0;
+};
+```
+Result:
+`Hello World!`
+
+<a id="logic-with-ifelifelse"></a>
+## **Logic with if/elif/else**
+```
+if (condition1)
+{
+    doThis();
+}
+elif (condition2)      // You can also use `else if`
+{
+    doThat();
+}
+else if (condition 3)  // Equivalent to `elif`
+{
+    doAnythingElse();
+}
+else
+{
+    doThings();
+};
+```
+
+You can also do `if` expressions:
+```
+int x = 0;
+int y = x if (x > 5) else noinit;
+```
+
+You can also use `if` expressions in the following manner:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+foo() -> int
+{
+    return 10;
+};
+
+main() -> int
+{
+    int* px @= 5;  // Take value of the integer literal 5 on the stack at runtime.
+
+    print(foo()) if (px); // if (pointer) is a validity check, true if pointer not null
+
+    -> 0;
+};
+```
+You may also use groups of statements in a block before an if:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+foo() -> int
+{
+    print("Hello");
+};
+bar() -> void
+{
+    print(" World!");
+};
+
+main() -> int
+{
+    { foo(); bar(); } if (true);
+
+    -> 0;
+};
+```
+
+Ternary logic with the standard ternary `?:`:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    int x = 0,
+        y = 5;
+
+    int z = x < y ? y : 0; // if x < y then y else 0
+
+    if (z is 5)
+    {
+        print("Success!");
+    };
+    -> 0;
+};
+```
+
+Ternary assignment `?=` (if LHS is null):
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    int x = 10,
+        y;
+
+    x ?= 50; // x = 50 if x == 0
+    y ?= x;  // y =  x if y == 0
+
+    if (x == y) { println("Success!"); };
+
+    -> 0;
+};
+```
+
+Null coalesce `??` operator (result is RHS if LHS is null):
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    int x = 0,
+        y = 5;
+
+    int z = y ?? 20; // result 20 if y is null
+
+    if (z is 5)
+    {
+        print("Success!");
+    };
+    -> 0;
+};
+```
+
+Not null `!?` operator (boolean unary postfix - is LHS not null):
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    int* px;
+    int* py @= px;
+
+    if (px!?) { println("px may be live!"); };
+
+    if (py!?) { println("py is definitely live!"); };
+
+    -> 0;
+};
+```
+
+<a id="enumerated-lists"></a>
+## **Enumerated Lists**
+
+Definition: `enum myEnum {val1, val2, val3, val4, ...};`  
+Instance: `myEnum newEnum;`
+Member access: `newEnum.val1;`
+
+Enumerated lists are type `int` by default. Each item in an enumerated list has an associated ordinality if no value is set. Imagine we want to name index values so we don't have to remember the indexes themselves.
+
+```
+enum Skills
+{
+    FIREBOLT,    // 0
+    ICE_SHARD,   // 1
+    THUNDERSTORM // 2
+    //...
+    // 999
+};
+```
+
+Now say we need something more specific, like named pointers. We can't use `int` on a 64 bit system to store a 64 bit address, so we use a typed enum by putting a type before the `enum` keyword:
+```
+u64 enum PointerMap
+{
+    DedupSchedule   = 0xDEADBEEFCAFEFOOD,
+    ReallocEntities = 0xFFFF00000037EADC,
+    _Function3      = 0xF000000000000001,
+    //...
+    //
+};
+```
+
+Then we can create a function pointer to that function:
+```
+PointerMap pm;
+
+def foo() -> void = (@)pm.DedupSchedule; // (@) treats the value as an address
+
+foo();
+```
+
+---
+
+<a id="unions"></a>
+## **Unions**
+
+Prototype: `union myUnion;`  
+Definition: `union myUnion {int iVal; float fVal;};`  
+Insance: `myUnion newUnion;`  
+Instance with assignment: `myUnion newUnion {iVal = 10};`  
+Member access: `newUnion.iVal;`
+
+Unions are similar to structs, the difference is only one of its members can be initialized at any time.  
+Initializing another member changes the actively initialized member.  
+Attempting to access an uninitialized member results in garbage data for that member.
+
+Example:
+
+```
+union myUnion
+{
+    int iVal;
+    float fVal;
+};
+
+myUnion u {iVal = 10};
+
+def main() -> int
+{
+    u.iVal = 10;   // iVal is the active member
+    u.fVal = 3.14; // iVal overwritten by fVal in memory
+};
+```
+
+<a id="switching"></a>
+## **Switching**
+`switch` is static, value-based, and non-flexible. Switch statements are for speed.
+```
+switch (e)
+{
+    case (0)
+    {
+        // Do something
+    }
+    case (1)
+    {
+        // Another thing
+    }
+    default
+    {
+        // Something else
+    };
+};
+```
+
+If a case contains only one statement, the braces can be omitted, similar to a single-statement `if`.
+
+- Switch bodies are never optimized away.  
+DCE never removes code inside a `switch` body. This is not a conservative optimization setting you can turn off. It follows from how IDEKA values work. In IDEKA, a literal is a stack object with an address. `switch (5)` does not branch on the compile-time constant 5; it branches on whatever currently occupies the stack slot holding 5. The address of that slot can be taken with `@`, passed to a function, handed to another thread, and written through. Once anything else can reach that address, the value at the slot is no longer known to the compiler, regardless of what it was initialized to. Constant-folding a `switch` operand would therefore be unsound under IDEKA's pointer model, not merely aggressive. A `switch` body is a DCE root for the same reason volatile memory is: something outside the compiler's model may have written to the operand. The optimizer cannot prove a `case` is unreachable, so it does not pretend to.
+
+<a id="tagged-unions"></a>
+### **Tagged unions**
+[Switch](#switching) is exhaustive for tagged unions.
+
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+enum ErrorUnionEnum
+{
+    INACTIVE,
+    INT_ACTIVE,
+    LONG_ACTIVE,
+    BOOL_ACTIVE,
+    CHAR_ACTIVE,
+    FLOAT_ACTIVE,
+    DOUBLE_ACTIVE   
+};
+
+union ErrorUnion
+{
+    int  iRval;
+    long lRval;
+    bool bRval;
+    char cRval;
+    float fRval;
+    double dRval;
+} # ErrorUnionEnum; // # is the 'tag' operator
+
+
+def foo() -> ErrorUnion
+{
+    ErrorUnion err;
+
+    err.bRval = false; // Set bool to active element
+    err.# = ErrorUnionEnum.BOOL_ACTIVE;
+
+    return err;
+};
+
+
+def main() -> int
+{
+    ErrorUnion e = foo();
+
+    switch (e.#)
+    {
+        case (ErrorUnionEnum.INT_ACTIVE) -> print("Integer active in error union!\n");
+
+        case (ErrorUnionEnum.LONG_ACTIVE) -> print("Long active in error union!\n");
+
+        case (ErrorUnionEnum.BOOL_ACTIVE) -> print("Bool active in error union!\n");
+
+        case (ErrorUnionEnum.CHAR_ACTIVE) -> print("Char active in error union!\n");
+
+        case (ErrorUnionEnum.FLOAT_ACTIVE) -> print("Float active in error union!\n");
+
+        case (ErrorUnionEnum.DOUBLE_ACTIVE) -> print("Double active in error union!\n");
+    };
+
+    return 0;
+};
+```
+
+---
+
+<a id="loops"></a>
+## **Loops**
+
+IDEKA supports 2 styles of for loops:
+```
+for (x in y)                     // Array iteration
+{
+    // ... code ...
+};
+
+for (int c = 0; c < 10; c++)     // init ; cond ; expr
+{
+    // ... code ...
+};
+```
+
+A `for`-ever loop:
+`for (;;) {};`
+
+A `do` loop:
+```
+do
+{
+    // some code;
+};
+```
+
+You can also do comprehension on `while` conditions:
+```
+do
+{
+    y[i--] = void;     // Nulled out of array
+}
+while (x in y & i > 0);
+
+while (condition)
+{
+    // ... code ...
+};
+```
+
+An infinite `while` loop:
+```
+while (true)
+{
+    // ...
+};
+// or
+while (1)
+{
+    // ...
+};
+```
+
+<a id="recursion"></a>
+### Recursion:
+```
+def rsub(int x, int y) -> int
+{
+    switch (x == 0 | y == 0)
+    {
+    };
+
+    rsub(--x,--y);
+};
+```
+
+<a id="strict-recursion-with"></a>
+### Strict Recursion with `<~`:
+Functions that have the recurse return operator will always return to themselves. Their stack frame never grows because they become tail calls, and get optimized as such.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+noopstr m1 = "[recurse ",
+        m2 = "]";
+
+def recurse1(int x) <~ int
+{
+    singinit int y;
+    print(m1); print(y); println(m2);
+    return ++y;
+};
+
+
+def recurse2() <~ void
+{
+    singinit int z;
+    print(m1); print(++z); println(m2);
+};
+
+
+def main() -> int
+{
+    recurse2(); // Step into tail function
+    return 0;
+};
+```
+
+<a id="escaping-strict-recursion-with-escape"></a>
+### **Escaping strict recursion with `escape`**
+`escape` can only be used inside a strictly-recursive function defined with a recurse arrow `<~`. Example:
+```
+def recurse2() <~ void
+{
+    if (!entered_flag) {entered_flag = true;};
+    singinit int z;
+    print(m1); print(++z); println(m2);
+    if (z >= 10) { escape main(); }; // or any other function
+};
+```
+
+<a id="singleinitialized-variables-with-singinit"></a>
+### **Single-initialized variables with `singinit`**
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+def foo() -> void
+{
+    singinit int x;
+    x += 1;
+    print(x); print();
+};
+
+def call(int y) -> void
+{
+    if (y == 0) { return; };
+    foo();
+    call(--y);
+};
+
+def main() -> int
+{
+    call(10);
+    return 0;
+};
+```
+
+<a id="the-ditto-operator"></a>
+## **The Ditto Operator `#"`**
+The ditto operator repeats the previous initializer expression in a multi-declarator variable declaration. It is shorthand for writing the same expression again.
+
+```
+ulong p0 = alloc_stub_page(),
+      p1 = alloc_stub_page(),
+      p2 = alloc_stub_page(),
+      p3 = alloc_stub_page(),
+      p4 = alloc_stub_page(),
+      p5 = alloc_stub_page();
+```
+Is identical to:
+```
+ulong p0 = alloc_stub_page(),
+      p1 = #",
+      p2 = #",
+      p3 = #",
+      p4 = #",
+      p5 = #";
+```
+
+This works for any initializer expression, including those with side effects:
+```
+int i;
+int x = ++i,   // 1
+    y = #",    // 2
+    z = #";    // 3
+```
+Each `#"` produces an independent evaluation of the repeated expression - it is not a reference to the prior variable's value.
+
+`#"` must be followed immediately by `,` or `;` in variable declarations. It is not valid as part of a larger expression (for now).
+
+### **Repeating Statements With Ditto**  
+Using `#"` on its own line will repeat the statement previous to it.  
+Here's a simple example that should be straightforward enough to understand in all applications. Try not to invent edge cases, they don't exist. If the parser would error, it's not an edge case, it's an error.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+def main() -> int
+{
+    println("Hello!");
+    #";
+    return 0;
+};
+```
+Result:
+```
+Hello!
+Hello!
+```
+
+---
+
+### **Parameterized Ditto in Function Calls**
+
+`#"` may also appear as a function call argument, where it repeats the argument at the same position from the immediately preceding statement, provided that statement was a call to the same function with the same arity.
+
+```
+foo(x, y, z);
+foo(y, #", z);   // identical to foo(y, y, z)
+```
+
+Each `#"` is replaced by a copy of the corresponding positional argument from the previous call - independently evaluated, not a reference.
+
+```
+foo(x, y, z);
+foo(#", #", #");  // identical to foo(x, y, z)
+```
+
+The previous statement must satisfy all of the following, or it is a compiler error:
+
+- It must be a function call statement (not an expression like `a + b`, a variable declaration, a control statement, etc.)
+- It must be a call to the same function name
+- It must have the same number of arguments
+
+```
+foo(x, y, z);
+bar();
+foo(x, #", #");   // error: previous statement was bar, not foo
+
+foo(x, y);
+foo(x, #", #");   // error: arity mismatch (2 vs 3)
+
+foo(x, y, z);
+a + b;
+foo(x, #", #");   // error: previous statement is not a function call
+```
+
+Ditto in argument lists always refers to the **previous statement**, not the previous argument. Chaining across multiple calls works naturally:
+
+```
+foo(x, y, z);   // prints "1 2 3"
+foo(#", #", #"); // prints "1 2 3"
+foo(#", #", #"); // prints "1 2 3"
+```
+
+Example program:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+
+def foo(int a, int b, int c) -> void
+{
+    println(f"{a} {b} {c}");
+};
+
+def main() -> int
+{
+    int i;
+    int x = ++i,
+        y = #",
+        z = #";
+
+    foo(x, y, z);
+    foo(y, #", #");
+    foo(z, #", #");
+
+    return 0;
+};
+```
+Output:
+```
+1 2 3
+2 2 3
+3 2 3
+```
+
+<a id="expressionbased-macros-with-macro"></a>
+## **Expression-based macros with `macro`**
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+macro xyz(a,b,c)
+{
+    (a + b) ^ c
+};
+
+def main() -> int
+{
+    int x, y, z = 1, 2, 3;
+
+    println(f"xyz(abc) = {xyz(x,y,z)}");
+
+    return 0;
+};
+```
+- The `println` string turns into:
+```
+println(f"xyz(abc) = {(1 + 2) ^ 3}");
+```
+Result:
+`xyz(abc) = 27`
 
 ---
 
@@ -959,6 +1958,7 @@ Result:
 4
 ```
 
+<a id="function-pointers"></a>
 ## Function pointers
 
 A function pointer is declared with `def{}*`, followed by a name, the parameter types, and the return type. Assign a function to it with `@`. A function pointer is called directly by name; it is dereferenced automatically.
@@ -1150,6 +2150,392 @@ When a function violates a binding, the compiler emits an error at the function 
 the contract whose binding was violated, which side (`pre` or `post`) was violated, and what was
 required vs. what was found.
 
+<a id="defining-type-functions"></a>
+## **Defining Type Functions**:
+IDEKA has the ability to define functions for a given type, allowing `.` call notation on a value or variable of that type.
+Inside of a type function `_` is reserved, and acts as the `this` parameter.
+```
+// noopstr is alias for byte*
+noopstr.add_world() -> noopstr
+{
+    return _ + ", World!";  //  "Hello".add_world() == return "Hello" + ", World!"
+};
+
+/// Alternatively, you may use "" - Note this is special for type functions ///
+"".add_world() -> ""
+{
+    return _ + ", World!";
+};
+```
+
+You can use plain types or pointer types, and named struct types, like so:
+```
+struct MyStru
+{
+    // .. members ..
+};
+
+MyStru.mystru_func1() -> MyStru
+{
+    // impl
+};
+```
+
+You may also use tied ~types:
+```
+~byte*.sub11() -> ~byte*
+{
+    return _[0] - 11; // set first char - 11, _ is tied type, no need for explicit move
+};
+```
+
+You can make literal modifiers as well by using `0` with an appropriate suffix:
+```
+0.my_int_func() -> int   // 55.my_int_func()
+{
+    return _;
+};
+
+0l.my_long_func() -> long
+{
+    return _;
+};
+
+0d.my_double_func() -> double
+{
+    return _;
+};
+
+struct.my_struct_func() -> struct
+{
+    // impl for your arbitrary struct func
+};
+```
+
+<a id="functionless-types"></a>
+## Functionless Types
+
+To forbid a type from having functions, you can declare it with `data!` like so:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+data!{32} as u32i;
+
+u32i.foo() -> u32i { return 0u; };
+
+def main() -> int
+{
+    return 0;
+};
+```
+
+The compiler will error with:  
+`✗ Compilation failed: Type u32i is non-functional (declared with data!) and cannot have type functions defined on it at x:y`
+
+<a id="templates"></a>
+## <**Templates**>  
+Templates in IDEKA are extremely simple.
+
+There are no keywords for templates, only syntax, and involve only type substitution.  
+There is no SFINAE, so templates are not subject to the pitfalls SFINAE allows.  
+
+Templates can be applied to functions, structs, objects, and custom operator definitions.
+
+Here's an example of using a template:
+```
+#import <standard.idk>;
+
+
+def foo<T>(T x) -> T
+{
+    return x;
+};
+
+
+def main() -> int
+{
+    float y = foo<float>(5.5f);
+    int z = foo<int>(3);
+
+    println(y);
+    println(z);
+
+    system("pause");
+    return 0;
+};
+```
+
+The compiler can also infer templates at call sites, so you don't end up with a mess of angle brackets:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+struct myStru<T>
+{
+    T a, b;
+};
+
+def foo<T, U>(T a, U b) -> U
+{
+    return a.a * b;
+};
+
+def bar(myStru<int> a, int b) -> int
+{
+    return foo(a, 3); // inferred from signature via 'a'
+};
+
+def main() -> int
+{
+    myStru<int> ms = {10,20};
+
+    //int w = foo<myStru<int>, int>(ms, 3); // <brackets> at call site
+
+    int x = foo(ms, 3); // inferred locally
+
+    int y = bar(ms, 3);
+
+    println(x == y);
+    return 0;
+};
+```
+
+<a id="template-constraints"></a>
+### Template Constraints:
+You can add constraints to template parameters on their allowed types like so:
+```
+<T: int | i32, U: long | i64>
+```
+The syntax is `Param: type (| type)*` comma separated.
+
+Here's an example:
+```
+#import <standard.idk>;
+ 
+using standard::io::console;
+
+"".idk<T: "", U: "">(T x, U y) -> ""
+{
+    return _ + f"{x} {y}";
+};
+
+def main() -> int
+{
+    byte* new = "Hello".idk(",", "World!");
+    println(new);
+    return 0;
+};
+```
+"new" isn't a keyword in IDEKA, so this is fine.
+
+To set a default type constraint, use `+` before the type like so:
+```
+<T: +float | int>
+```
+To enforce no default constraint, use `!+` before your parameter like so:
+```
+<!+T: float | int>
+```
+Using `+` on any constraint type when the parameter has no default set with `!+` will throw a compiler error.
+
+<a id="templates-and-type-relationships"></a>
+### Templates and Type Relationships
+IDEKA allows ways to describe how a type - or pair of types - can behave.
+
+There is a dedicated type relationships operator set specifically to describe relations between types.  
+Since all operators are binary, to perform a unary operation, you do `A <op> A`, which is type self-referential.  
+All template type relationships operators are distinct and not related to regular operators and cannot be overloaded.
+
+See the [Algebraic Types](https://github.com/kvthweatt/IDEKA/blob/main/docs/algebraic_types.md) documentation for more details on the operators.
+
+To use type relationships expressions, they must be constrained in a set.
+
+Here's the same example using `~=`, the "must be compatible" operator, and the `:{}` set constraint.
+```
+#import <standard.idk>;
+ 
+using standard::io::console;
+
+"".idk<T: "", U: "", :{T ~= U}>(T x, U y) -> ""
+{
+    return _ + f"{x} {y}";
+};
+
+def main() -> int
+{
+    byte* new = "Hello".idk(",", "World!");
+    println(new);
+    return 0;
+};
+```
+
+You can separate expressions with a comma like:
+```
+#import <standard.idk>;
+ 
+using standard::io::console;
+
+"".idk<T: "", U: "", :{T ~= U, T !`< U}>(T x, U y) -> ""
+{
+    return _ + f"{x} {y}";
+};
+
+def main() -> int
+{
+    byte* new = "Hello".idk(",", "World!");
+    println(new);
+    return 0;
+};
+```
+
+However, you do not have to comma separate, and can instead write them circularly.  
+Circular expressions can be very long, terse, and carry a lot of meaning.  
+Example:
+```
+D !~= B & [A !@ A] !~= C !`< D !-= A
+```
+This reads as (inner most []):  
+- Values of type A cannot have an address taken of them  
+- D must be incompatible with B and A  
+- B and A must be incompatible with C  
+- C and D independently cannot be used in an expression where bit lowering would occur  
+- D cannot be used in signed operations with A
+
+There is a similar relationship here, `D !~= A & B !~= C`. This means `D ~= C` by relation, and doesn't need to be explicitly defined.  
+This is the type geometry of IDEKA.
+
+This can be hard to see if you do not write your expression with care, because you may intend `D !~= C`. See the following:
+```
+C !~= D !~= B & [A !@ A] !~= C !`< D !-= A
+```
+
+Just place the relationship in an open position.
+
+No one wants to see that long expression in their template definition, that's why `constraint` exists.  
+`constraint` creates named, generic and parameterized relational expression sets that can be used with a template like so:
+```
+#import <standard.idk>;
+ 
+using standard::io::console;
+
+constraint MyCS(A)
+{
+    A !`< A    // This is a unary expression, read as the relation !`< "between A types"
+};
+
+def foo<T: int, :{MyCS}>(T x) -> byte
+{
+    return 5 + x; // lowering would occur here, violating MyCS
+};
+
+def main() -> int
+{
+    foo(10);
+    return 0;
+};
+```
+Compiler will output:
+```
+✗ Compilation failed: Type relation T !`< T violated: illegal truncation on int at 12:5
+    return 5 + x;
+----^ // 5 + x will lower to byte
+```
+
+**The complete type-relationship operator set** and what each one enforces once a template is
+instantiated with concrete types:
+
+| Operator | Meaning | Scope |
+|---|---|---|
+| `~=` | The two types must be **compatible** | pairwise |
+| `!~=` | The two types must be **incompatible** | pairwise |
+| `!@` | A variable of this type must never have its address taken (`@`) anywhere in the template body | independent |
+| `` !`< `` | This type must never appear as either side of a narrowing (truncating) conversion in the body | independent |
+| `` !`<= `` | A narrowing conversion specifically **between these two named types** is forbidden | between |
+| `` !`> `` | This type must never appear as either side of a widening conversion in the body | independent |
+| `` !`>= `` | A widening conversion specifically **between these two named types** is forbidden | between |
+
+"Compatible" (for `~=`/`!~=`) means: both types are pointers or both are non-pointers; if both
+are pointers, their pointer depth matches; and if both have a known bit width, the widths are
+equal.
+
+The **independent** vs **between** distinction matters once more than two parameters are in
+play. `` T !`< T `` (independent, self-referential, as in the `MyCS` example above) forbids `T`
+from ever being narrowed by *anything* - any cast or implicit arithmetic narrowing involving
+`T`'s width is a violation, regardless of what the other side of that conversion is.
+`` T !`<= U `` (between) only forbids narrowing conversions where *both* the source and
+destination widths belong to `{T, U}` specifically - narrowing `T` to some unrelated third type
+is still allowed.
+
+These checks aren't purely static type comparisons - for the truncation/widening operators, the
+compiler walks the instantiated function body looking for the actual operations that would
+violate the constraint: explicit casts (`(Type)expr`), `return` statements whose expression is
+wider or narrower than the declared return type, and ordinary arithmetic where an implicit
+narrowing happens because one operand is wider than the other. This is exactly how the `MyCS`
+example above produces a violation from `return 5 + x;` with no explicit cast in sight - the `+`
+between an `int` literal and a `byte`-constrained `x` implicitly narrows the result, and that
+narrowing context is what gets flagged.
+
+**Joining multiple names with `&`** lets one relation apply to a whole group of parameters at
+once: `T & U ~= V` requires *both* `T` and `U` to individually satisfy `~= V`. This reuses the
+ordinary `&` (logical AND) token, but inside a constraint set it's a list-joiner for the
+relation's operands, not a boolean evaluation of two relation results.
+
+You can comma separate named constraints in your template definition like so:  
+`<T: int, :{MyCS1, MyCS2, MyCS3}>`
+
+Template constraints can be used in any template, including operator, struct, and object templates.
+
+**Named constraint sets can be merged**, combining the relations of two or more existing sets
+into a new one:
+```
+constraint MyCS3 = MyCS1 + MyCS2;
+```
+All sources must declare the same number of parameters. The merged set adopts the first
+source's parameter names unless you supply your own rename list before the `=`:
+```
+constraint MyCS3(M, N) = MyCS1 + MyCS2;
+```
+Relations from every source are carried over into the merged set, with each source's own
+parameter names remapped to the merged set's names.
+
+```
+struct myStru<A,B>
+{
+    A ax, ay, az;
+    B bx, by, bz;
+};
+```
+Composition and templates can be combined, however they **will** shadow.
+```
+struct myStru1<A,B>
+{
+    A a1x, a1y;
+    B b1x, b1y;
+};
+
+struct myStru2<A,B,C> : myStru1
+{
+    A a2x, a2y, a2z;
+    B b2x, b2y, b2z;
+};
+
+// Becomes,
+
+struct myStru2<A,B,C>
+{
+    A a1x, a1y;
+    B b1x, b1y;
+    A a2x, a2y, a2z;
+    B b2x, b2y, b2z;
+};
+```
+If you intended for `a1x` to be a different type than `a2x`, you must use different parameter names.
+
+Structs cannot contain objects, but objects can contain structs. This means struct template parameters cannot be `object` type.
+
 ---
 
 <a id="external-functions-ffi"></a>
@@ -1244,132 +2630,61 @@ namespace myNamespace
 Duplicate namespace definitions do not redefine the namespace, the members of both combine as if they were one namespace. This is so the standard library or any library can have a core namespace across multiple files.  
 Namespaces are the only container that have this functionality.
 
----
+<a id="namespace-elimination-with-using-or-not-using"></a>
+### **Namespace elimination with `!using` or `not using`**
 
-<a id="structs"></a>
-## **Structs**
-
-Prototype / forward declaration: `struct myStruct;`  
-Definition: `struct myStruct {int x,y,z;};`  
-Instance: `myStruct newStruct;`  
-Instance with assignment: `myStruct newStruct {x = 10, y = 20, z = -5};`  
-Member access: `newStruct.x;`
-
-Structs are packed and have no padding naturally. There is no way to change this.  
-You set up padding with alignment in your data types.  
-Members of structs are aligned and tightly packed according to their width unless the types have specific alignment.  
-Structs are non-executable, and therefore cannot contain functions or objects.  
-Placing a for, do/while, if/elif/else, try/catch, or any executable statements other than variable declarations will result in a compilation error.
-
-Example:
-
+This is a very heavy-duty form of DCE. By doing `!using` you are totally removing a namespace, which in most cases will cause a number of compiler errors from any code still relying on that namespace being available.
+Once `!using` is used somewhere, it is permanent. This is not recommended for code elimination unless you know what you're doing and intend this.
 ```
-struct xyzStruct
+!using standard::io::file; // anything that was written with `standard::io::file` available will now error.
+
+not using some::specific::namespace;
+```
+
+<a id="deprecation-with-deprecate"></a>
+### **Deprecation with `deprecate`**
+```
+#import <standard.idk>;
+
+namespace test1
 {
-    int x,y,z;
+    namespace test2
+    {
+        def foo() -> void {};
+    };
 };
 
-struct newStruct
+deprecate test1::test2;
+
+def main() -> int
 {
-    xyzStruct myStruct {x = 1, y = 1, z = 1};              // structs can contain structs
+    test1::test2::foo();
+
+    return 0;
 };
 ```
-
-Structs are non-executable.  
-Structs cannot contain functions, or objects. This includes prototypes and definitions. Pointers are ok, including function pointers.  
-
-Structs support composition via prepending and appending other structs. Example:
+Compiling gives this output:
 ```
-struct Header
+✗ Compilation failed: Deprecated namespace 'test1::test2' is still referenced:
+Function call test1__test2__foo()
+```
+
+You may also use `deprecate` to tag a function like so:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+foo() -> void
 {
-    data{16} sig;
-    data{32} filesize, reserved, dataoffset;
+    println("This is deprecated!");
+} # deprecate;
+
+main() -> int
+{
+    foo(); // calling this will result in a compiler error
+    -> 0;
 };
-
-struct InfoHeader
-{
-    data{32} size, width, height;
-    data{16} planes, bitsperpixel;
-    data{32} compression, imagesize, xpixelsperm, ypixelsperm, colorsused, importantcolors;
-};
-
-struct ExtraData
-{
-    byte[64] author;
-};
-
-struct BMP : Header, InfoHeader
-{
-    // More bitmap fields
-} : ExtraData;
-```
-
-## C Compatible Structs
-If you need a C-compatible struct, you can use `cstruct` which follows standard padding and alignment rules that you would expect when handling C code.
-```
-cstruct
-{
-    int x;
-    long z;
-};
-```
-
-## Block assignment
-Below is an example snippet from the standard library in `runtime\allocators.idk` around line 415. If the object[at this index] is a struct, you can do block assignment instead of writing `new_tbl[rm_hole]` 4 times.
-```
-new_tbl[rm_hole]
-{
-    .key  = new_tbl[rm_next].key;
-    .size = new_tbl[rm_next].size;
-    .kind = new_tbl[rm_next].kind;
-    .slab = new_tbl[rm_next].slab;
-};
-```
-
----
-
-<a id="struct-recast-with-from"></a>
-## **Struct recast with `from`**
-`from` reinterprets an existing value's bytes as a struct, without copying. It's the
-struct-typed counterpart to casting a byte array into an integer - useful for parsing a buffer
-into a structured view in place rather than building the struct field by field.
-
-```
-struct Header
-{
-    data{16} sig;
-    data{32} filesize;
-};
-
-byte[6] buf = [0x42, 0x4D, 0x00, 0x01, 0x02, 0x03];
-
-Header h from buf;
-// h.sig == 0x424D, h.filesize == 0x00010203
-// `buf` is no longer usable after this point.
-```
-
-The right-hand side of `from` may be a plain identifier (an array or other addressable variable)
-or an array slice (`buf[a:b]`). When the source is a slice, the compiler builds the struct view
-directly over the original buffer starting at the slice's offset - there is no intermediate copy
-of the sliced range.
-
-The total size of the source must match the struct's total byte size; a mismatch is a
-compile-time error, the same as casting one struct type to another of a different size.
-
-**By default, `from` consumes its source.** After the recast, the original identifier is removed
-from scope - referencing it again is a compile-time error. This mirrors the ownership-transfer
-behavior of the `~` tie operator: once the bytes are viewed as the new struct type, the old name
-for them is gone, so there's exactly one live name pointing at that memory.
-
-To keep the source usable after the recast, append `!` to the source expression:
-
-```
-Header h from buf!;   // buf is still valid and usable after this line
-```
-
-```
-// Recasting directly from a slice - no copy, h aliases buf[2:6]
-Header h from buf[2:6];
 ```
 
 ---
@@ -1863,427 +3178,6 @@ struct* p_myStruct = @myStruct;     // Pointer
 
 ---
 
-<a id="istrings-and-fstrings"></a>
-## **i-Strings and f-Strings**
-
-**f-string Example**
-```
-#import <standard.idk>;
-
-using standard::io::console,
-      standard::strings;
-
-def main() -> int
-{
-    string h = "Hello";
-    string w = "World!";
-    print(f"{h} {w}");
-    return 0;
-};
-```
-Result:
-`Hello World!`
-
-**i-string Example**  
-The brackets are replaced with the results of the statements in order respective to the statements' position in the statement array in i-strings.  
-This allows you to write clean interpolated strings without strange formatting. It keeps code out of the string making them easier to read.  
-```
-#import <standard.idk>; // imports types.idk
-
-using standard::io::console;
-
-def bar() -> noopstr { return "World"; };    // We get the non-OOP string type from the types library
-
-def main() -> int
-{
-    println(i"Hello {} {}" : {bar() + "!"; "test";});
-
-    x = i"Bar {}":{bar()};     // "Bar World!"
-
-    noopstr a = "Hello", b = "World!",
-            c = f"{a} {b}";    // "Hello World!"
-
-    println(c);
-
-    return 0;
-};
-```
-Result:
-`Hello World!`
-
----
-
-<a id="you-can-also-use-inline-assembly-directly"></a>
-## You can also use in-line assembly directly:
-Assembly in IDEKA is done AT&T style.  
-The constraints follow the block in the pattern `outputs : inputs : clobbers`
-Here's an example:
-```
-_exchange64(i64* ptr, i64 value, i64* out) -> void
-{
-    #ifdef __ARCH_X86_64__
-    volatile asm
-    {
-        movq $0, %rsi
-        movq $2, %rdi
-        movq $1, %rax
-        xchgq %rax, (%rsi)
-        movq %rax, (%rdi)
-    } : : "r"(ptr), "r"(value), "r"(out) : "rax", "rsi", "rdi", "memory";
-    #endif;
-    #ifdef __ARCH_ARM64__
-    volatile asm
-    {
-    .retry_xchg64:
-        ldaxr x0, [$0]
-        stlxr w3, x1, [$0]
-        cbnz  w3, .retry_xchg64
-        str   x0, [$2]
-    } : : "r"(ptr), "r"(value), "r"(out) : "x0", "w3", "memory";
-    #endif;
-};
-```
-Here, the clobber list is `"r"(ptr), "r"(value), "r"(out) : "x0", "w3", "memory";`  
-Using `volatile` tags the assembly block for the compiler, saying do not touch this for any reason.
-
----
-
-<a id="logic-with-ifelifelse"></a>
-## **Logic with if/elif/else**
-```
-if (condition1)
-{
-    doThis();
-}
-elif (condition2)      // You can also use `else if`
-{
-    doThat();
-}
-else if (condition 3)  // Equivalent to `elif`
-{
-    doAnythingElse();
-}
-else
-{
-    doThings();
-};
-```
-
-You can also do `if` expressions:
-```
-int x = 0;
-int y = x if (x > 5) else noinit;
-```
-
-You can also use `if` expressions in the following manner:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-foo() -> int
-{
-    return 10;
-};
-
-main() -> int
-{
-    int* px @= 5;  // Take value of the integer literal 5 on the stack at runtime.
-
-    print(foo()) if (px); // if (pointer) is a validity check, true if pointer not null
-
-    -> 0;
-};
-```
-You may also use groups of statements in a block before an if:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-foo() -> int
-{
-    print("Hello");
-};
-bar() -> void
-{
-    print(" World!");
-};
-
-main() -> int
-{
-    { foo(); bar(); } if (true);
-
-    -> 0;
-};
-```
-
-Ternary logic with the standard ternary `?:`:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-    int x = 0,
-        y = 5;
-
-    int z = x < y ? y : 0; // if x < y then y else 0
-
-    if (z is 5)
-    {
-        print("Success!");
-    };
-    -> 0;
-};
-```
-
-Ternary assignment `?=` (if LHS is null):
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-    int x = 10,
-        y;
-
-    x ?= 50; // x = 50 if x == 0
-    y ?= x;  // y =  x if y == 0
-
-    if (x == y) { println("Success!"); };
-
-    -> 0;
-};
-```
-
-Null coalesce `??` operator (result is RHS if LHS is null):
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-    int x = 0,
-        y = 5;
-
-    int z = y ?? 20; // result 20 if y is null
-
-    if (z is 5)
-    {
-        print("Success!");
-    };
-    -> 0;
-};
-```
-
-Not null `!?` operator (boolean unary postfix - is LHS not null):
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-    int* px;
-    int* py @= px;
-
-    if (px!?) { println("px may be live!"); };
-
-    if (py!?) { println("py is definitely live!"); };
-
-    -> 0;
-};
-```
-
----
-
-<a id="loops"></a>
-## **Loops**
-
-IDEKA supports 2 styles of for loops:
-```
-for (x in y)                     // Array iteration
-{
-    // ... code ...
-};
-
-for (int c = 0; c < 10; c++)     // init ; cond ; expr
-{
-    // ... code ...
-};
-```
-
-A `for`-ever loop:
-`for (;;) {};`
-
-A `do` loop:
-```
-do
-{
-    // some code;
-};
-```
-
-You can also do comprehension on `while` conditions:
-```
-do
-{
-    y[i--] = void;     // Nulled out of array
-}
-while (x in y & i > 0);
-
-while (condition)
-{
-    // ... code ...
-};
-```
-
-An infinite `while` loop:
-```
-while (true)
-{
-    // ...
-};
-// or
-while (1)
-{
-    // ...
-};
-```
-
----
-
-<a id="membership-testing-with-in"></a>
-## **Membership testing with `in`**
-Beyond `for (x in y)`, `in` is also a general binary operator usable in any expression context -
-`if`, ternaries, `return`, assignments, anywhere a boolean is expected:
-
-```
-int x = 5;
-int[5] arr = [1, 2, 3, 4, 5];
-
-if (x in arr) { ... };          // true: 5 is an element of arr
-bool found = 3 in arr;
-```
-
-It resolves differently depending on what the needle and haystack look like:
-
-| Needle | Haystack | Behavior |
-|---|---|---|
-| single value | string (`byte*`/`char*`) | true if that single byte/char occurs anywhere in the string |
-| single value | fixed-size or decayed array | true if any element of the array equals the value |
-| array / sub-sequence | string | true if the sequence occurs as a substring |
-| array / sub-sequence | array | true if the sequence occurs as a contiguous sub-sequence anywhere in the array |
-
-```
-byte* greeting = "Hello, World!";
-if ('W' in greeting) { ... };          // true
-if ("World" in greeting) { ... };      // true - substring search
-
-int[6] nums = [1, 2, 3, 4, 5, 6];
-int[2] pair = [3, 4];
-if (pair in nums) { ... };             // true - contiguous sub-sequence
-```
-
----
-
-<a id="singleinitialized-variables-with-singinit"></a>
-## **Single-initialized variables with `singinit`**
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-def foo() -> void
-{
-    singinit int x;
-    x += 1;
-    print(x); print();
-};
-
-def call(int y) -> void
-{
-    if (y == 0) { return; };
-    foo();
-    call(--y);
-};
-
-def main() -> int
-{
-    call(10);
-    return 0;
-};
-```
-
----
-
-<a id="recursion"></a>
-## Recursion:
-```
-def rsub(int x, int y) -> int
-{
-    switch (x == 0 | y == 0)
-    {
-    };
-
-    rsub(--x,--y);
-};
-```
-
----
-
-<a id="strict-recursion-with"></a>
-## Strict Recursion with `<~`:
-Functions that have the recurse return operator will always return to themselves. Their stack frame never grows because they become tail calls, and get optimized as such.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-noopstr m1 = "[recurse ",
-        m2 = "]";
-
-def recurse1(int x) <~ int
-{
-    singinit int y;
-    print(m1); print(y); println(m2);
-    return ++y;
-};
-
-
-def recurse2() <~ void
-{
-    singinit int z;
-    print(m1); print(++z); println(m2);
-};
-
-
-def main() -> int
-{
-    recurse2(); // Step into tail function
-    return 0;
-};
-```
-
-<a id="escaping-strict-recursion-with-escape"></a>
-## **Escaping strict recursion with `escape`**
-`escape` can only be used inside a strictly-recursive function defined with a recurse arrow `<~`. Example:
-```
-def recurse2() <~ void
-{
-    if (!entered_flag) {entered_flag = true;};
-    singinit int z;
-    print(m1); print(++z); println(m2);
-    if (z >= 10) { escape main(); }; // or any other function
-};
-```
-
----
-
 <a id="error-handling-with-trythrowcatch"></a>
 ## **Error handling with `try`/`throw`/`catch`**
 ```
@@ -2360,284 +3254,6 @@ def main() -> int
 
 ---
 
-<a id="enumerated-lists"></a>
-## **Enumerated Lists**
-
-Definition: `enum myEnum {val1, val2, val3, val4, ...};`  
-Instance: `myEnum newEnum;`
-Member access: `newEnum.val1;`
-
-Enumerated lists are type `int` by default. Each item in an enumerated list has an associated ordinality if no value is set. Imagine we want to name index values so we don't have to remember the indexes themselves.
-
-```
-enum Skills
-{
-    FIREBOLT,    // 0
-    ICE_SHARD,   // 1
-    THUNDERSTORM // 2
-    //...
-    // 999
-};
-```
-
-Now say we need something more specific, like named pointers. We can't use `int` on a 64 bit system to store a 64 bit address, so we use a typed enum by putting a type before the `enum` keyword:
-```
-u64 enum PointerMap
-{
-    DedupSchedule   = 0xDEADBEEFCAFEFOOD,
-    ReallocEntities = 0xFFFF00000037EADC,
-    _Function3      = 0xF000000000000001,
-    //...
-    //
-};
-```
-
-Then we can create a function pointer to that function:
-```
-PointerMap pm;
-
-def foo() -> void = (@)pm.DedupSchedule; // (@) treats the value as an address
-
-foo();
-```
-
----
-
-<a id="unions"></a>
-## **Unions**
-
-Prototype: `union myUnion;`  
-Definition: `union myUnion {int iVal; float fVal;};`  
-Insance: `myUnion newUnion;`  
-Instance with assignment: `myUnion newUnion {iVal = 10};`  
-Member access: `newUnion.iVal;`
-
-Unions are similar to structs, the difference is only one of its members can be initialized at any time.  
-Initializing another member changes the actively initialized member.  
-Attempting to access an uninitialized member results in garbage data for that member.
-
-Example:
-
-```
-union myUnion
-{
-    int iVal;
-    float fVal;
-};
-
-myUnion u {iVal = 10};
-
-def main() -> int
-{
-    u.iVal = 10;   // iVal is the active member
-    u.fVal = 3.14; // iVal overwritten by fVal in memory
-};
-```
-
----
-
-<a id="tagged-unions"></a>
-## **Tagged unions**
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-enum ErrorUnionEnum
-{
-    INACTIVE,
-    INT_ACTIVE,
-    LONG_ACTIVE,
-    BOOL_ACTIVE,
-    CHAR_ACTIVE,
-    FLOAT_ACTIVE,
-    DOUBLE_ACTIVE   
-};
-
-union ErrorUnion
-{
-    int  iRval;
-    long lRval;
-    bool bRval;
-    char cRval;
-    float fRval;
-    double dRval;
-} # ErrorUnionEnum; // # is the 'tag' operator
-
-
-def foo() -> ErrorUnion
-{
-    ErrorUnion err;
-
-    err.bRval = false; // Set bool to active element
-    err.# = ErrorUnionEnum.BOOL_ACTIVE;
-
-    return err;
-};
-
-
-def main() -> int
-{
-    ErrorUnion e = foo();
-
-    switch (e.#)
-    {
-        case (ErrorUnionEnum.INT_ACTIVE) -> print("Integer active in error union!\n");
-
-        case (ErrorUnionEnum.LONG_ACTIVE) -> print("Long active in error union!\n");
-
-        case (ErrorUnionEnum.BOOL_ACTIVE) -> print("Bool active in error union!\n");
-
-        case (ErrorUnionEnum.CHAR_ACTIVE) -> print("Char active in error union!\n");
-
-        case (ErrorUnionEnum.FLOAT_ACTIVE) -> print("Float active in error union!\n");
-
-        case (ErrorUnionEnum.DOUBLE_ACTIVE) -> print("Double active in error union!\n");
-    };
-
-    return 0;
-};
-```
-
----
-
-<a id="dict"></a>
-## **Dictionaries**
-
-Definition: `dict{KeyType:ValueType} myDict`  
-
-Dictionaries keys and values can be any types except objects.
-
-Instance with initializer:
-```
-dict{"":""} myDict
-{
-    "Hello": "World!",
-    "hey": "you"
-};
-```
-
-Access: `myDict["Hello"]`  
-Merge: `dict{"":""} merged = myDict + myDict2;`
-
-Dictionaries are key-value stores with a homogeneous key type and homogeneous value type declared in the `dict{K:V}` type specifier.
-```
-dict{"":""} greetings
-{
-    "en": "Hello",
-    "es": "Hola",
-    "jp": "Konnichiwa"
-};
-
-println(greetings["en"]); // Hello
-```
-
-Dictionaries can be passed to and returned from functions using the templated `dict{T:U}` type:
-```
-def foo<T,U>(dict{T:U} d) -> dict{T:U} -> d;
-```
-
-Dictionaries can be merged with `+`:
-```
-dict{"":""} a { "x": "1" };
-dict{"":""} b { "y": "2" };
-dict{"":""} c = a + b;
-```
-
-
-### Inline dict literals with `d{}`
-
-A `d{}` expression creates an anonymous dict inline without declaring a named variable. The result can be immediately accessed with `[key]`:
-
-`byte* status = d{true:"Logged In", false:"Guest"}[a.logged_in];`
-
-When all keys and values are compile-time constants, the entire expression folds at compile time and is baked directly into the binary with no runtime cost.
-```
-// Compile-time constant -- no runtime dict lookup
-byte* msg = d{///some computed dictionary///}[///some computed result index///];
-```
-
-The `[key]` access on a `d{}` expression is handled by the existing array access postfix, so the inline dict participates naturally in any expression context.
-
----
-
-<a id="switching"></a>
-## **Switching**
-`switch` is static, value-based, and non-flexible. Switch statements are for speed.
-```
-switch (e)
-{
-    case (0)
-    {
-        // Do something
-    }
-    case (1)
-    {
-        // Another thing
-    }
-    default
-    {
-        // Something else
-    };
-};
-```
-
-If a case contains only one statement, the braces can be omitted, similar to a single-statement `if`.
-
-## Switch bodies are never optimized away  
-DCE never removes code inside a `switch` body. This is not a conservative optimization setting you can turn off. It follows from how IDEKA values work.
-
-In IDEKA, a literal is a stack object with an address. `switch (5)` does not branch on the compile-time constant 5; it branches on whatever currently occupies the stack slot holding 5. The address of that slot can be taken with `@`, passed to a function, handed to another thread, and written through. Once anything else can reach that address, the value at the slot is no longer known to the compiler, regardless of what it was initialized to.
-
-Constant-folding a `switch` operand would therefore be unsound under IDEKA's pointer model, not merely aggressive. A `switch` body is a DCE root for the same reason volatile memory is: something outside the compiler's model may have written to the operand. The optimizer cannot prove a `case` is unreachable, so it does not pretend to.
-
-This is the same principle as !using, seen from the other end. !using is DCE the programmer invokes deliberately, knowing it may break code. A switch body is the opposite: never DCE'd, because the programmer has no way to prove the operand is stable. DCE only removes what the language can prove is dead, and an addressable literal is never provably dead.
-
----
-
-<a id="namespace-elimination-with-using-or-not-using"></a>
-## **Namespace elimination with `!using` or `not using`**
-
-This is a very heavy-duty form of DCE. By doing `!using` you are totally removing a namespace, which in most cases will cause a number of compiler errors from any code still relying on that namespace being available.
-Once `!using` is used somewhere, it is permanent. This is not recommended for code elimination unless you know what you're doing and intend this.
-```
-!using standard::io::file; // anything that was written with `standard::io::file` available will now error.
-
-not using some::specific::namespace;
-```
-
----
-
-<a id="deprecation-with-deprecate"></a>
-## **Deprecation with `deprecate`**
-```
-#import <standard.idk>;
-
-namespace test1
-{
-    namespace test2
-    {
-        def foo() -> void {};
-    };
-};
-
-deprecate test1::test2;
-
-def main() -> int
-{
-    test1::test2::foo();
-
-    return 0;
-};
-```
-Compiling gives this output:
-```
-✗ Compilation failed: Deprecated namespace 'test1::test2' is still referenced:
-Function call test1__test2__foo()
-```
-
----
-
 <a id="assertion-with-assert"></a>
 ## **Assertion with `assert()`**
 `assert` automatically performs `throw` if the condition is false if it's inside a try/catch block,
@@ -2661,164 +3277,6 @@ def main() -> int
     };
     return x;
 };
-```
-
----
-
-<a id="heap-allocation"></a>
-## **Heap allocation**
-```
-heap int x = 5;      // Allocate
-(void)x;             // Deallocate
-```
-
-`(void)` casting works on both stack and heap allocated items.  
-If you do this to a stack element, it is nulled, and all references invalidated. You will need to redeclare `x`.
-Doing this to a heap element will call `ffree()` under the hood.
-
-Allocating with `heap` calls `fmalloc(sizeof(T))` under the hood. `x` is a pointer.
-
-<a id="freeing-from-the-heap"></a>
-## **Freeing from the heap**
-IDEKA's standard heap allocator is **incompatible** with C's `malloc` and `free`.
-
-You **must** use `ffree` for anything allocated with `fmalloc`, including `heap` allocations.  
-Alternatively you may void cast.
-
----
-
-<a id="the-ditto-operator"></a>
-## **The Ditto Operator `#"`**
-The ditto operator repeats the previous initializer expression in a multi-declarator variable declaration. It is shorthand for writing the same expression again.
-
-```
-ulong p0 = alloc_stub_page(),
-      p1 = alloc_stub_page(),
-      p2 = alloc_stub_page(),
-      p3 = alloc_stub_page(),
-      p4 = alloc_stub_page(),
-      p5 = alloc_stub_page();
-```
-Is identical to:
-```
-ulong p0 = alloc_stub_page(),
-      p1 = #",
-      p2 = #",
-      p3 = #",
-      p4 = #",
-      p5 = #";
-```
-
-This works for any initializer expression, including those with side effects:
-```
-int i;
-int x = ++i,   // 1
-    y = #",    // 2
-    z = #";    // 3
-```
-Each `#"` produces an independent evaluation of the repeated expression - it is not a reference to the prior variable's value.
-
-`#"` must be followed immediately by `,` or `;` in variable declarations. It is not valid as part of a larger expression (for now).
-
----
-
-### **Repeating Statements With Ditto**  
-Using `#"` on its own line will repeat the statement previous to it.  
-Here's a simple example that should be straightforward enough to understand in all applications. Try not to invent edge cases, they don't exist. If the parser would error, it's not an edge case, it's an error.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-def main() -> int
-{
-    println("Hello!");
-    #";
-    return 0;
-};
-```
-Result:
-```
-Hello!
-Hello!
-```
-
----
-
-### **Parameterized Ditto in Function Calls**
-
-`#"` may also appear as a function call argument, where it repeats the argument at the same position from the immediately preceding statement, provided that statement was a call to the same function with the same arity.
-
-```
-foo(x, y, z);
-foo(y, #", z);   // identical to foo(y, y, z)
-```
-
-Each `#"` is replaced by a copy of the corresponding positional argument from the previous call - independently evaluated, not a reference.
-
-```
-foo(x, y, z);
-foo(#", #", #");  // identical to foo(x, y, z)
-```
-
-The previous statement must satisfy all of the following, or it is a compiler error:
-
-- It must be a function call statement (not an expression like `a + b`, a variable declaration, a control statement, etc.)
-- It must be a call to the same function name
-- It must have the same number of arguments
-
-```
-foo(x, y, z);
-bar();
-foo(x, #", #");   // error: previous statement was bar, not foo
-
-foo(x, y);
-foo(x, #", #");   // error: arity mismatch (2 vs 3)
-
-foo(x, y, z);
-a + b;
-foo(x, #", #");   // error: previous statement is not a function call
-```
-
-Ditto in argument lists always refers to the **previous statement**, not the previous argument. Chaining across multiple calls works naturally:
-
-```
-foo(x, y, z);   // prints "1 2 3"
-foo(#", #", #"); // prints "1 2 3"
-foo(#", #", #"); // prints "1 2 3"
-```
-
-Example program:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-
-def foo(int a, int b, int c) -> void
-{
-    println(f"{a} {b} {c}");
-};
-
-def main() -> int
-{
-    int i;
-    int x = ++i,
-        y = #",
-        z = #";
-
-    foo(x, y, z);
-    foo(y, #", #");
-    foo(z, #", #");
-
-    return 0;
-};
-```
-Output:
-```
-1 2 3
-2 2 3
-3 2 3
 ```
 
 ---
@@ -2959,8 +3417,6 @@ spliced into the operator's generated function body at compile time, so they run
 that dispatches to that specific overload, whether the call arrived through the
 rewritten-call-site path (new symbols) or the type-matched-dispatch path (built-in overloads).
 
----
-
 <a id="variadic-operators"></a>
 ## **Variadic Operators**
 A variadic operator is one symbol used in a chain of operands. Every use of the symbol and every operand is recorded, and the same operator function receives four values describing the chain:
@@ -3012,8 +3468,6 @@ Is ## leading:  true
 Is ## trailing: true
 ```
 
----
-
 <a id="contracts-on-operators"></a>
 ## Contracts on operators:
 ```
@@ -3042,424 +3496,6 @@ def main() -> int
 ```
 Result at runtime:
 `a must be nonzero`
-
----
-
-<a id="expressionbased-macros-with-macro"></a>
-## **Expression-based macros with `macro`**
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-macro xyz(a,b,c)
-{
-    (a + b) ^ c
-};
-
-def main() -> int
-{
-    int x, y, z = 1, 2, 3;
-
-    println(f"xyz(abc) = {xyz(x,y,z)}");
-
-    return 0;
-};
-```
-- The `println` string turns into:
-```
-println(f"xyz(abc) = {(1 + 2) ^ 3}");
-```
-Result:
-`xyz(abc) = 27`
-
----
-
-<a id="defining-type-functions"></a>
-## **Defining Type Functions**:
-IDEKA has the ability to define functions for a given type, allowing `.` call notation on a value or variable of that type.
-Inside of a type function `_` is reserved, and acts as the `this` parameter.
-```
-// noopstr is alias for byte*
-noopstr.add_world() -> noopstr
-{
-    return _ + ", World!";  //  "Hello".add_world() == return "Hello" + ", World!"
-};
-
-/// Alternatively, you may use "" - Note this is special for type functions ///
-"".add_world() -> ""
-{
-    return _ + ", World!";
-};
-```
-
-You can use plain types or pointer types, and named struct types, like so:
-```
-struct MyStru
-{
-    // .. members ..
-};
-
-MyStru.mystru_func1() -> MyStru
-{
-    // impl
-};
-```
-
-You may also use tied ~types:
-```
-~byte*.sub11() -> ~byte*
-{
-    return _[0] - 11; // set first char - 11, _ is tied type, no need for explicit move
-};
-```
-
-You can make literal modifiers as well by using `0` with an appropriate suffix:
-```
-0.my_int_func() -> int   // 55.my_int_func()
-{
-    return _;
-};
-
-0l.my_long_func() -> long
-{
-    return _;
-};
-
-0d.my_double_func() -> double
-{
-    return _;
-};
-
-struct.my_struct_func() -> struct
-{
-    // impl for your arbitrary struct func
-};
-```
-
-<a id="functionless-types"></a>
-## Functionless Types
-
-To forbid a type from having functions, you can declare it with `data!` like so:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-data!{32} as u32i;
-
-u32i.foo() -> u32i { return 0u; };
-
-def main() -> int
-{
-    return 0;
-};
-```
-
-The compiler will error with:  
-`✗ Compilation failed: Type u32i is non-functional (declared with data!) and cannot have type functions defined on it at x:y`
-
----
-
-<a id="templates"></a>
-## <**Templates**>  
-Templates in IDEKA are extremely simple.
-
-There are no keywords for templates, only syntax, and involve only type substitution.  
-There is no SFINAE, so templates are not subject to the pitfalls SFINAE allows.  
-
-Templates can be applied to functions, structs, objects, and custom operator definitions.
-
-Here's an example of using a template:
-```
-#import <standard.idk>;
-
-
-def foo<T>(T x) -> T
-{
-    return x;
-};
-
-
-def main() -> int
-{
-    float y = foo<float>(5.5f);
-    int z = foo<int>(3);
-
-    println(y);
-    println(z);
-
-    system("pause");
-    return 0;
-};
-```
-
-The compiler can also infer templates at call sites, so you don't end up with a mess of angle brackets:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-struct myStru<T>
-{
-    T a, b;
-};
-
-def foo<T, U>(T a, U b) -> U
-{
-    return a.a * b;
-};
-
-def bar(myStru<int> a, int b) -> int
-{
-    return foo(a, 3); // inferred from signature via 'a'
-};
-
-def main() -> int
-{
-    myStru<int> ms = {10,20};
-
-    //int w = foo<myStru<int>, int>(ms, 3); // <brackets> at call site
-
-    int x = foo(ms, 3); // inferred locally
-
-    int y = bar(ms, 3);
-
-    println(x == y);
-    return 0;
-};
-```
-
-## Template Constraints:
-You can add constraints to template parameters on their allowed types like so:
-```
-<T: int | i32, U: long | i64>
-```
-The syntax is `Param: type (| type)*` comma separated.
-
-Here's an example:
-```
-#import <standard.idk>;
- 
-using standard::io::console;
-
-"".idk<T: "", U: "">(T x, U y) -> ""
-{
-    return _ + f"{x} {y}";
-};
-
-def main() -> int
-{
-    byte* new = "Hello".idk(",", "World!");
-    println(new);
-    return 0;
-};
-```
-"new" isn't a keyword in IDEKA, so this is fine.
-
-To set a default type constraint, use `+` before the type like so:
-```
-<T: +float | int>
-```
-To enforce no default constraint, use `!+` before your parameter like so:
-```
-<!+T: float | int>
-```
-Using `+` on any constraint type when the parameter has no default set with `!+` will throw a compiler error.
-
-## Templates and Type Relationships
-IDEKA allows ways to describe how a type - or pair of types - can behave.
-
-There is a dedicated type relationships operator set specifically to describe relations between types.  
-Since all operators are binary, to perform a unary operation, you do `A <op> A`, which is type self-referential.  
-All template type relationships operators are distinct and not related to regular operators and cannot be overloaded.
-
-See the [Algebraic Types](https://github.com/kvthweatt/IDEKA/blob/main/docs/algebraic_types.md) documentation for more details on the operators.
-
-To use type relationships expressions, they must be constrained in a set.
-
-Here's the same example using `~=`, the "must be compatible" operator, and the `:{}` set constraint.
-```
-#import <standard.idk>;
- 
-using standard::io::console;
-
-"".idk<T: "", U: "", :{T ~= U}>(T x, U y) -> ""
-{
-    return _ + f"{x} {y}";
-};
-
-def main() -> int
-{
-    byte* new = "Hello".idk(",", "World!");
-    println(new);
-    return 0;
-};
-```
-
-You can separate expressions with a comma like:
-```
-#import <standard.idk>;
- 
-using standard::io::console;
-
-"".idk<T: "", U: "", :{T ~= U, T !`< U}>(T x, U y) -> ""
-{
-    return _ + f"{x} {y}";
-};
-
-def main() -> int
-{
-    byte* new = "Hello".idk(",", "World!");
-    println(new);
-    return 0;
-};
-```
-
-However, you do not have to comma separate, and can instead write them circularly.  
-Circular expressions can be very long, terse, and carry a lot of meaning.  
-Example:
-```
-D !~= B & [A !@ A] !~= C !`< D !-= A
-```
-This reads as (inner most []):  
-- Values of type A cannot have an address taken of them  
-- D must be incompatible with B and A  
-- B and A must be incompatible with C  
-- C and D independently cannot be used in an expression where bit lowering would occur  
-- D cannot be used in signed operations with A
-
-There is a similar relationship here, `D !~= A & B !~= C`. This means `D ~= C` by relation, and doesn't need to be explicitly defined.  
-This is the type geometry of IDEKA.
-
-This can be hard to see if you do not write your expression with care, because you may intend `D !~= C`. See the following:
-```
-C !~= D !~= B & [A !@ A] !~= C !`< D !-= A
-```
-
-Just place the relationship in an open position.
-
-No one wants to see that long expression in their template definition, that's why `constraint` exists.  
-`constraint` creates named, generic and parameterized relational expression sets that can be used with a template like so:
-```
-#import <standard.idk>;
- 
-using standard::io::console;
-
-constraint MyCS(A)
-{
-    A !`< A    // This is a unary expression, read as the relation !`< "between A types"
-};
-
-def foo<T: int, :{MyCS}>(T x) -> byte
-{
-    return 5 + x; // lowering would occur here, violating MyCS
-};
-
-def main() -> int
-{
-    foo(10);
-    return 0;
-};
-```
-Compiler will output:
-```
-✗ Compilation failed: Type relation T !`< T violated: illegal truncation on int at 12:5
-    return 5 + x;
-----^ // 5 + x will lower to byte
-```
-
-**The complete type-relationship operator set** and what each one enforces once a template is
-instantiated with concrete types:
-
-| Operator | Meaning | Scope |
-|---|---|---|
-| `~=` | The two types must be **compatible** | pairwise |
-| `!~=` | The two types must be **incompatible** | pairwise |
-| `!@` | A variable of this type must never have its address taken (`@`) anywhere in the template body | independent |
-| `` !`< `` | This type must never appear as either side of a narrowing (truncating) conversion in the body | independent |
-| `` !`<= `` | A narrowing conversion specifically **between these two named types** is forbidden | between |
-| `` !`> `` | This type must never appear as either side of a widening conversion in the body | independent |
-| `` !`>= `` | A widening conversion specifically **between these two named types** is forbidden | between |
-
-"Compatible" (for `~=`/`!~=`) means: both types are pointers or both are non-pointers; if both
-are pointers, their pointer depth matches; and if both have a known bit width, the widths are
-equal.
-
-The **independent** vs **between** distinction matters once more than two parameters are in
-play. `` T !`< T `` (independent, self-referential, as in the `MyCS` example above) forbids `T`
-from ever being narrowed by *anything* - any cast or implicit arithmetic narrowing involving
-`T`'s width is a violation, regardless of what the other side of that conversion is.
-`` T !`<= U `` (between) only forbids narrowing conversions where *both* the source and
-destination widths belong to `{T, U}` specifically - narrowing `T` to some unrelated third type
-is still allowed.
-
-These checks aren't purely static type comparisons - for the truncation/widening operators, the
-compiler walks the instantiated function body looking for the actual operations that would
-violate the constraint: explicit casts (`(Type)expr`), `return` statements whose expression is
-wider or narrower than the declared return type, and ordinary arithmetic where an implicit
-narrowing happens because one operand is wider than the other. This is exactly how the `MyCS`
-example above produces a violation from `return 5 + x;` with no explicit cast in sight - the `+`
-between an `int` literal and a `byte`-constrained `x` implicitly narrows the result, and that
-narrowing context is what gets flagged.
-
-**Joining multiple names with `&`** lets one relation apply to a whole group of parameters at
-once: `T & U ~= V` requires *both* `T` and `U` to individually satisfy `~= V`. This reuses the
-ordinary `&` (logical AND) token, but inside a constraint set it's a list-joiner for the
-relation's operands, not a boolean evaluation of two relation results.
-
-You can comma separate named constraints in your template definition like so:  
-`<T: int, :{MyCS1, MyCS2, MyCS3}>`
-
-Template constraints can be used in any template, including operator, struct, and object templates.
-
-**Named constraint sets can be merged**, combining the relations of two or more existing sets
-into a new one:
-```
-constraint MyCS3 = MyCS1 + MyCS2;
-```
-All sources must declare the same number of parameters. The merged set adopts the first
-source's parameter names unless you supply your own rename list before the `=`:
-```
-constraint MyCS3(M, N) = MyCS1 + MyCS2;
-```
-Relations from every source are carried over into the merged set, with each source's own
-parameter names remapped to the merged set's names.
-
-```
-struct myStru<A,B>
-{
-    A ax, ay, az;
-    B bx, by, bz;
-};
-```
-Composition and templates can be combined, however they **will** shadow.
-```
-struct myStru1<A,B>
-{
-    A a1x, a1y;
-    B b1x, b1y;
-};
-
-struct myStru2<A,B,C> : myStru1
-{
-    A a2x, a2y, a2z;
-    B b2x, b2y, b2z;
-};
-
-// Becomes,
-
-struct myStru2<A,B,C>
-{
-    A a1x, a1y;
-    B b1x, b1y;
-    A a2x, a2y, a2z;
-    B b2x, b2y, b2z;
-};
-```
-If you intended for `a1x` to be a different type than `a2x`, you must use different parameter names.
-
-Structs cannot contain objects, but objects can contain structs. This means struct template parameters cannot be `object` type.
 
 <a id="templating-operators"></a>
 ## Templating operators:
@@ -3528,71 +3564,6 @@ def main() -> int
 };
 ```
 Result: `60`
-
----
-
-<a id="advanced-pointer-manipulation"></a>
-## **Advanced pointer manipulation**
-
-<a id="taking-address-of-literals"></a>
-### Taking address of literals
-```
-// You can take the address of a literal value
-int* p = @42;
-print(*p);  // 42
-
-// The address can be manipulated as an integer
-unsigned data{64}* as u64ptr;
-u64ptr addr = (u64ptr)p;
-addr += 8;  // Move 8 bytes forward in memory
-int* p2 = (int*)addr;
-
-// Pointer arithmetic on literal addresses
-int* base = @100;
-int* offset = base + 5;
-*offset = 200;  // Writing to calculated memory location
-```
-
-<a id="pointer-to-integer-conversions"></a>
-### Pointer to integer conversions
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-def main() -> int
-{
-    uint x, y = 10, 0;
-
-    uint* px, py = @x, @y;
-
-    // A pointer is simply a variable and its value is an address
-    // An address is a number.
-    // Therefore, we can store that address
-    //
-    u64 kx = px;
-
-    // (@) is address-cast. It reinterprets the number as an address
-    // When we treat a number as an address, we call that a pointer.
-    // Therefore, we can assign this to another pointer.
-    //
-    py = (@)kx;
-
-    // py now points to x
-
-    // Dereference py to get the value at the address
-    // Cast to make sure it's the proper type to print
-
-    if (x == 10 & y == 0 & *py == x & px == py & px == (@)kx)
-    {
-        print("Success, y unchanged, py points to x.\n");
-        print((uint)*py);
-        return 0;
-    };
-
-        return 0;
-};
-```
 
 ---
 
@@ -4527,6 +4498,41 @@ Pass 4 collects all of the emitted fragments in order and finalizes `dispatch` a
 | Pass 4 | All collected `emitideka` fragments are finalized into the surrounding scope |
 
 This means emitted definitions are always available to runtime code, but are not visible to other `comptime` blocks that execute before Pass 4.
+
+---
+
+<a id="you-can-also-use-inline-assembly-directly"></a>
+## You can also use in-line assembly directly:
+Assembly in IDEKA is done AT&T style.  
+The constraints follow the block in the pattern `outputs : inputs : clobbers`
+Here's an example:
+```
+_exchange64(i64* ptr, i64 value, i64* out) -> void
+{
+    #ifdef __ARCH_X86_64__
+    volatile asm
+    {
+        movq $0, %rsi
+        movq $2, %rdi
+        movq $1, %rax
+        xchgq %rax, (%rsi)
+        movq %rax, (%rdi)
+    } : : "r"(ptr), "r"(value), "r"(out) : "rax", "rsi", "rdi", "memory";
+    #endif;
+    #ifdef __ARCH_ARM64__
+    volatile asm
+    {
+    .retry_xchg64:
+        ldaxr x0, [$0]
+        stlxr w3, x1, [$0]
+        cbnz  w3, .retry_xchg64
+        str   x0, [$2]
+    } : : "r"(ptr), "r"(value), "r"(out) : "x0", "w3", "memory";
+    #endif;
+};
+```
+Here, the clobber list is `"r"(ptr), "r"(value), "r"(out) : "x0", "w3", "memory";`  
+Using `volatile` tags the assembly block for the compiler, saying do not touch this for any reason.
 
 ---
 
