@@ -4040,6 +4040,37 @@ If your program is x86_64 and you point at a run of ARM64 bytes, calling that po
 
 This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing any bytes destined for execution in any application.
 
+<a id="code-smuggling"></a>
+## **Code Smuggling**
+Code smuggling is achieved by hiding machine bytes in the symbol table, rather than in `.text`.  
+We're going to slightly modify the previous example for ACE.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+byte[] str_lol = g"\x48\x31\xC0\xC3";  // xor rax,rax ; ret
+
+def f"{str_lol}"() -> void
+{
+    ->; // null sub
+};
+
+def main() -> int
+{
+    // Execute normally
+    f"{str_lol}"(); // direct call
+
+    {}*f()->void @= str_lol;
+
+    f(); // call through pointer
+    
+    return 0;
+};
+```
+
+Here, the real machine bytes are stored somewhere else, and disassemblers will interpret the real function as a null sub containing no instructions.
+
 ---
 
 <a id="ownership-with-the-tie-operator"></a>
