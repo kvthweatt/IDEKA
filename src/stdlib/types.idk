@@ -1,6 +1,6 @@
 // Author: Karac V. Thweatt
 
-// Reduced Specification Standard Library `types.idk` -> `redtypes.idk`
+// Standard Library `types.idk`
 #ifndef IDEKA_STANDARD
 #def IDEKA_STANDARD 1;
 #endif;
@@ -10,10 +10,10 @@
 
 namespace standard
 {
-	namespace types
-	{
-		unsigned data{4} as nybble;
-        byte[] as noopstr;
+    namespace types
+    {
+        unsigned data{4} as nybble;
+        data{8}[] as noopstr;
         unsigned data{16} as u16;
         unsigned data{32} as u32;
         unsigned data{64} as u64;
@@ -137,7 +137,7 @@ namespace standard
         {
             return (value & (alignment - 1)) == 0;
         };
-	};
+    };
 };
 
 using standard::types;

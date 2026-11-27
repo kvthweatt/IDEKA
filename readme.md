@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/wVAm2E6ymf">Discord</a> ·
+  <a href="https://discord.gg/Y9RhdWThmB">Discord</a> ·
   <a href="https://IDEKAspl.org/ide">Online Compiler</a> ·
   <a href="docs/Specs/language_specification.md">Language Specification</a> ·
   <a href="docs/learn_IDEKA_intro.md">Getting Started</a>
@@ -769,7 +769,7 @@ The syntax and grammar are stable and will not change. The compiler works. Real 
 
 ## Get involved
 
-- **Discord:** [discord.gg/wVAm2E6ymf](https://discord.gg/wVAm2E6ymf)
+- **Discord:** [discord.gg/wVAm2E6ymf](https://discord.gg/Y9RhdWThmB)
 - **Online IDE:** [IDEKAspl.org/ide](https://IDEKAspl.org/ide)
 - **GitHub:** [github.com/kvthweatt/IDEKALang](https://github.com/kvthweatt/IDEKALang)
 

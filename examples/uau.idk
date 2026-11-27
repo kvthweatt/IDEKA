@@ -1,6 +1,8 @@
+#def std standard;
+
 #import <standard.idk>;
 
-using standard::io::console;
+using std::io::console;
 
 println(~byte* msg) -> void
 {
@@ -13,7 +15,7 @@ main() -> int
 
     println(x);
 
-    //println(x);
+    println(x);
 
     -> 0;
 };
