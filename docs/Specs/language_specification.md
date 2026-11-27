@@ -816,7 +816,7 @@ def main() -> int
 
 <a id="bit-pointers"></a>
 ### Bit Pointers  
-A bit pointer holds the address of a single bit. It is the addressable counterpart to bit indexing: `val[n]` reads bit n as a value, while `@val[n]` produces a pointer to that bit that can be stored, passed, and written through later. The pointee type names the storage the bit lives in, not the width of the read or write - a bit pointer always addresses exactly one bit.
+A bit pointer holds the address of a single bit. It is the addressable counterpart to bit indexing: **val[\`n]** reads bit n as a value, while **@val[`n]** produces a pointer to that bit that can be stored, passed, and written through later. The pointee type names the storage the bit lives in, not the width of the read or write - a bit pointer always addresses exactly one bit.
 
 ```
 type`* iden;      // declare a bit pointer
