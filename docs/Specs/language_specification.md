@@ -3417,7 +3417,7 @@ spliced into the operator's generated function body at compile time, so they run
 that dispatches to that specific overload, whether the call arrived through the
 rewritten-call-site path (new symbols) or the type-matched-dispatch path (built-in overloads).
 
-<a id="variadic-operators"></a>
+<a id="variadic-operator"></a>
 ## **Variadic Operators**
 A variadic operator is one symbol used in a chain of operands. Every use of the symbol and every operand is recorded, and the same operator function receives four values describing the chain:
 

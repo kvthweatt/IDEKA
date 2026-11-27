@@ -15,14 +15,14 @@
 
 IDEKA ("I Don't Even Know Anymore") is a compiled, statically typed systems programming language with the performance of C and a type system that goes further than C in every direction that matters.
 
-- **Operators are part of the grammar.** Every operator you declare, made of punctuation or words, becomes part of the language's grammar, the same as the built-in ones.
-- **Bits are first class.** Bit slices, bit indexing, arbitrary-width integers, and endianness live in the type system.
-- **Compile-time code generation.** A built-in VM runs IDEKA at compile time and `emitideka` writes new definitions into your program.
-- **Interfaces** that govern which objects may call, feed, and be called from which other objects, enforced by the compiler.
-- **A module system** with per-module build settings, declared dependencies, and overrides.
-- **Contracts, templates with type geometry constraints, opt-in ownership, and a completely optional borrow checker.**
+- **Endianness as a type property:** The compiler can catch a big-endian typed value passed to a little-endian typed parameter and convert values on assignments crossing an endianness-barrier, totally eliminating entire classes of functions and footguns where you forget to swap bytes.
+- **Bits are first class.** Bits can be sliced, iterated over, indexed from a value, and you can take slices of slices. You can snip out a run of bits from the middle of a struct, across member boundaries, or from any starting position with bit pointers. This eliminates the headache of bit shifting and masking boilerplate which we've all gotten used to by writing wrappers over our operations.
+- **Compile-time code generation.** A built-in VM runs IDEKA at compile time and `emitideka` writes new definitions into your program. Write regular loops, emit regular code. There is no token parsing exposed so the language can't be changed per domain. This eliminates the ability to change the language in unexpected ways. Ideka's grammar and syntax was very deliberately designed, allowing arbitrary token parsing via some kind of macro hook would totally ruin that. You never have to wonder what context you're in or if someone's token parser has an edge case.
+- **Interfaces** that govern which objects may call, feed, and be called from which other objects, enforced by the compiler. More than just a list of "what this one thing can do". It's a data flow protocol between two or more objects. Calling a function is not passing data, passing data by parameter is calling a function. Returning data is passing data, but not by parameter. The relationships are asymmetrical, with more in development.
+- **A module system** with per-module build settings, declared dependencies, and overrides, and the ability to lock build settings from being overridden by other modules. An example is the borrow check flag - some module X can lock this as true, and any other module using X cannot turn the borrow checker off for X. Libraries with modules can carry their own safety with them.
+- **Effects:** Instead of hard-coded compiler knowledge of IO and other effects found in most languages with them, Ideka effects are inert labels - the active parts doing the work are the operators which relate effects together. `!@` means not-attenuatable, meaning this effect propagates up to callers and cannot be laundered away. For example, the functions `print()` and `println()` have `#effect {!@IO}`, meaning functions calling `print` and `println` will have `IO` in their effect set, and `# attenuate {IO}` on the parent function will be a compiler error. 
 
-It is not a C derivative, and it is not a safe language in the Rust sense. It is a high-trust language that gives you sharp tools and expects you to use them correctly. It is dense, with a low learning curve and a high skill ceiling.
+It is not a C derivative, and it is not a safe language in the Rust sense. It is a high-trust language that gives you sharp tools and expects you to use them correctly. It is dense, with a low learning curve and a high skill ceiling. Most languages give you some form of type safety, IDEKA lets you create your own.
 
 The language was previously called Flux. Some names in the compiler still carry it and will follow the new names in upcoming patches.
 
@@ -33,7 +33,7 @@ The native compiler code will remain syntax compliant with v1.6.1 of the Python 
 
 ---
 
-## A first look
+## A First Look
 
 A struct filled in with a block, a byte pulled apart with bit slices, the bits reversed in one assignment, and a three-way comparison operator the language does not ship with:
 
@@ -68,13 +68,9 @@ def main() -> int
 11 4 45 -1
 ```
 
-Every one of those lines is a feature the rest of this page takes apart.
+## Define Your Own Operators
 
----
-
-## Define your own operators
-
-Declaring an operator extends the grammar. It can be punctuation or a word, and it can take any types you like.
+Declaring an operator extends the grammar. It can be punctuation or a word, and it can take any types you like. You can define unary prefix and postfix like `&a` or `b&`, binary like `a %% b`, ternary like `a <: b :> c`, circumfix like absolute value `|x|`, and a new kind of operator called a <a href="https://github.com/kvthweatt/IDEKA/blob/main/docs/Specs/language_specification.md#variadic-operator">variadic operator</a>. The stdlib does not actively declare or use any operators that are not built-in to the compiler such as `%%` or `<:` for auditability.
 
 ```
 struct Vec2 { float x, y; };
