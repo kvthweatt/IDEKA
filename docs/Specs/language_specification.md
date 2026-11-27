@@ -1,16 +1,17 @@
 <a id="IDEKA"></a>
 # IDEKA
 
-IDEKA is a compiled, general purpose programming language formerly known as IDEKA.
+IDEKA is a compiled, general purpose programming language.
 
-It's easy to write as it does not require to use its higher level constructs. The learning curve is low, but the skill ceiling is high.  
+If you're coming from C-like languages it will feel similar but different.  It removes a lot of C's footguns such as operator precedence being more natural, disallowing assignment inside conditional contexts like `while ((x = y.next()) != true)`, and more. If you're coming from C++ you'll get relief using templates. If you're coming from Rust you'll still have a borrow checker but not a gatekeeper - you can still turn it on and get safety when you're ready to tighten up your code. If you're coming from Python, you'll love to hear there's array comprehension and a few other Pythonic niceties. This language is a combination of everything I like from every language I've used or tried, and nothing I don't, as well as things found nowhere else like [variadic operators](#variadic-operator).
 
-If you like IDEKA, please consider contributing to the language or joining the [IDEKA Discord server](https://discord.gg/RAHjbYuNUc) where you can ask questions, provide feedback, and talk with other IDEKA enjoyers!
+IDEKA was designed primarily for reverse engineering and secondarily for general purpose software development. As a result, a lot of features are pushed into the language itself. Endianness as a type property means the compiler can reason about code and catch when you pass a big endian type to a little endian parameter or vice-versa. A set of built-in effects allow you to tag functions in ways the compiler can reason about, allowing you to write an allocator which the borrow checker can reason about as an allocator. You can also create new effects with their own properties. Interfaces are inter-object protocols which govern data flow, not simply function lists.
 
-**Creator note:** Everything in IDEKA is **stack allocated** unless specified.  
-- This means you are likely to introduce stack overflows if you perform stack allocations inside loops such as declaring a new variable each time a loop passes. Making the declaration a singleton is one way to solve this.
+Everything in IDEKA is **stack allocated** unless specified. If you write variable declarations inside a loop, you get multiple stack slots allocated. Hoist your declarations above and outside your loops or use singletons with `singinit`. You must manually use the heap with the `heap` keyword in declarations, or, using the standard heap allocator `fmalloc()`. A thread-safe version is a available as well, `standard::allocators::threaded::tfmalloc()`
 
-IDEKA was designed primarily for reverse engineering and secondarily for general purpose software development.
+If you like IDEKA, please consider contributing to the language or joining the [IDEKA Discord server](https://discord.gg/Y9RhdWThmB) where you can ask questions, provide feedback, and talk with other IDEKA enjoyers!
+
+\- Karac
 
 ---
 
@@ -77,7 +78,7 @@ IDEKA was designed primarily for reverse engineering and secondarily for general
   - [Templating operators](#templating-operators)
   - [Combining templates, contracts, and operators](#combining-templates-contracts-and-operators)
   - [Advanced pointer manipulation](#advanced-pointer-manipulation)
-    - [Taking address of literals](#taking-address-of-literals)
+    - [Taking the address of literals](#taking-address-of-literals)
     - [Pointer to integer conversions](#pointer-to-integer-conversions)
   - [Memory Layout and Alignment Tricks](#memory-layout-and-alignment-tricks)
     - [Bit-Field Manipulation](#bitfield-manipulation)
@@ -104,7 +105,7 @@ IDEKA was designed primarily for reverse engineering and secondarily for general
     - [`void` semantics](#void-semantics)
 - [Calling Conventions](#calling-conventions)
 - [Stringification with `$`](#stringification-with)
-- [Codification](#codification)
+- [Codification with `~$`](#codification)
 - [The Ditto Operator](#the-ditto-operator)
 - [Compile Time Execution with `comptime`](#compile-time-execution-with-comptime)
 - [Emitting code back into your source file with `emitideka`](#emitideka)
@@ -118,273 +119,494 @@ IDEKA was designed primarily for reverse engineering and secondarily for general
   - [All types](#all-types)
   - [Preprocesor directives](#preprocesor-directives)
 
+<a id = "declaring-types"></a>
+## **Declaring Types & the Type System**
+The Ideka type system is highly permissive and largely determines compatibility of types by their bit width.  
+If you have an array of 4 bytes, they can pack into a 32-bit integer; 8 bytes packs into a 64-bit integer. The type system will happily put data wherever and however you like. Type safety is achieved in a number of ways, including but not limited to [ownership and movement](#ownership-with-the-tie-operator), [object-to-object interfaces](#interfaces), [tagged unions](#tagged-unions) with [exhaustive switch](#switching), and more.
 
-<a id="functions"></a>
-## **Functions**
+Ideka is left-hand side (LHS) typed, like C. The only exception is with function signatures, and this is because of custom operators. It should be noted there are very few exceptions like this, and is not the rule for this language. Everything is pattern-based and once you understand the underlying perspective, it's very easy to reason about code.
 
-You cannot define a function within a function. They must be module, namespace, or object level.
-
-Prototype:
-```
-// Single declaration
-def name(parameters) -> void;
-
-// Multi-declaration
-def name(int) -> bool,
-    name(float) -> void,
-    name(char*) -> int;   // Can prototype multiple functions at once, comma separated signatures.
-```
-Prototype signatures do not need a variable name, only types like `def foo(int,int,void*)->bool;`
-
-Signature:
-```
-def name (parameters) -> return_type
+The standard types found in `src/stdlib/types.idk` includes primitives that are built from the `data` keyword.
+```ideka
+namespace standard
 {
-    return return_value;
+    namespace types
+    {
+        unsigned data{4} as nybble;
+        byte[] as noopstr;
+
+        unsigned data{16} as u16;
+        unsigned data{32} as u32;
+        unsigned data{64} as u64;
+
+        signed data{8}  as i8;
+        signed data{16} as i16;
+        i16 as short;
+        u16 as ushort;
+        signed data{32} as i32;
+        signed data{64} as i64;
+
+        // ============ POINTER TYPES ============
+        byte* as byte_ptr;
+        i32* as i32_ptr;
+        i64* as i64_ptr;
+        void* as void_ptr;
+        noopstr* as noopstr_ptr;
+
+        // ============ SYSTEM TYPES ============
+        // Platform-dependent pointer-sized integers
+        #ifdef __ARCH_X86_64__
+        i64* as intptr;
+        u64* as uintptr;
+        i64 as ssize_t;
+        u64 as size_t;
+        #endif;
+        
+        #ifdef __ARCH_ARM64__
+        i64* as intptr;
+        u64* as uintptr;
+        i64 as ssize_t;
+        u64 as size_t;
+        #endif;
+
+        #ifdef __ARCH_X86__
+        i32* as intptr;
+        u32* as uintptr;
+        i32 as ssize_t;
+        u32 as size_t;
+        #endif;
+
+        i16 as wchar;
+
+        // ============ NETWORK/ENDIAN TYPES ============
+        // Big-endian types (network byte order)
+        data{16::1} as be16;
+        data{32::1} as be32;
+        data{64::1} as be64;
+
+        // Little-endian types (host byte order)
+        data{16::0} as le16;
+        data{32::0} as le32;
+        data{64::0} as le64;
+```
+
+Single-line comments are C-style, with multiline being a triple-slash `///` for open and close `///`.
+
+Here we immediately see a few *strange* things. Firstly, `data` is a reserved keyword. This is a "super-primitive", this is how you define primitive types. Secondly, `noopstr` probably jumps out at you as well. Most other things are recognizable beyond that if you're already a programmer.
+
+<a id="the-data-keyword"></a>
+## **The `data` keyword**
+
+`data` is a variable bit width, primitive datatype creation keyword. Anything can cast to it, and it can cast to any primitive like char, int, float, and so on, including custom ones you've made with it. It is intended to allow you to build any basic integer type to fit their needs. Data types use big-endian byte order by default (when unspecified), bit width bust always be specified, and alignment cannot be less than the bit width.
+
+Syntax for declaring a datatype:
+
+```
+data {bit width : alignment : endianness} (as) your_new_type
+
+//    Example of a non-OOP string:
+data{8}[] as noopstr;    // Unsigned 8-bit array, default alignment
+```
+
+This allows the creation of primitive, non-OOP types that can construct other types.  
+`data` creates user-defined types.
+
+For example, you can just keep type-punning:
+`unsigned data{16} as dbyte;`  
+`dbyte as xbyte;`  
+`xbyte as ybyte;`  
+You can pun and declare a variable as well:  
+`ybyte as zbyte zbx = 0xFF;`
+
+Data decays to an integer type under the hood. All data is binary, and is therefore an integer.
+
+**Minimal declaration**
+`unsigned data{8} as byte; // 8-bit width & alignment, big endian`
+
+**Full syntax**
+`data{width : alignment : endianness}`
+
+**Example**
+`unsigned data{16::0} as cle16;   // 16-bit, 16-bit aligned, little endian`
+
+To prevent a custom type from having functions, use `data!`. See [functionless types](#functionless-types)
+
+---
+
+<a id="pointers"></a>
+## **Pointers**
+
+A pointer is a variable that holds the address of another value. IDEKA uses three symbols for pointer work:
+
+| Syntax | Meaning |
+|---|---|
+| `T*` | In a type: pointer to `T` |
+| `@x` | Address-of: yields a pointer to `x` |
+| `*p` | Dereference: reads or writes the value `p` points to |
+
+When writing Ideka, you should be careful not to confuse it with C because:
+```
+byte* a, b, c, d;
+```
+Is **identical** to:
+```
+byte* a;
+byte* b;
+byte* c;
+byte* d;
+```
+
+This is because Ideka treats every declared item as the type used at the beginning of the definition. Pointer-ness is not attached to the name, it is attached to the type, and these names are `byte*` type. Not only does this save time writing, but is less code for the parser to have to chew through.
+
+C will give you `a` as a `byte*` while the rest are plain `byte` because you must write `byte *a, *b, *c, *d;` in C. **Ideka is not C.** This will trip you up if you are used to writing C code.
+
+### Taking an address
+
+`@` produces the address of a variable, array element, object, struct, or function. The result type is a pointer to the operand's type.
+
+```
+int idata = 0;
+int* p_idata = @idata;     // p_idata holds the address of idata
+```
+
+### Dereferencing
+
+`*p` accesses the pointed-to value, on either side of an assignment. Compound assignments work through the pointer.
+
+```
+*p_idata += 3;             // idata is now 3
+print(idata);              // 3
+
+string a = "Test";
+string* pa = @a;
+*pa += "ing!";
+print(a);                  // Testing!
+```
+
+## Address cast `(@)`
+
+`(@)` converts an integer into a pointer, so you do not have to write the pointer type of the cast by hand. The compiler parses `(@)expr` as a cast of `expr` to `void*`, and the result converts to the typed pointer it is assigned to.
+
+```
+uint* px = @x;
+u64 kx = (u64)px;       // address stored as an integer
+uint* py = (@)kx;       // integer back to a pointer
+
+long val = 0x4700FF33324EBA60;
+byte* some_byte = (@)val;
+```
+
+The intended width of the resulting pointer is the compiler's configured default pointer width. That is not implemented yet: currently the width is 32 bits on a 32-bit system and 64 bits on a 64-bit system.
+
+## Address-equals `@=`
+
+`@=` assigns the address of the right-hand side. `T* p @= expr;` is shorthand for `T* p = @expr;`, and `p @= expr;` is shorthand for `p = @expr;`.
+
+```
+int x = 10;
+int* px = @x;     // normal
+int* px @= x;     // address-equals, same result
+```
+
+It is cleaner when the right-hand side is itself an address:
+
+```
+int* px @= @x;
+```
+
+This is **not** an identity. `px @= @x;` is equivalent to `px = @@x;`: the right-hand side `@x` is evaluated first and yields a pointer value that lives somewhere on the stack, then the address of that pointer is taken and becomes the value of `px`. `px` therefore holds the address of a pointer, not the address of `x`. IDEKA does not allow writing `@@x` directly.
+
+### `const` and pointers
+
+The position of `const` decides what is constant:
+
+```
+const int*  px; // Pointer to const value
+
+const* int* px; // Constant pointer to int pointer
+```
+
+See also **Advanced pointer manipulation** and **Function Pointers** below.
+
+<a id="mixing-signedunsigned-in-expressions"></a>
+## Mixing Signed/Unsigned in Expressions
+```
+signed data{32} as i32;
+unsigned data{32} as u32;
+
+i32 a = -10;
+u32 b = 20;
+
+// Mixed arithmetic (result type determined by widest type)
+i32 result1 = a + (i32)b;    // -10 + 20 = 10 (signed)
+u32 result2 = (u32)a + b;    // 4294967286 + 20 (unsigned, wraps)
+
+// Comparison with mixed signs
+if (a < (i32)b)  // true: -10 < 20
+{
+    print("Signed comparison");
+};
+
+if ((u32)a < b)  // false: 4294967286 > 20
+{
+    print("Unsigned comparison");
 };
 ```
 
-Example:
+<a id="endianness-handling"></a>
+## **Endianness Handling**
 ```
-def myAdd(int x, int y) -> int
+data{16::0} as le16;  // Little-endian 16-bit
+data{16}    as be16;  // Big-endian default 16-bit
+
+def swap_endian_16(be value) -> data{16}
 {
-    return x + y;
+    data{16::0} v2 = value; // Explicit byte swap on assignment
+    return v2;
 };
-```
-Definitions require a variable name.
 
-Overloading example:
-```
-def myAdd(float x, float y) -> float
+// Network byte order (big-endian) to host (little-endian)
+def network_to_host(be16 net_value) -> le16
 {
-    return x + y;
+    le16 x = net_value;     // Explicit byte swap on assignment
+    return x;
 };
+
+// Reading from network buffer
+data{8::0}[4] buf = [0x12, 0x34, 0x56, 0x78];
+be16[2] net = buf; // autopack and convert endianness
 ```
 
-**How an overload is chosen at a call site:**
-1. **Filter by argument count.** Only overloads whose parameter count matches the call's
-   argument count are considered.
-2. **Prefer an exact type match.** Among the count-matching candidates, the compiler looks for
-   one whose parameter types are an exact match to the arguments' actual types, in declaration
-   order.
-3. **Otherwise, fall back to the first count-matching overload declared**, and adapt the
-   arguments to fit its parameter types rather than treating the mismatch as an error.
+1. Single-endian arithmetic model - All math is performed in one endianness (big).
+2. Swapping on assignment means the compiler doesn't need to track mixed-endian states through complex expressions.
 
-This means overload selection is driven by argument count first and exact type match second; it
-does not attempt the kind of best-match ranking among multiple inexact candidates that C++ does.
-If none of the overloads for a given arity match exactly, you get whichever one was declared
-first, with its arguments coerced to fit - so when overloading on type for the same arity
-actually matters, declaration order matters too.
+<a id="casting"></a>
+## **Casting**
 
-**Argument coercion at call sites.** Once an overload is selected, arguments that don't already
-match the parameter types exactly are adapted automatically:
-- **`void*` is a universal pointer type at call boundaries.** Passing any pointer where a `void*`
-  parameter is expected bitcasts automatically (decaying through an array-to-pointer step first
-  if needed), and passing a `void*` argument where a concrete pointer type is expected does the
-  reverse. Neither direction requires an explicit cast at the call site.
-- **Arrays decay to pointers automatically** when passed to a parameter declared as a pointer to
-  the array's element type - you can pass an `int[8]` directly where an `int*` parameter is
-  expected.
-- **Integer width mismatches are adjusted, not rejected.** Passing a narrower or wider integer
-  than the parameter declares truncates or extends it to fit (sign- or zero-extending based on
-  the argument's known signedness). Unlike the array/integer packing casts described under
-  "Casting", there is no "sizes must match exactly or it's an error" rule for ordinary function
-  arguments - a call site adapts silently, because passing a value into a parameter is about
-  *conveying* a value, not *reinterpreting* a fixed memory layout the way an explicit pack/unpack
-  cast is.
+Casting in IDEKA is C-like.
 
-Built-in *operator* overloads (see "Custom infix operators and overloading") follow a stricter
-rule than ordinary functions: an operator overload is only used when its parameter types are an
-exact match for the operands. There is no fall-back-and-coerce step for operators - if nothing
-matches exactly, the native operation runs instead, since silently falling back to the wrong
-user-defined overload for a built-in symbol would be far more surprising than just doing the
-default thing.
+```
+float x = 3.14;
+i32 y = (i32)x;                  // 3 (numeric conversion, the value is truncated)
 
+// To reinterpret the bits instead, route through a same-size array:
+u32 bits = (u32)(u16[2])x;       // 0x4048F5C3 == 1078523331 (bit pattern of 3.14f)
+```
+There are only two types. Integers, and floating point decimals. `float` and `double` are floating point types. All other types are integer types.
 
-<a id="variadic-functions"></a>
-## **Variadic functions**
-Variadics in IDEKA are very straightforward, and use the `...` elipse operator.  
-You can index the elipse operator to yield the arguments passed, example:
+Casting anything to `void` is the functional equivalent of freeing the memory occupied by that thing.  
+This is dangerous on purpose, it is equivalent to free(ptr) in C. This syntax is considered explicit in IDEKA once you understand the convention.  
+It calls `ffree()` under the hood, which uses the standard heap allocator. You should not `void` cast free anything unless it was allocated with `fmalloc()`
+
+**Void casting in relation to the stack and heap**
+```
+def example() -> void {
+    int stackVar = 42; // Stack allocated
+
+    (void)stackVar;    // What happens here?
+}
+```
+
+In this case, `stackVar` is zeroed out and the reference invalidated.
+
+**The general casting rules.** Every cast falls into one of the following cases, determined by
+the source and target type pair:
+
+- **Same underlying representation, different IDEKA type.** If the source and target type happen
+  to share the same underlying machine representation (for example, `le32` and `uint` are both
+  a plain 32-bit integer), the cast performs no bit-level work. Instead, the compiler re-tags the
+  value with the target type's metadata. This is the mechanism behind clearing an endianness tag
+  explicitly:
+  ```
+  le32 netValue = ...;
+  uint plain = uint(netValue);   // same bits, but now untagged as native/no endianness
+  ```
+- **Integer to integer.** Narrowing truncates to the target width. Widening extends to the
+  target width, sign-extending for signed sources and zero-extending for unsigned sources.
+- **Integer and floating point.** `(float)`/`(double)` casts from an integer, and
+  `(int)`/`(long)`-style casts from a float or double, convert the numeric value (not the bit
+  pattern) using standard signed conversion. `(float)x` and `(double)x` between each other
+  extend or truncate the floating-point value as expected. To convert *bits* rather than *value*
+  between an integer and a float of the same width, route through a same-size array (see
+  "Arrays" below).
+- **Pointers.** Pointer to pointer is a plain reinterpretation - any pointer type converts to
+  any other pointer type directly. Pointer to integer normally takes the pointer's address and
+  stores it as an integer value. **The one exception is a pointer whose pointee is an array
+  type** - casting an array pointer to an integer does not produce the array's address as a
+  number; it packs the array's *contents* into the integer, following the array-packing rules
+  below. To get the numeric address of an array instead of its packed contents, take the
+  address of the array variable itself and cast through a non-array pointer type first (see
+  "Pointer to integer conversions"). Integer to pointer zero-extends the integer to a full
+  machine address width if it's narrower, then reinterprets it as the target pointer type.
+- **Structs.** Casting between two struct types reinterprets the same bits as the new layout,
+  provided both structs have the same total bit width. A size mismatch is a compile-time error -
+  there is no implicit padding or truncation when reinterpreting one struct as another. Casting
+  a struct value to a pointer type takes its address (allocating a temporary stack slot first if
+  the value doesn't already live in memory); casting a struct pointer to another pointer type is
+  a plain reinterpretation.
+
+---
+
+<a id="direct-type-conversion"></a>
+## Direct type conversion:
+You can do function-like conversion only with built-in types like `int`, `long`, `double`, `bool`, etc.
 ```
 #import <standard.idk>;
 
 using standard::io::console;
 
-def variadic(...) -> void
-{
-    print(...[0]); print();
-    print(...[1]); print();
-    print(...[2]); print();
-    print(...[3]); print();
-};
-
-
-
 def main() -> int
 {
-    variadic(1,2,3,4);
+    double d = 3.1415925658;
+
+    int i = int(d);
+
+    print(i);
 
     return 0;
 };
 ```
 Result:
-```
-1
-2
-3
-4
-```
+`3`
 
 ---
 
-<a id="error-returns"></a>
-## **Error Returns**
+<a id="the-typeof-sizeof-alignof-and-endianof-builtins"></a>
+## **The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins**
+```
+data{8:8:0}* as lestr;
+signed data{13:16} as strange;
 
-IDEKA supports dual return-type functions, the most common use case is in error returns.
+sizeof(lestr);    // 8
+alignof(lestr);   // 8
+typeof(lestr);    // unsigned data{8:8}*
+endianof(lestr);  // 0
+
+sizeof(strange);   // 13
+alignof(strange);  // 16
+typeof(strange);   // signed data{13:16}
+endianof(strange); // 1
+```
+
+<a id="void-as-a-literal"></a>
+## **`void` as a literal**
+```
+if (x == void) {...code...};    // If it's nothing, do something
+void x;
+if (x == !void) {...code...};   // If it's not nothing, do something
+```
+In literal context, `void` is `0`. `false` is also `0`, which means `void == false;`. Therefore, anything can be `void`-checked. 
+
+<a id="arrays"></a>
+## **Arrays**
+
+Array declarations have the syntax `type[n] var`. Never `type var[n]`.
+
+A single dimension array: `int[] x = [1,2,3,4,5];`
+A two dimensional array: `int[][] y = [[1,2,3,4],[5,6,7,8]];`
+A three dimensional array:
+```
+int[][][] z = [
+                [
+                  [ 1,  2,  3], [ 4,  5,  6], [ 7,  8,  9]
+                ],
+                [
+                  [10, 11, 12], [13, 14, 15], [16, 17, 18]
+                ],
+                [
+                  [19, 20, 21], [22, 23, 24], [25, 26, 27]
+                ]
+              ];
+```
+
+### Pointers to arrays
+```
+int*[] ip_arr = [@x, @y, @z];   // Array of pointer
+int[]* ap_arr = @ip_arr;        // Pointer to array
+```
+
+## **Static array comprehension**
+
+Ranges are inclusive on both ends: `1..10` is the ten values 1 through 10.
+```
+// Python-style comprehension
+int[10] squares = [x ^ 2 for (int x in 1..10)];
+
+// With condition
+int[20] evens = [x for (int x in 1..20) if (x % 2 == 0)];
+
+// With type conversion
+float[sizeof(int_array)] floats = [(float)x for (int x in int_array)];
+
+// C++-style comprehension
+int[10] squares = [x ^ 2 for (int x = 1; x <= 10; x++)];
+
+// With condition
+int[20] events = [x for (int x= 1; x <= 20; x++) if (x % 2 == 0)];
+```
+
+## **Static array comprehension using a dynamic type**
 ```
 #import <standard.idk>;
 
-using standard::io::console;
+using standard::collections; // For the dynamic array 'Array'
 
-struct LogError { /// ... /// };
-// LogFile omitted
-
-def Logger(LogFile* lf) -> int ^| LogError // definition, return type is L xor R, either L or R.
-{
-    if (some_bad_thing_happened)
-    {
-        // LogError e;
-        // set values
-        error -> e;
-    };
-
-    -> 0;
-};
-
-def main() -> int
-{
-    LogFile lf("/path/to/file.log");
-    int ^| LogError result,err = Logger(@lf);
-
-    if (err!?)      { println(err.message); }
-    elif (result!?) { println(result); }
-
-    -> 0;
-};
+Array[] myArr = [x.name for (Array x in oldArr) if (x.name.len() > 5)];
 ```
 
----
+**Casting between arrays, integers, and floating-point values**
 
-<a id="chaining-functions"></a>
-## **Chaining functions**
+Casting a fixed-size array to an integer or floating-point type (and back) packs or unpacks the
+array element by element, following one fixed convention:
 
-The chain operator `<-` is a binary operator, like `A <- B`.
-Chaining with `<-` passes the right operand into the function call's param on the LHS.
-This only works with single-parameter functions.
+> **Element 0 occupies the most significant bits of the integer; the last element occupies the
+> least significant bits.** This holds regardless of array length, element width, or any
+> endianness tag on the element type - array packing is always big-endian at the array level.
+
 ```
-def foo(int x) -> int
-{
-    return x / 2;
-};
+u64 packed = (u64)[0x12u, 0x34u, 0x56u, 0x78u, 0x9Au, 0xBCu, 0xDEu, 0xF0u];
+// packed == 0x123456789ABCDEF0 - element 0 is the highest byte.
 
-def bar () -> int
-{
-    return 0xFF;
-};
-
-int z = foo() <- bar(); // identical to writing int z = foo(bar());
+byte[8] bytes = (byte[8])packed;
+// bytes == [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
 ```
 
----
+Floats and doubles participate in the same packing rule by having their raw bit pattern treated
+as the integer payload for that slot - packing four bytes into a `float` reinterprets those four
+bytes' bits as the float's bit pattern (not as a numeric conversion of the bytes' values).
 
-<a id="shorthand-functions"></a>
-## **Shorthand Functions**
+**The total bit width must match exactly.** Packing an array into an integer (or unpacking an
+integer into an array) requires `element_count * element_bit_width == target_bit_width`. There
+is no implicit zero-padding or truncation to make a mismatched size fit - a three-element
+`byte[3]` cannot be packed directly into a 32-bit integer; pack into a 24-bit `data{24}` instead,
+or pad the array to four elements first.
 
-First, it is good to know that the return arrow itself `->` can take the place of the `return` keyword.
-Example:
+**Unpacking into a byte or char array adds one extra, null element.** `(byte[8])someValue`
+allocates and returns nine bytes: the eight packed bytes followed by a `0` terminator, so the
+result can be used immediately as a C-style string. This applies specifically to 8-bit element
+arrays; arrays of wider elements (`u16[4]`, for example) are not null-padded.
+
+This packing convention is also what powers the rewrites shown under "Advanced data manipulation
+techniques" - `hash[0..3] = (byte[4])(be32)ctx.state[0];` relies on exactly this
+element-0-is-high-bits ordering to place the most significant byte of `ctx.state[0]` at
+`hash[0]`.
+
+## Block initialization with `{}`
 ```
-def foo(int x) -> int
+noopstr[3] test =
+[
+    "String 1", // this is a list of items, not assignment statements
+    "string 2",
+    "string 3!"
+];
+
+test
 {
-    -> x / 2;
+    [0] = "New string!";    // these desugar to individual assignments
+    [1] = "Another one!";   // like test[0] = "New string!"; <- would be required here, so sugar requires it
+    [2] = "Changed again?"; //
 };
 ```
-It should also be known that `def` does not mean define but actually means default, and is located in the [calling convention](#calling-conventions) position.  
-Because of this, `def` can be omitted:
-```
-foo(int x) -> int
-{
-    -> x / 2;
-};
-```
-
-This function if written on one line would look like this (and kind of ugly):  
-`foo(int x) -> int { -> x / 2; };`
-
-If a function is return-only and has no other statements but that one, it can be reduced.
-IDEKA already has a lot of semicolons, and braces. Like an `if` that has one statement, we can eliminate the braces and write:  
-`foo(int x) -> int -> x / 2;`
-
-This creates a very nice, almost mathematical-looking line of code.
-
----
-
-<a id="external-functions-ffi"></a>
-## **External Functions (FFI)**
-Single-line:
-```
-extern def foo() -> void;
-extern def !!foo() -> void;  // !! tells the compiler do not mangle this function name
-```
-Block-based:
-```
-extern
-{
-    def foo() -> void;
-    def bar() -> void;
-    def !!zed() -> void;
-};
-```
-Or multiple prototypes at once:
-```
-extern
-{
-    // Memory allocation
-    def !!
-        malloc(size_t) -> void*,
-        memcpy(void*, void*, size_t) -> void*,
-        free(void*) -> void,
-        calloc(size_t, size_t) -> void*,
-        realloc(void*, size_t) -> void*,
-        memcpy(void*, void*, size_t) -> void*,
-        memmove(void*, void*, size_t) -> void*,
-        memset(void*, int, size_t) -> void*,
-        memcmp(void*, void*, size_t) -> int,
-        abort() -> void,
-        exit(int) -> void,
-        atexit(void*) -> int;
-};
-```
-String-literal based function name support to target any compiled library function:
-```
-def "??foo@"()->void;
-```
-
-<a id="exporting-functions-with-export"></a>
-## **Exporting Functions with `export`**
-Using `export` will cause a function to be marked as external for linkage.  
-Use this when writing libraries, or to allow a function to be "seen".
-```
-#import "types.idk";
-
-export
-{
-    def !!stub() -> void {};
-};
-```
-This is a valid library and will compile if you do:
-`python idkc.py tests\testlib.idk --library -o mylib.dll` on Windows,
-and
-`python3 idkc.py tests/testlib.idk --library -o testlib.so` on Linux.
 
 ---
 
@@ -427,8 +649,6 @@ Packages are imported from the compiler's local FPM registry located inside `.fp
 
 To import a package, use the package name directly:
 ```
-#import <standard.idk>;
-
 #package super-types, IDEKA-boost;  // these don't exist, yet..
 ```
 
@@ -439,7 +659,7 @@ Packages and FPM are still in development and should not be used for now.
 ---
 
 <a id="the-preprocessor"></a>
-### The Preprocessor
+# The Preprocessor
 ```
 #import <standard.idk>;
 
@@ -457,7 +677,7 @@ Packages and FPM are still in development and should not be used for now.
 // Adds a path to the preprocessor's search list
 ```
 
-`#def` defines a preprocessor text substitution constant. This is not a macro, just a "dumb" replacement. It is not parameterized, meaning you cannot pass anything in to it.
+`#def` defines a preprocessor text substitution constant. This is not a macro, just a "dumb" replacement. It is not parameterized, meaning you cannot pass anything into it.
 
 ### Parameterized Substitution:
 To achieve C macro-like behavior, you can use `#psub`.  
@@ -528,6 +748,470 @@ def main() -> int
     return 0;
 };
 ```
+
+---
+
+<a id="functions"></a>
+## **Functions**
+
+You cannot define a function within a function. They must be module, namespace, object, or top level.
+
+Prototype:
+```
+// Single declaration
+def name(parameters) -> void;
+
+// Multi-declaration
+def name(int) -> bool,
+    name(float) -> void,
+    name(char*) -> int;   // Can prototype multiple functions at once, comma separated signatures.
+```
+Prototype signatures do not need a variable name, only types like `def foo(int,int,void*)->bool;`
+
+Signature:
+```
+def name (parameters) -> return_type
+{
+    return return_value;
+};
+```
+
+Example:
+```
+def myAdd(int x, int y) -> int
+{
+    return x + y;
+};
+```
+Definitions require a variable name.
+
+Overloading (same name, different parameters and/or return types) example:
+```
+def myAdd(int x, int y) -> int
+{
+    return x + y;
+};
+
+def myAdd(float x, float y) -> float
+{
+    return x + y;
+};
+```
+
+**How an overload is chosen at a call site:**
+1. **Filter by argument count.** Only overloads whose parameter count matches the call's
+   argument count are considered.
+2. **Prefer an exact type match.** Among the count-matching candidates, the compiler looks for
+   one whose parameter types are an exact match to the arguments' actual types, in declaration
+   order.
+3. **Otherwise, fall back to the first count-matching overload declared**, and adapt the
+   arguments to fit its parameter types rather than treating the mismatch as an error.
+
+This means overload selection is driven by argument count first and exact type match second; it
+does not attempt the kind of best-match ranking among multiple inexact candidates that C++ does.
+If none of the overloads for a given arity match exactly, you get whichever one was declared
+first, with its arguments coerced to fit - so when overloading on type for the same arity
+actually matters, declaration order matters too.
+
+**Argument coercion at call sites.** Once an overload is selected, arguments that don't already
+match the parameter types exactly are adapted automatically:
+- **`void*` is a universal pointer type at call boundaries.** Passing any pointer where a `void*`
+  parameter is expected bitcasts automatically (decaying through an array-to-pointer step first
+  if needed), and passing a `void*` argument where a concrete pointer type is expected does the
+  reverse. Neither direction requires an explicit cast at the call site.
+- **Arrays decay to pointers automatically** when passed to a parameter declared as a pointer to
+  the array's element type - you can pass an `int[8]` directly where an `int*` parameter is
+  expected.
+- **Integer width mismatches are adjusted, not rejected.** Passing a narrower or wider integer
+  than the parameter declares truncates or extends it to fit (sign- or zero-extending based on
+  the argument's known signedness). Unlike the array/integer packing casts described under
+  "Casting", there is no "sizes must match exactly or it's an error" rule for ordinary function
+  arguments - a call site adapts silently, because passing a value into a parameter is about
+  *conveying* a value, not *reinterpreting* a fixed memory layout the way an explicit pack/unpack
+  cast is.
+
+Built-in *operator* overloads (see "Custom infix operators and overloading") follow a stricter
+rule than ordinary functions: an operator overload is only used when its parameter types are an
+exact match for the operands. There is no fall-back-and-coerce step for operators - if nothing
+matches exactly, the native operation runs instead, since silently falling back to the wrong
+user-defined overload for a built-in symbol would be far more surprising than just doing the
+default thing.
+
+<a id="shorthand-functions"></a>
+## **Shorthand Functions**
+
+First, it is good to know that the return arrow itself `->` can take the place of the `return` keyword.
+Example:
+```
+def foo(int x) -> int
+{
+    -> x / 2;
+};
+```
+It should also be known that `def` does not mean define but actually means default, and is located in the [calling convention](#calling-conventions) position.  
+Because of this, `def` can be omitted:
+```
+foo(int x) -> int
+{
+    -> x / 2;
+};
+```
+
+This function if written on one line would look like this (and kind of ugly):  
+`foo(int x) -> int { -> x / 2; };`
+
+If a function is return-only and has no other statements but that one, it can be reduced.
+IDEKA already has a lot of semicolons, and braces. Like an `if` that has one statement, we can eliminate the braces and write:  
+`foo(int x) -> int -> x / 2;`
+
+This creates a very nice, almost mathematical-looking line of code.
+
+---
+
+<a id="error-returns"></a>
+## **Error Returns**
+
+IDEKA supports dual return-type functions, the most common use case is in error returns.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+struct LogError { /// ... /// };
+// LogFile omitted
+
+def Logger(LogFile* lf) -> int ^| LogError // definition, return type is L xor R, either L or R.
+{
+    if (some_bad_thing_happened)
+    {
+        // LogError e;
+        // set values
+        error -> e;
+    };
+
+    -> 0;
+};
+
+def main() -> int
+{
+    LogFile lf("/path/to/file.log");
+    int ^| LogError result,err = Logger(@lf);
+
+    if (err!?)      { println(err.message); }
+    elif (result!?) { println(result); }
+
+    -> 0;
+};
+```
+
+---
+
+<a id="chaining-functions"></a>
+## **Chaining functions**
+
+The chain operator `<-` is a binary operator, like `A <- B`.
+Chaining with `<-` passes the right operand into the function call's param on the LHS.
+This only works with single-parameter functions.
+```
+def foo(int x) -> int
+{
+    return x / 2;
+};
+
+def bar () -> int
+{
+    return 0xFF;
+};
+
+int z = foo() <- bar(); // identical to writing int z = foo(bar());
+```
+
+---
+
+<a id="variadic-functions"></a>
+## **Variadic functions**
+Variadics in IDEKA are very straightforward, and use the `...` elipse operator.  
+You can index the elipse operator to yield the arguments passed, example:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+def variadic(...) -> void
+{
+    print(...[0]); print();
+    print(...[1]); print();
+    print(...[2]); print();
+    print(...[3]); print();
+};
+
+
+
+def main() -> int
+{
+    variadic(1,2,3,4);
+
+    return 0;
+};
+```
+Result:
+```
+1
+2
+3
+4
+```
+
+## Function pointers
+
+A function pointer is declared with `def{}*`, followed by a name, the parameter types, and the return type. Assign a function to it with `@`. A function pointer is called directly by name; it is dereferenced automatically.
+
+```
+def{}* p_add(int,int)->int = @add;
+def{}* p_sub(int,int)->int = @sub;
+
+print(p_add(0,3)); // 3
+print(p_sub(5,2)); // 3
+```
+
+<a id="functions-and-contract"></a>
+## **Functions and `contract`**
+Contracts are compile time function modification.  
+They prepend or append the code contained to a function's body.
+
+Pre-contract form puts the contract's statements before the function's code.  
+Post-contract form puts the contract's statements before the function's return.
+
+Currently post-contracts insert before all return points, including error returns. There will be an update soon for post-contract return sites.
+
+Contracts are not specifically `assert`-only, they can contain any statement.
+They are similar to macros and expand before type checking and semantic analysis.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+contract NonZero
+{
+    assert(x > 0, "x must be positive");
+};
+
+contract rValGT10
+{
+    assert(x > 10, "x must be greater than 10");
+};
+
+def foo(int x) -> int : NonZero
+{
+    x = x / 2;
+    return x;
+} : rValGT10;
+
+def main() -> int
+{
+    int y = foo(30);   // 30 / 2 = 15, passes both contracts
+
+    return 0;
+};
+```
+`foo()` turns into:
+```
+def foo(int x) -> int
+{
+    assert(x > 0, "x must be positive");
+    x = x / 2;
+    assert(x > 10, "x must be greater than 10");
+    return x;
+};
+```
+The contracts disappear from the compilation unit after transformation.
+
+---
+
+<a id="contract-binding"></a>
+## Contract `# binding`
+
+A contract may declare a **binding** that the compiler enforces at every function that attaches it.
+The binding specifies which other contracts must (or must not) appear as pre- or post-contracts on
+the same function, and in what order. This lets a contract author express relationships between
+contracts and catch misuse at compile time rather than at runtime.
+
+### Syntax
+
+```
+contract Name(params)
+{
+    // body
+} # binding { pre_side : post_side };
+```
+
+The binding block is written after the contract body, before the terminating `;`.
+
+**`pre_side`** describes what must or must not appear as a pre-contract on any function that
+attaches `Name`:
+
+| Form | Meaning |
+|---|---|
+| `!` | No pre-contracts are allowed on that function. |
+| `this` | `Name` itself must be used as a pre-contract (not post). |
+| `OtherContract` | `OtherContract` must also be a pre-contract on the function. |
+| `this, OtherContract` | Both requirements apply, in that order. |
+
+**`post_side`** describes what must or must not appear as a post-contract:
+
+| Form | Meaning |
+|---|---|
+| `!` | No post-contracts are allowed on that function. |
+| `this` | `Name` itself must be used as a post-contract (not pre). |
+| `A, B` | Both `A` and `B` must be post-contracts, in that order (`,`). |
+| `A \| B` | Any subset of `A`, `B` that is present must appear in that order (`\|`). |
+| `A & B` | Both `A` and `B` must be post-contracts, in any order (`&`). |
+| `!A` | `A` must **not** be a post-contract on the function. |
+| `A(2)` | Specifically the two-parameter overload of `A` is required. |
+
+The pre and post sides are separated by `:`.
+
+### Examples
+
+**Require the contract itself to be a pre-contract only (never post):**
+```
+contract Validated(x)
+{
+    assert(x != 0, "x must not be zero");
+} # binding { this : ! };
+
+// OK -- Validated is pre
+def foo(int x) -> int : Validated(x) { return x * 2; };
+
+// ERROR -- Validated is post, binding requires it to be pre
+def bar(int x) -> int { return x; } : Validated(x);
+```
+
+**Require a companion post-contract whenever this contract is used as pre:**
+```
+contract CheckInput(x)
+{
+    assert(x > 0, "input must be positive");
+} # binding { this : CheckOutput };
+
+contract CheckOutput
+{
+    assert(rval > 0, "output must be positive");
+};
+
+// OK
+def process(int x) -> int : CheckInput(x) { return x + 1; } : CheckOutput;
+
+// ERROR -- CheckOutput is missing
+def process2(int x) -> int : CheckInput(x) { return x + 1; };
+```
+
+**Forbid any pre-contracts when this contract is used as post:**
+```
+contract Finalize
+{
+    cleanup();
+} # binding { ! : this };
+
+// OK -- no pre-contracts, Finalize is post
+def shutdown() -> void { do_work(); } : Finalize;
+
+// ERROR -- SomeSetup is a pre-contract, binding forbids pre-contracts
+def shutdown2() -> void : SomeSetup { do_work(); } : Finalize;
+```
+
+**Require two post-contracts in order:**
+```
+contract Stage1
+{
+    log("stage 1");
+} # binding { this : Stage2, Stage3 };
+
+contract Stage2 { log("stage 2"); };
+contract Stage3 { log("stage 3"); };
+
+// OK
+def pipeline() -> void : Stage1 { work(); } : Stage2 : Stage3;
+
+// ERROR -- wrong order
+def pipeline2() -> void : Stage1 { work(); } : Stage3 : Stage2;
+```
+
+### Forward declarations
+
+Contracts may be forward-declared before their body is defined, including in comma-separated lists:
+
+```
+contract A, B(x, y), C;
+```
+
+A binding may only be placed on the definition, not the forward declaration.
+
+### Compiler errors
+
+When a function violates a binding, the compiler emits an error at the function definition naming
+the contract whose binding was violated, which side (`pre` or `post`) was violated, and what was
+required vs. what was found.
+
+---
+
+<a id="external-functions-ffi"></a>
+## **External Functions (FFI)**
+Single-line:
+```
+extern def foo() -> void;
+extern def !!foo() -> void;  // !! tells the compiler do not mangle this function name
+```
+Block-based:
+```
+extern
+{
+    def foo() -> void;
+    def bar() -> void;
+    def !!zed() -> void;
+};
+```
+Or multiple prototypes at once:
+```
+extern
+{
+    // Memory allocation
+    def !!
+        malloc(size_t) -> void*,
+        memcpy(void*, void*, size_t) -> void*,
+        free(void*) -> void,
+        calloc(size_t, size_t) -> void*,
+        realloc(void*, size_t) -> void*,
+        memcpy(void*, void*, size_t) -> void*,
+        memmove(void*, void*, size_t) -> void*,
+        memset(void*, int, size_t) -> void*,
+        memcmp(void*, void*, size_t) -> int,
+        abort() -> void,
+        exit(int) -> void,
+        atexit(void*) -> int;
+};
+```
+String-literal based function name support to target any compiled library function:
+```
+def "??foo@"()->void;
+```
+
+<a id="exporting-functions-with-export"></a>
+## **Exporting Functions with `export`**
+Using `export` will cause a function to be marked as external for linkage.  
+Use this when writing libraries, or to allow a function to be "seen".
+```
+#import "types.idk";
+
+export
+{
+    def !!stub() -> void {};
+};
+```
+This is a valid library and will compile if you do:
+`idkc tests\testlib.idk --library -o mylib.dll` on Windows,
+and
+`idkc tests/testlib.idk --library -o testlib.so` on Linux.
 
 ---
 
@@ -1118,49 +1802,66 @@ Here `Client` is bound to role `A` (it must implement `Connectable`) and `Store`
 
 <a id="publicprivate-with-objects"></a>
 ## **Public/Private with Objects**  
-Struct public and private works by only allowing access to private sections by the parent object that "owns" the struct.  
-The struct is still data where public members are visible anywhere, but its private members are only visible/modifiable by the object immediately containing it.
+Public and private are used for scope access control for objects.  
+Object members are public by default.
 
+Here's an example of a lock object:
 ```
-struct myStruct
-{
-    int x, y;
-};
+#import <standard.idk>;
 
-object Obj2;
+using standard::io::console;
 
-object Obj1
-{
-
-    Obj2 myObject();
-
-    // ... required methods ...
-
-    private : Obj2    // Obj2 is a friend class and can inherit Obj1's private members
-    {
-        // code
-    };
-
-    def foo() -> int
-    {
-        return this.myObject.myStruct.y;    // ERROR - Need to use a getter of Obj2
-    };
-};
-
-object Obj2
+object Lock
 {
     private
     {
-        myStruct objStru;
+        byte* password = "i-love-coding";
+        bool locked;
     };
 
-    // ... required methods ...
-
-    def get_y() -> int
+    def __init() -> this { -> this; };
+    def __expr() -> Lock* { -> this; };
+    def __exit() -> void { (void)this; };
+    
+    lock() -> void
     {
-        return this.myStruct.y;
+        this.locked = true if (this.locked == false) else ->;
+    };
+
+    password(byte* pass) -> void
+    {
+        if (pass != this.password) println("Bad password.");
+
+        this.unlock() if (this.locked == true) else ->;
+    };
+
+    private
+    {
+        unlock() -> void
+        {
+            this.locked = false if (this.locked == true) else ->;
+        };
     };
 };
+
+main() -> int
+{
+    Lock myLock;
+
+    myLock.unlock(); // compile error, unlock() is private and cannot be called directly
+
+    -> 0; // can use the return arrow -> in place of the keyword return
+};
+```
+
+### Pointers to objects, and structs
+
+```
+object    myObj {};                 // Definition
+object* p_myObj = @myObj;           // Pointer
+
+struct    myStruct {};              // Definition
+struct* p_myStruct = @myStruct;     // Pointer
 ```
 
 ---
@@ -1212,127 +1913,6 @@ def main() -> int
 ```
 Result:
 `Hello World!`
-
----
-
-<a id="pointers"></a>
-## **Pointers**
-
-A pointer is a variable that holds the address of another value. IDEKA uses three symbols for pointer work:
-
-| Syntax | Meaning |
-|---|---|
-| `T*` | In a type: pointer to `T` |
-| `@x` | Address-of: yields a pointer to `x` |
-| `*p` | Dereference: reads or writes the value `p` points to |
-
-When writing Ideka, you should be careful not to confuse it with C because:
-```
-byte* a, b, c, d;
-```
-Is **identical** to:
-```
-byte* a;
-byte* b;
-byte* c;
-byte* d;
-```
-
-This is because Ideka treats every declared item as the type used at the beginning of the definition. Pointer-ness is not attached to the name, it is attached to the type, and these names are `byte*` type. Not only does this save time writing, but is less code for the parser to have to chew through.
-
-C will give you `a` as a `byte*` while the rest are plain `byte` because you must write `byte *a, *b, *c, *d;` in C. **Ideka is not C.** This will trip you up if you are used to writing C code.
-
-### Taking an address
-
-`@` produces the address of a variable, array element, object, struct, or function. The result type is a pointer to the operand's type.
-
-```
-int idata = 0;
-int* p_idata = @idata;     // p_idata holds the address of idata
-```
-
-### Dereferencing
-
-`*p` accesses the pointed-to value, on either side of an assignment. Compound assignments work through the pointer.
-
-```
-*p_idata += 3;             // idata is now 3
-print(idata);              // 3
-
-string a = "Test";
-string* pa = @a;
-*pa += "ing!";
-print(a);                  // Testing!
-```
-
-### Function pointers
-
-A function pointer is declared with `def{}*`, followed by a name, the parameter types, and the return type. Assign a function to it with `@`. A function pointer is called directly by name; it is dereferenced automatically.
-
-```
-def{}* p_add(int,int)->int = @add;
-def{}* p_sub(int,int)->int = @sub;
-
-print(p_add(0,3)); // 3
-print(p_sub(5,2)); // 3
-```
-
-### Pointers to objects, structs, and arrays
-
-```
-object    myObj {};                 // Definition
-object* p_myObj = @myObj;           // Pointer
-
-struct    myStruct {};              // Definition
-struct* p_myStruct = @myStruct;     // Pointer
-
-int*[] pi_array = @i_array;         // Array of pointer
-```
-
-### Address cast `(@)`
-
-`(@)` converts an integer into a pointer, so you do not have to write the pointer type of the cast by hand. The compiler parses `(@)expr` as a cast of `expr` to `void*`, and the result converts to the typed pointer it is assigned to.
-
-```
-uint* px = @x;
-u64 kx = (u64)px;       // address stored as an integer
-uint* py = (@)kx;       // integer back to a pointer
-
-long val = 0x4700FF33324EBA60;
-byte* some_byte = (@)val;
-```
-
-The intended width of the resulting pointer is the compiler's configured default pointer width. That is not implemented yet: currently the width is 32 bits on a 32-bit system and 64 bits on a 64-bit system.
-
-### Address-equals `@=`
-
-`@=` assigns the address of the right-hand side. `T* p @= expr;` is shorthand for `T* p = @expr;`, and `p @= expr;` is shorthand for `p = @expr;`.
-
-```
-int x = 10;
-int* px = @x;     // normal
-int* px @= x;     // address-equals, same result
-```
-
-It is cleaner when the right-hand side is itself an address:
-
-```
-int* px @= @x;
-```
-
-This is **not** an identity. `px @= @x;` is equivalent to `px = @@x;`: the right-hand side `@x` is evaluated first and yields a pointer value that lives somewhere on the stack, then the address of that pointer is taken and becomes the value of `px`. `px` therefore holds the address of a pointer, not the address of `x`. IDEKA does not allow writing `@@x` directly.
-
-### `const` and pointers
-
-The position of `const` decides what is constant:
-
-```
-const int*  px; // Pointer to const value
-
-const* int* px; // Constant pointer to int pointer
-```
-
-See also **Advanced pointer manipulation** and **Function Pointers** below.
 
 ---
 
@@ -1519,334 +2099,6 @@ main() -> int
     if (py!?) { println("py is definitely live!"); };
 
     -> 0;
-};
-```
-
----
-
-<a id="the-data-keyword"></a>
-## **The `data` keyword**
-
-Data is a variable bit width, primitive binary data-type creation keyword.  
-Anything can cast to it, and it can cast to any primitive like char, int, float.  
-It is intended to allow IDEKA programmers to build any basic integer type to fit their needs.  
-Data types use big-endian byte order by default. Manipulate bits as needed.  
-Bit-width bust always be specified.
-
-Syntax for declaring a datatype:
-
-```
-(const) (signed | unsigned) data {bit-width:alignment} (as) your_new_type
-
-//    Example of a non-OOP string:
-
-      unsigned data {8}[] as noopstr;    // Unsigned byte array, default alignment
-```
-
-This allows the creation of primitive, non-OOP types that can construct other types.  
-`data` creates user-defined types.
-
-For example, you can just keep type-punning:
-`unsigned data{16} as dbyte;`  
-`dbyte as xbyte;`  
-`xbyte as ybyte;`  
-You can pun and declare a variable as well:  
-`ybyte as zbyte zbx = 0xFF;`
-
-Data decays to an integer type under the hood. All data is binary, and is therefore an integer.
-
-**Minimal specification**
-`unsigned data{8} as byte;            // 8-bit`
-
-**Full specification**
-`data{width : alignment : endianness}`
-
-**Example**
-`unsigned data{16::0} as custom_le;   // 16-bit, 16-bit aligned, little endian`
-
-To prevent a custom type from having functions, use `data!`. See [functionless types](#functionless-types)
-
----
-
-<a id="mixing-signedunsigned-in-expressions"></a>
-### Mixing Signed/Unsigned in Expressions
-```
-signed data{32} as i32;
-unsigned data{32} as u32;
-
-i32 a = -10;
-u32 b = 20;
-
-// Mixed arithmetic (result type determined by widest type)
-i32 result1 = a + (i32)b;    // -10 + 20 = 10 (signed)
-u32 result2 = (u32)a + b;    // 4294967286 + 20 (unsigned, wraps)
-
-// Comparison with mixed signs
-if (a < (i32)b)  // true: -10 < 20
-{
-    print("Signed comparison");
-};
-
-if ((u32)a < b)  // false: 4294967286 > 20
-{
-    print("Unsigned comparison");
-};
-```
-
----
-
-<a id="endianness-handling"></a>
-## **Endianness Handling**
-```
-data{16::0} as le16;  // Little-endian 16-bit
-data{16}    as be16;  // Big-endian default 16-bit
-
-def swap_endian_16(be value) -> data{16}
-{
-    data{16::0} v2 = value; // Explicit byte swap on assignment
-    return v2;
-};
-
-// Network byte order (big-endian) to host (little-endian)
-def network_to_host(be16 net_value) -> le16
-{
-    le16 x = net_value;     // Explicit byte swap on assignment
-    return x;
-};
-
-// Reading from network buffer
-data{8::0}[4] buf = [0x12, 0x34, 0x56, 0x78];
-be16[2] net = buf; // autopack and convert endianness
-```
-
-1. Single-endian arithmetic model - All math is performed in one endianness (big).
-2. Swapping on assignment means the compiler doesn't need to track mixed-endian states through complex expressions.
-
----
-
-<a id="casting"></a>
-## **Casting**
-
-Casting in IDEKA is C-like.
-
-```
-float x = 3.14;
-i32 y = (i32)x;                  // 3 (numeric conversion, the value is truncated)
-
-// To reinterpret the bits instead, route through a same-size array:
-u32 bits = (u32)(u16[2])x;       // 0x4048F5C3 == 1078523331 (bit pattern of 3.14f)
-```
-There are only two types. Integers, and floating point decimals. `float` and `double` are floating point types. All other types are integer types.
-
-Casting anything to `void` is the functional equivalent of freeing the memory occupied by that thing.  
-This is dangerous on purpose, it is equivalent to free(ptr) in C. This syntax is considered explicit in IDEKA once you understand the convention.  
-It calls `ffree()` under the hood, which uses the standard heap allocator. You should not `void` cast free anything unless it was allocated with `fmalloc()`
-
-**Void casting in relation to the stack and heap**
-```
-def example() -> void {
-    int stackVar = 42; // Stack allocated
-
-    (void)stackVar;    // What happens here?
-}
-```
-
-In this case, `stackVar` is zeroed out and the reference invalidated.
-
-**The general casting rules.** Every cast falls into one of the following cases, determined by
-the source and target type pair:
-
-- **Same underlying representation, different IDEKA type.** If the source and target type happen
-  to share the same underlying machine representation (for example, `le32` and `uint` are both
-  a plain 32-bit integer), the cast performs no bit-level work. Instead, the compiler re-tags the
-  value with the target type's metadata. This is the mechanism behind clearing an endianness tag
-  explicitly:
-  ```
-  le32 netValue = ...;
-  uint plain = uint(netValue);   // same bits, but now untagged as native/no endianness
-  ```
-- **Integer to integer.** Narrowing truncates to the target width. Widening extends to the
-  target width, sign-extending for signed sources and zero-extending for unsigned sources.
-- **Integer and floating point.** `(float)`/`(double)` casts from an integer, and
-  `(int)`/`(long)`-style casts from a float or double, convert the numeric value (not the bit
-  pattern) using standard signed conversion. `(float)x` and `(double)x` between each other
-  extend or truncate the floating-point value as expected. To convert *bits* rather than *value*
-  between an integer and a float of the same width, route through a same-size array (see
-  "Arrays" below).
-- **Pointers.** Pointer to pointer is a plain reinterpretation - any pointer type converts to
-  any other pointer type directly. Pointer to integer normally takes the pointer's address and
-  stores it as an integer value. **The one exception is a pointer whose pointee is an array
-  type** - casting an array pointer to an integer does not produce the array's address as a
-  number; it packs the array's *contents* into the integer, following the array-packing rules
-  below. To get the numeric address of an array instead of its packed contents, take the
-  address of the array variable itself and cast through a non-array pointer type first (see
-  "Pointer to integer conversions"). Integer to pointer zero-extends the integer to a full
-  machine address width if it's narrower, then reinterprets it as the target pointer type.
-- **Structs.** Casting between two struct types reinterprets the same bits as the new layout,
-  provided both structs have the same total bit width. A size mismatch is a compile-time error -
-  there is no implicit padding or truncation when reinterpreting one struct as another. Casting
-  a struct value to a pointer type takes its address (allocating a temporary stack slot first if
-  the value doesn't already live in memory); casting a struct pointer to another pointer type is
-  a plain reinterpretation.
-
----
-
-<a id="direct-type-conversion"></a>
-## Direct type conversion:
-You can do function-like conversion only with built-in types like `int`, `long`, `double`, `bool`, etc.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-def main() -> int
-{
-    double d = 3.1415925658;
-
-    int i = int(d);
-
-    print(i);
-
-    return 0;
-};
-```
-Result:
-`3`
-
----
-
-<a id="the-typeof-sizeof-alignof-and-endianof-builtins"></a>
-## **The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins**
-```
-data{8:8:0}* as lestr;
-signed data{13:16} as strange;
-
-sizeof(lestr);    // 8
-alignof(lestr);   // 8
-typeof(lestr);    // unsigned data{8:8}*
-endianof(lestr);  // 0
-
-sizeof(strange);   // 13
-alignof(strange);  // 16
-typeof(strange);   // signed data{13:16}
-endianof(strange); // 1
-```
-
----
-
-<a id="void-as-a-literal"></a>
-## **`void` as a literal**
-```
-if (x == void) {...code...};    // If it's nothing, do something
-void x;
-if (x == !void) {...code...};   // If it's not nothing, do something
-```
-In literal context, `void` is `0`. `false` is also `0`, which means `void == false;`. Therefore, anything can be `void`-checked. 
-
----
-
-<a id="arrays"></a>
-## **Arrays**
-
-Array declarations have the syntax `type[n] var`. Never `type var[n]`.
-
-A single dimension array: `int[] x = [1,2,3,4,5];`
-A two dimensional array: `int[][] y = [[1,2,3,4],[5,6,7,8]];`
-A three dimensional array:
-```
-int[][][] z = [
-                [
-                  [ 1,  2,  3], [ 4,  5,  6], [ 7,  8,  9]
-                ],
-                [
-                  [10, 11, 12], [13, 14, 15], [16, 17, 18]
-                ],
-                [
-                  [19, 20, 21], [22, 23, 24], [25, 26, 27]
-                ]
-              ];
-```
-
-**Static array comprehension**
-
-Ranges are inclusive on both ends: `1..10` is the ten values 1 through 10.
-```
-// Python-style comprehension
-int[10] squares = [x ^ 2 for (int x in 1..10)];
-
-// With condition
-int[20] evens = [x for (int x in 1..20) if (x % 2 == 0)];
-
-// With type conversion
-float[sizeof(int_array)] floats = [(float)x for (int x in int_array)];
-
-// C++-style comprehension
-int[10] squares = [x ^ 2 for (int x = 1; x <= 10; x++)];
-
-// With condition
-int[20] events = [x for (int x= 1; x <= 20; x++) if (x % 2 == 0)];
-```
-
-**Static array comprehension using a dynamic type**
-```
-#import <standard.idk>;
-
-using standard::collections; // For the dynamic array 'Array'
-
-Array[] myArr = [x.name for (Array x in oldArr) if (x.name.len() > 5)];
-```
-
-**Casting between arrays, integers, and floating-point values**
-
-Casting a fixed-size array to an integer or floating-point type (and back) packs or unpacks the
-array element by element, following one fixed convention:
-
-> **Element 0 occupies the most significant bits of the integer; the last element occupies the
-> least significant bits.** This holds regardless of array length, element width, or any
-> endianness tag on the element type - array packing is always big-endian at the array level.
-
-```
-u64 packed = (u64)[0x12u, 0x34u, 0x56u, 0x78u, 0x9Au, 0xBCu, 0xDEu, 0xF0u];
-// packed == 0x123456789ABCDEF0 - element 0 is the highest byte.
-
-byte[8] bytes = (byte[8])packed;
-// bytes == [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
-```
-
-Floats and doubles participate in the same packing rule by having their raw bit pattern treated
-as the integer payload for that slot - packing four bytes into a `float` reinterprets those four
-bytes' bits as the float's bit pattern (not as a numeric conversion of the bytes' values).
-
-**The total bit width must match exactly.** Packing an array into an integer (or unpacking an
-integer into an array) requires `element_count * element_bit_width == target_bit_width`. There
-is no implicit zero-padding or truncation to make a mismatched size fit - a three-element
-`byte[3]` cannot be packed directly into a 32-bit integer; pack into a 24-bit `data{24}` instead,
-or pad the array to four elements first.
-
-**Unpacking into a byte or char array adds one extra, null element.** `(byte[8])someValue`
-allocates and returns nine bytes: the eight packed bytes followed by a `0` terminator, so the
-result can be used immediately as a C-style string. This applies specifically to 8-bit element
-arrays; arrays of wider elements (`u16[4]`, for example) are not null-padded.
-
-This packing convention is also what powers the rewrites shown under "Advanced data manipulation
-techniques" - `hash[0..3] = (byte[4])(be32)ctx.state[0];` relies on exactly this
-element-0-is-high-bits ordering to place the most significant byte of `ctx.state[0]` at
-`hash[0]`.
-
-## Block initialization with `{}`
-```
-noopstr[3] test =
-[
-    "String 1", // this is a list of items, not assignment statements
-    "string 2",
-    "string 3!"
-];
-
-test
-{
-    [0] = "New string!";    // these desugar to individual assignments
-    [1] = "Another one!";   // like test[0] = "New string!"; <- would be required here, so sugar requires it
-    [2] = "Changed again?"; //
 };
 ```
 
@@ -2762,187 +3014,6 @@ Operand count:     4
 Is ## leading:  true
 Is ## trailing: true
 ```
-
----
-
-<a id="functions-and-contract"></a>
-## **Functions and `contract`**
-Contracts are compile time function modification.  
-They prepend or append the code contained to a function's body.
-
-Pre-contract form puts the contract's statements before the function's code.  
-Post-contract form puts the contract's statements before the function's return.
-
-Currently post-contracts insert before all return points, including error returns. There will be an update soon for post-contract return sites.
-
-Contracts are not specifically `assert`-only, they can contain any statement.
-They are similar to macros and expand before type checking and semantic analysis.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-contract NonZero
-{
-    assert(x > 0, "x must be positive");
-};
-
-contract rValGT10
-{
-    assert(x > 10, "x must be greater than 10");
-};
-
-def foo(int x) -> int : NonZero
-{
-    x = x / 2;
-    return x;
-} : rValGT10;
-
-def main() -> int
-{
-    int y = foo(30);   // 30 / 2 = 15, passes both contracts
-
-    return 0;
-};
-```
-`foo()` turns into:
-```
-def foo(int x) -> int
-{
-    assert(x > 0, "x must be positive");
-    x = x / 2;
-    assert(x > 10, "x must be greater than 10");
-    return x;
-};
-```
-The contracts disappear from the compilation unit after transformation.
-
----
-
-<a id="contract-binding"></a>
-## Contract `# binding`
-
-A contract may declare a **binding** that the compiler enforces at every function that attaches it.
-The binding specifies which other contracts must (or must not) appear as pre- or post-contracts on
-the same function, and in what order. This lets a contract author express relationships between
-contracts and catch misuse at compile time rather than at runtime.
-
-### Syntax
-
-```
-contract Name(params)
-{
-    // body
-} # binding { pre_side : post_side };
-```
-
-The binding block is written after the contract body, before the terminating `;`.
-
-**`pre_side`** describes what must or must not appear as a pre-contract on any function that
-attaches `Name`:
-
-| Form | Meaning |
-|---|---|
-| `!` | No pre-contracts are allowed on that function. |
-| `this` | `Name` itself must be used as a pre-contract (not post). |
-| `OtherContract` | `OtherContract` must also be a pre-contract on the function. |
-| `this, OtherContract` | Both requirements apply, in that order. |
-
-**`post_side`** describes what must or must not appear as a post-contract:
-
-| Form | Meaning |
-|---|---|
-| `!` | No post-contracts are allowed on that function. |
-| `this` | `Name` itself must be used as a post-contract (not pre). |
-| `A, B` | Both `A` and `B` must be post-contracts, in that order (`,`). |
-| `A \| B` | Any subset of `A`, `B` that is present must appear in that order (`\|`). |
-| `A & B` | Both `A` and `B` must be post-contracts, in any order (`&`). |
-| `!A` | `A` must **not** be a post-contract on the function. |
-| `A(2)` | Specifically the two-parameter overload of `A` is required. |
-
-The pre and post sides are separated by `:`.
-
-### Examples
-
-**Require the contract itself to be a pre-contract only (never post):**
-```
-contract Validated(x)
-{
-    assert(x != 0, "x must not be zero");
-} # binding { this : ! };
-
-// OK -- Validated is pre
-def foo(int x) -> int : Validated(x) { return x * 2; };
-
-// ERROR -- Validated is post, binding requires it to be pre
-def bar(int x) -> int { return x; } : Validated(x);
-```
-
-**Require a companion post-contract whenever this contract is used as pre:**
-```
-contract CheckInput(x)
-{
-    assert(x > 0, "input must be positive");
-} # binding { this : CheckOutput };
-
-contract CheckOutput
-{
-    assert(rval > 0, "output must be positive");
-};
-
-// OK
-def process(int x) -> int : CheckInput(x) { return x + 1; } : CheckOutput;
-
-// ERROR -- CheckOutput is missing
-def process2(int x) -> int : CheckInput(x) { return x + 1; };
-```
-
-**Forbid any pre-contracts when this contract is used as post:**
-```
-contract Finalize
-{
-    cleanup();
-} # binding { ! : this };
-
-// OK -- no pre-contracts, Finalize is post
-def shutdown() -> void { do_work(); } : Finalize;
-
-// ERROR -- SomeSetup is a pre-contract, binding forbids pre-contracts
-def shutdown2() -> void : SomeSetup { do_work(); } : Finalize;
-```
-
-**Require two post-contracts in order:**
-```
-contract Stage1
-{
-    log("stage 1");
-} # binding { this : Stage2, Stage3 };
-
-contract Stage2 { log("stage 2"); };
-contract Stage3 { log("stage 3"); };
-
-// OK
-def pipeline() -> void : Stage1 { work(); } : Stage2 : Stage3;
-
-// ERROR -- wrong order
-def pipeline2() -> void : Stage1 { work(); } : Stage3 : Stage2;
-```
-
-### Forward declarations
-
-Contracts may be forward-declared before their body is defined, including in comma-separated lists:
-
-```
-contract A, B(x, y), C;
-```
-
-A binding may only be placed on the definition, not the forward declaration.
-
-### Compiler errors
-
-When a function violates a binding, the compiler emits an error at the function definition naming
-the contract whose binding was violated, which side (`pre` or `post`) was violated, and what was
-required vs. what was found.
 
 ---
 
