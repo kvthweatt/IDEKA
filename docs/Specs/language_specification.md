@@ -815,18 +815,19 @@ def main() -> int
 ```
 
 <a id="bit-pointers"></a>
+### Bit Pointers  
+A bit pointer holds the address of a single bit. It is the addressable counterpart to bit indexing: `val[n]` reads bit n as a value, while `@val[n]` produces a pointer to that bit that can be stored, passed, and written through later. The pointee type names the storage the bit lives in, not the width of the read or write - a bit pointer always addresses exactly one bit.
 
-Bit Pointers
-A bit pointer holds the address of a single bit. It is the addressable counterpart to bit indexing: val[n]reads bitnas a value, while@val[n] produces a pointer to that bit that can be stored, passed, and written through later. The pointee type names the storage the bit lives in, not the width of the read or write — a bit pointer always addresses exactly one bit.
+```
+type`* iden;      // declare a bit pointer
+iden = @val[`n];  // take the address of bit n of val
+`*iden;           // read the bit
+`*iden = val[`n]; // write a bit value through the pointer
+```
+#### Numbering:
+Bit pointers use the same numbering as bit indexing and bit slicing: bit 0 is the leftmost bit of the value, and numbering increases moving right. Because all reads are left-to-right, bit n means the same thing regardless of the width of the value it lives in - `0x0500` and `0x0005` both number their bits from their leftmost bit, and bit 3 is the fourth bit from the left in either case. This is a read-order convention, not a byte-order one; a single byte has no endianness.
 
-text
-type\`\* iden;      // declare a bit pointer
-iden = @val[\`n];  // take the address of bit n of val
-\`\*iden;           // read the bit
-\`\*iden = val[\`n]; // write a bit value through the pointer
-Numbering. Bit pointers use the same numbering as bit indexing and bit slicing: bit 0 is the leftmost bit of the value, and numbering increases moving right. Because all reads are left-to-right, bit n means the same thing regardless of the width of the value it lives in — 0x0500 and 0x0005 both number their bits from their leftmost bit, and bit 3 is the fourth bit from the left in either case. This is a read-order convention, not a byte-order one; a single byte has no endianness.
-
-For a struct, numbering continues across member boundaries in declaration order, exactly as it does for bit slicing. Members are packed tightly with no padding, so member N's last bit is immediately followed by member N+1's first bit, and a bit pointer can address a bit that sits across a member boundary without any special syntax.
+For a struct, numbering continues across member boundaries in declaration order, exactly as it does for bit slicing. Members are packed tightly with no padding, so member `N's` last bit is immediately followed by member `N+1`'s first bit, and a bit pointer can address a bit that sits across a member boundary without any special syntax.
 
 Reading and writing. \`\*iden reads the bit as a `data{1}` value. \`\*iden = v writes the low bit of v to the pointed-to bit, leaving every other bit of the storage untouched. The write is in-place: the storage the pointer was taken from sees the change immediately.
 
