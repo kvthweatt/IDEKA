@@ -318,12 +318,9 @@ This is **not** an identity. `px @= @x;` is equivalent to `px = @@x;`: the right
 
 ### `const` and pointers
 
-The position of `const` decides what is constant:
-
 ```
-const int*  px; // Pointer to const value
-
-const* int* px; // Constant pointer to int pointer
+const int*  px; // pointer to const int: px can be repointed, *px can't be written
+const* int* px; // const pointer to int: px can't be repointed, *px can be written
 ```
 
 See also **Advanced pointer manipulation** and **Function Pointers** below.
