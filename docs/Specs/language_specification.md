@@ -4038,7 +4038,7 @@ The way this works is very straightforward. Whenever you obtain a function point
 
 If your program is x86_64 and you point at a run of ARM64 bytes, calling that pointer will crash your program. The bytes must be valid machine instructions for the architecture your program is running on.
 
-This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing any bytes destined for execution in any application.
+This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing and verifying any bytes destined for execution, integrity checking, trust chains, and auth updates in any application.
 
 <a id="code-smuggling"></a>
 ## **Code Smuggling**
