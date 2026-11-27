@@ -205,7 +205,6 @@ def test_multi_stub() -> bool
     bool ok = true;
     ulong x = 10ul;
     
-    // --- Round A: initial assignment ---
     print("  Round A (initial patch):\n");
 
     print("    f0(op_double,  10) -> ");
@@ -226,7 +225,6 @@ def test_multi_stub() -> bool
     print("    f5(op_identity,10) -> ");
     ok = pass(f5(x), 10ul)    & ok;
 
-    // --- Round B: cross-patch (rotate targets one slot) ---
     print("  Round B (rotated patch):\n");
 
     patch_target(p0, (ulong)@op_add100);

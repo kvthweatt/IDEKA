@@ -1,118 +1,203 @@
 # Table of Contents
 
+# Table of Contents
+
 - [IDEKA](#IDEKA)
   - [The Preprocessor](#the-preprocessor)
     - [Importing with `#import`](#importing-with-import)
     - [Importing with `#package`](#importing-with-package)
-  - [Declaring Types & The Type System](#declaring-types)
+    - [`#def`, `#dir`, `#warn`, and `#stop`](#def-dir-warn-and-stop)
+      - [Parameterized Substitution: `#psub`](#parameterized-substitution)
+        - [How `#psub` works](#how-psub-works)
+  - [Declaring Types & the Type System](#declaring-types)
     - [The `data` keyword](#the-data-keyword)
       - [The `typeof`, `sizeof`, `alignof`, and `endianof` built-ins](#the-typeof-sizeof-alignof-and-endianof-builtins)
       - [Direct type conversion](#direct-type-conversion)
       - [Casting](#casting)
-      - [Mixing Signed and Unsigned Values in Expressions](#mixing-signedunsigned-in-expressions)
+      - [Mixing Signed/Unsigned Values in Expressions](#mixing-signedunsigned-in-expressions)
       - [Endianness Handling](#endianness-handling)
-      - [`void` as a literal](#void-as-a-literal)
     - [Pointers](#pointers)
-      - [Taking an Address](#taking-an-address)
+      - [Taking an address](#taking-an-address)
       - [Dereferencing](#dereferencing)
-      - [Address Equals `@=`](#address-equals)
-      - [Address Casting `(@)`](#address-casting)
+      - [Address-equals `@=`](#address-equals)
+      - [`const` and pointers](#const-and-pointers)
+      - [Address casting `(@)`](#address-casting)
+      - [Advanced pointer manipulation](#advanced-pointer-manipulation)
+        - [Taking address of literals](#taking-address-of-literals)
+        - [Pointer to integer conversions](#pointer-to-integer-conversions)
     - [Arrays](#arrays)
-      - [Pointers to Arrays](#pointers-to-arrays)
-      - [Static Array Comprehension](#static-array-comprehension)
-      - [Static Array Comprehension with Dynamic Types](#static-array-comprehension-dynamic-type)
+      - [Pointers to arrays](#pointers-to-arrays)
+      - [Static array comprehension](#static-array-comprehension)
+      - [Static array comprehension using a dynamic type](#static-array-comprehension-dynamic-type)
+      - [Membership testing with `in`](#membership-testing-with-in)
+    - [Heap allocation](#heap-allocation)
+    - [Freeing from the heap](#freeing-from-the-heap)
     - [Structs](#structs)
+      - [C Compatible Structs](#c-compatible-structs)
+      - [Block initialization with `{}`](#block-initialization-with)
+      - [Block assignment](#block-assignment)
       - [Struct recast with `from`](#struct-recast-with-from)
     - [Dictionaries](#dictionaries)
+      - [Inline dict literals with `d{}`](#inline-dict-literals-with-d)
+    - [Memory Layout and Alignment Tricks](#memory-layout-and-alignment-tricks)
+      - [Bit-Field Manipulation](#bitfield-manipulation)
+      - [Advanced data manipulation techniques](#advanced-data-manipulation-techniques)
+      - [Reworking a loop](#reworking-a-loop)
+      - [Bit Slices](#bit-slices)
+      - [Taking bit slices from structs](#taking-bit-slices-from-structs)
+      - [Bit slices of bit slices](#bit-slices-of-bit-slices)
+      - [Bit Indexing](#bit-indexing)
+      - [Bit Iteration](#bitwise-iteration)
   - [Functions](#functions)
-    - [Prototypes](#prototypes)
+    - [Prototypes](#prototype-functions)
     - [Shorthand Functions](#shorthand-functions)
     - [i-Strings and f-Strings](#istrings-and-fstrings)
     - [Logic with if/elif/else](#logic-with-ifelifelse)
     - [Enumerated Lists](#enumerated-lists)
     - [Unions](#unions)
     - [Switching](#switching)
-    - [Tagged unions](#tagged-unions)
+      - [Tagged unions](#tagged-unions)
+    - [Loops](#loops)
+    - [Recursion](#recursion)
+      - [Strict Recursion with `<~`](#strict-recursion-with)
+      - [Escaping strict recursion with `escape`](#escaping-strict-recursion-with-escape)
+    - [Single-initialized variables with `singinit`](#singleinitialized-variables-with-singinit)
+    - [The Ditto Operator `#"`](#the-ditto-operator)
+      - [Repeating Statements With Ditto](#repeating-statements-with-ditto)
+      - [Parameterized Ditto in Function Calls](#parameterized-ditto-in-function-calls)
+    - [Named Expressions with `macro`](#expressionbased-macros-with-macro)
+    - [Using Dual-Return Functions as an Error Return Mechanism](#error-returns)
     - [Chaining Functions](#chaining-functions)
-    - [Variadic functions](#variadic-functions)
-    - [Error Returns](#error-returns)
+    - [Variadic Functions](#variadic-functions)
+    - [Function Pointers](#function-pointers)
+    - [Functions and `contract`](#functions-and-contract)
+    - [Contract `# binding`](#contract-binding)
+      - [Syntax](#contract-binding-syntax)
+      - [Examples](#contract-binding-examples)
+      - [Forward Declarations](#contract-binding-forward-declarations)
+      - [Contract `# binding` Compiler Errors](#contract-binding-compiler-errors)
+    - [Defining Type Functions](#defining-type-functions)
+    - [Functionless Types](#functionless-types)
+    - [Templates](#templates)
+      - [Template Constraints](#template-constraints)
+      - [Templates and Type Relationships](#templates-and-type-relationships)
     - [External Functions (FFI)](#external-functions-ffi)
     - [Exporting Functions with `export`](#exporting-functions-with-export)
+    - [Raw Bytecode Functions - ACE as a Feature](#raw-bytecode-functions)
   - [Namespaces](#namespaces)
-  - [Structs](#structs)
+    - [Namespace elimination with `!using` or `not using`](#namespace-elimination-with-using-or-not-using)
+    - [Deprecation with `deprecate`](#deprecation-with-deprecate)
   - [Objects](#objects)
-    - [Required methods](#required-methods)
-  - [Deferred object cleanup with `defer`](#deferred-object-cleanup-with-defer)
-  - [Traits](#traits)
-  - [Interfaces](#interfaces)
-    - [Protocol relationship operators](#protocol-relationship-operators)
-    - [Attachment rules](#attachment-rules)
-  - [Public/Private with Objects/Structs](#publicprivate-with-objects)
-  - [You can also use in-line assembly directly](#you-can-also-use-inline-assembly-directly)
-  - [Loops](#loops)
-  - [Membership testing with `in`](#membership-testing-with-in)
-  - [Single-initialized variables with `singinit`](#singleinitialized-variables-with-singinit)
-  - [Recursion](#recursion)
-  - [Strict Recursion with `<~`](#strict-recursion-with)
-  - [Escaping strict recursion with `escape`](#escaping-strict-recursion-with-escape)
-  - [Error handling with `try`/`throw`/`catch`](#error-handling-with-trythrowcatch)
-  - [Namespace elimination with `!using` or `not using`](#namespace-elimination-with-using-or-not-using)
-  - [Deprecation with `deprecate`](#deprecation-with-deprecate)
-  - [Assertion with `assert()`](#assertion-with-assert)
-  - [Heap allocation](#heap-allocation)
-  - [Freeing from the heap](#freeing-from-the-heap)
-  - [Custom operators and overloading](#custom-operators-and-overloading)
-  - [Variadic Operators](#variadic-operator)
-  - [Functions and `contract`](#functions-and-contract)
-  - [Contract `# binding`](#contract-binding)
-  - [Contracts on operators](#contracts-on-operators)
-  - [Type Functions](#defining-type-functions)
-  - [Functionless Types](#functionless-types)
-  - [Expression-based macros with `macro`](#expressionbased-macros-with-macro)
-  - [Templates](#templates)
-  - [Templating operators](#templating-operators)
-  - [Combining templates, contracts, and operators](#combining-templates-contracts-and-operators)
-  - [Advanced pointer manipulation](#advanced-pointer-manipulation)
-    - [Taking the address of literals](#taking-address-of-literals)
-    - [Pointer to integer conversions](#pointer-to-integer-conversions)
-  - [Memory Layout and Alignment Tricks](#memory-layout-and-alignment-tricks)
-    - [Bit-Field Manipulation](#bitfield-manipulation)
-    - [Advanced data manipulation techniques](#advanced-data-manipulation-techniques)
-    - [Reworking a loop](#reworking-a-loop)
-    - [Bit slices](#bit-slices)
-    - [Taking bit slices from structs](#taking-bit-slices-from-structs)
-    - [Bit slices of bit slices](#bit-slices-of-bit-slices)
-    - [Bit Indexing](#bit-indexing)
-    - [Bitwise Iteration](#bitwise-iteration)
-  - [Advanced Data Type Features](#advanced-data-type-features)
-    - [Unusual Bit Widths](#unusual-bit-widths)
-  - [Function Pointers](#function-pointers)
-  - [Callbacks](#callbacks)
-  - [Raw bytecode functions](#raw-bytecode-functions)
-  - [Ownership with the tie operator `~`](#ownership-with-the-tie-operator)
-  - [Control Flow Edge Cases](#control-flow-edge-cases)
-    - [Nested Switches with Fallthrough](#nested-switches-with-fallthrough)
-    - [Complex Try/Catch with Multiple Types](#complex-trycatch-with-multiple-types)
-    - [Nested Loops with Break/Continue](#nested-loops-with-breakcontinue)
-    - [Simple Packet Parser](#simple-packet-parser)
-    - [Fixed-Point Math](#fixedpoint-math)
-  - [Type System Edge Cases](#type-system-edge-cases)
-    - [`void` semantics](#void-semantics)
-- [Calling Conventions](#calling-conventions)
-- [Stringification with `$`](#stringification-with)
-- [Codification with `~$`](#codification)
-- [The Ditto Operator](#the-ditto-operator)
-- [Compile Time Execution with `comptime`](#compile-time-execution-with-comptime)
-- [Emitting code back into your source file with `emitideka`](#emitideka)
-- [Async Functions](#async-functions)
-- [Modules and Build Blocks](#modules-and-build-blocks)
-- [The Effect System - Algebraic Effect Tracking](#IDEKA-effect-system)
-- [Keyword list](#keyword-list)
-- [Operator list](#operator-list)
-- [Operator Precedence and Associativity](#operator-precedence-and-associativity)
-  - [Primitive types](#primitive-types)
-  - [All types](#all-types)
-  - [Preprocesor directives](#preprocesor-directives)
+      - [Required methods](#required-methods)
+      - [Deferred object cleanup with `defer`](#deferred-object-cleanup-with-defer)
+      - [Inheritance](#inheritance)
+    - [Traits](#traits)
+    - [Interfaces](#interfaces)
+      - [Attaching an interface](#attaching-an-interface)
+      - [Protocol relationship operators](#protocol-relationship-operators)
+      - [`A : B` - call permission](#a-b-call-permission)
+      - [`B(A)` - pass-into permission](#ba-pass-into-permission)
+      - [`A -> B` - return-to permission](#a-b-return-to-permission)
+      - [Precedence](#protocol-precedence)
+      - [Full example](#protocol-full-example)
+      - [Attachment rules](#attachment-rules)
+    - [Public/Private with Objects](#publicprivate-with-objects)
+      - [Pointers to objects, and structs](#pointers-to-objects-and-structs)
+    - [Error handling with `try`/`throw`/`catch`](#error-handling-with-trythrowcatch)
+    - [Assertion with `assert()`](#assertion-with-assert)
+    - [Custom Operators and Overloading](#custom-operators-and-overloading)
+      - [Variadic Operators](#variadic-operators)
+      - [`contract` on custom operators](#contracts-on-operators)
+      - [Templating Operators](#templating-operators)
+      - [Combining Templates, Contracts, and Operators](#combining-templates-contracts-and-operators)
+    - [Advanced Data Type Features](#advanced-data-type-features)
+      - [Unusual Bit Widths](#unusual-bit-widths)
+    - [Function Pointers](#function-pointers-1)
+    - [Callbacks](#callbacks)
+    - [Ownership with the tie operator `~`](#ownership-with-the-tie-operator)
+    - [Control Flow Edge Cases](#control-flow-edge-cases)
+      - [Nested Switches with Fallthrough](#nested-switches-with-fallthrough)
+      - [Complex Try/Catch with Multiple Types](#complex-trycatch-with-multiple-types)
+      - [Nested Loops with Break/Continue](#nested-loops-with-breakcontinue)
+      - [Simple Packet Parser](#simple-packet-parser)
+      - [Fixed-Point Math](#fixedpoint-math)
+    - [Type System Edge Cases](#type-system-edge-cases)
+      - [`void` semantics](#void-semantics)
+  - [Calling Conventions](#calling-conventions)
+  - [Stringification with `$`](#stringification-with)
+  - [Codification with `~$`](#codification)
+  - [Compile-Time Execution with `comptime`](#compile-time-execution-with-comptime)
+  - [`emitideka` - Compile-Time Code Generation](#emitideka)
+    - [Splice terminators](#splice-terminators)
+      - [`}#;` - exit emitideka, stay in comptime](#exit-emitideka-stay-in-comptime)
+      - [`#};` - close a brace inside emitideka without ending it](#close-a-brace-inside-emitideka-without-ending-it)
+      - [How to tell them apart](#how-to-tell-them-apart)
+    - [Spliced code generation example](#spliced-code-generation-example)
+    - [Execution order](#execution-order)
+  - [You can also use in-line assembly directly](#you-can-also-use-in-line-assembly-directly)
+  - [Async Functions](#async-functions)
+    - [When a call launches a task](#when-a-call-launches-a-task)
+    - [When a task is joined](#when-a-task-is-joined)
+    - [Requirements](#async-requirements)
+    - [Async tags](#async-tags)
+      - [Defining a tag](#defining-a-tag)
+      - [Relation operators](#relation-operators)
+      - [Attaching a tag](#attaching-a-tag)
+      - [Footprints and checking](#footprints-and-checking)
+      - [Static errors](#static-errors)
+    - [Lowering](#lowering)
+    - [Example](#async-example)
+  - [Modules and Build Blocks](#modules-and-build-blocks)
+    - [Defining a module](#defining-a-module)
+    - [Referencing a module with `from`](#referencing-a-module-with-from)
+    - [Using modules with `#[requires]`](#using-modules-with-requires)
+    - [Placement](#module-placement)
+    - [Build tags](#build-tags)
+    - [Overrides and locks](#overrides-and-locks)
+    - [Programs](#programs)
+    - [Per-module checks](#per-module-checks)
+    - [Output](#output)
+    - [Command line](#command-line)
+    - [Errors](#module-errors)
+  - [The Effect System - Algebraic Effect Tracking](#IDEKA-effect-system)
+    - [Overview](#effect-overview)
+    - [Syntax](#effect-syntax)
+      - [Effect declaration](#effect-declaration)
+      - [Origin annotation](#origin-annotation)
+    - [Compiler Flags](#effect-compiler-flags)
+    - [Operator Set](#effect-operator-set)
+      - [Unary operators](#effect-unary-operators)
+      - [Binary operators](#effect-binary-operators)
+      - [Grouping](#effect-grouping)
+    - [Propagation Rules](#propagation-rules)
+    - [Conflict Detection](#conflict-detection)
+      - [Exclusive or (`^|`)](#conflict-exclusive-or)
+      - [Mutual implication (`<->`)](#conflict-mutual-implication)
+    - [Pure Enforcement](#pure-enforcement)
+    - [Built-in Effects](#built-in-effects)
+      - [IO family](#io-family)
+      - [Alloc family](#alloc-family)
+      - [Unsafe family](#unsafe-family)
+      - [Mem family](#mem-family)
+      - [Sync family](#sync-family)
+      - [Crypto family](#crypto-family)
+      - [Process family](#process-family)
+      - [Hook family](#hook-family)
+      - [Privilege family](#privilege-family)
+      - [Time family](#time-family)
+      - [Anchor effects](#anchor-effects)
+    - [Built-in Implication Rules](#built-in-implication-rules)
+    - [Primitive Effect Sources](#primitive-effect-sources)
+    - [Complete Example](#effect-complete-example)
+    - [Notes](#effect-notes)
+  - [Keyword list](#keyword-list)
+  - [Compiler Built-Ins](#compiler-builtins)
+    - [The `compiler.` namespace](#the-compiler-namespace)
+  - [Operator list](#operator-list)
+  - [Operator Precedence and Associativity](#operator-precedence-and-associativity)
+    - [Primitive types](#primitive-types)
+    - [All types](#all-types)
+    - [Preprocesor directives](#preprocesor-directives)
 
 ---
 
@@ -729,6 +814,54 @@ def main() -> int
 };
 ```
 
+<a id="bit-pointers"></a>
+
+Bit Pointers
+A bit pointer holds the address of a single bit. It is the addressable counterpart to bit indexing: val[n]reads bitnas a value, while@val[n] produces a pointer to that bit that can be stored, passed, and written through later. The pointee type names the storage the bit lives in, not the width of the read or write — a bit pointer always addresses exactly one bit.
+
+text
+type\`\* iden;      // declare a bit pointer
+iden = @val[\`n];  // take the address of bit n of val
+\`\*iden;           // read the bit
+\`\*iden = val[\`n]; // write a bit value through the pointer
+Numbering. Bit pointers use the same numbering as bit indexing and bit slicing: bit 0 is the leftmost bit of the value, and numbering increases moving right. Because all reads are left-to-right, bit n means the same thing regardless of the width of the value it lives in — 0x0500 and 0x0005 both number their bits from their leftmost bit, and bit 3 is the fourth bit from the left in either case. This is a read-order convention, not a byte-order one; a single byte has no endianness.
+
+For a struct, numbering continues across member boundaries in declaration order, exactly as it does for bit slicing. Members are packed tightly with no padding, so member N's last bit is immediately followed by member N+1's first bit, and a bit pointer can address a bit that sits across a member boundary without any special syntax.
+
+Reading and writing. \`\*iden reads the bit as a `data{1}` value. \`\*iden = v writes the low bit of v to the pointed-to bit, leaving every other bit of the storage untouched. The write is in-place: the storage the pointer was taken from sees the change immediately.
+
+Example:
+
+```
+#import <standard.idk>;
+
+def main() -> int
+{
+    char c = 'C';  // 01000011
+
+    char`* bpc = @c[`6];
+
+    if (`*bpc == 1)
+    {
+        println("Bit pointer working!");
+    };
+
+    `*bpc = 0;
+
+    println(f"{c++}");
+    #";
+    return 0;
+};
+```
+Output:
+```
+Bit pointer working!
+A
+B
+```
+
+`'C'` is `01000011`, bit 6 (the seventh bit from the left) is 1. Writing 0 through the pointer turns `'C'` into `'A'` (`01000001`), and the two `c++` statements print `'A'` and `'B'`.
+
 ---
 
 <a id="arrays"></a>
@@ -1017,7 +1150,7 @@ Header h from buf[2:6];
 
 ---
 
-<a id="dict"></a>
+<a id="dictionaries"></a>
 ## **Dictionaries**
 
 Definition: `dict{KeyType:ValueType} myDict`  
@@ -1060,7 +1193,7 @@ dict{"":""} b { "y": "2" };
 dict{"":""} c = a + b;
 ```
 
-
+<a id="inline-dict-literals-with-d"></a>
 ### Inline dict literals with `d{}`
 
 A `d{}` expression creates an anonymous dict inline without declaring a named variable. The result can be immediately accessed with `[key]`:
@@ -1701,6 +1834,237 @@ def main() -> int
     return 0;
 };
 ```
+
+<a id="memory-layout-and-alignment-tricks"></a>
+## **Memory Layout and Alignment Tricks**
+
+<a id="classic-bitfield-manipulation"></a>
+### Classic Bit-Field Manipulation
+```
+// 13-bit signed value, 16-bit aligned
+signed data{13:16} as strange13;
+
+strange13 value = 0x0FFF;  // Max positive value for 13 bits
+print(value);              // 4095
+
+value = 0x1000;            // Sign bit set (bit 12)
+print(value);              // -4096 (two's complement)
+
+// Extract specific bit ranges
+u32 packed = 0x12345678;
+
+// The Classic Way
+def extract_bits(uint32 value, int start, int length) -> uint32
+{
+    uint32 mask = ((1 << length) - 1) << start;
+    return (value & mask) >> start;
+};
+
+uint32 nibble0 = extract_bits(packed, 0, 4);   // 0x8
+uint32 nibble3 = extract_bits(packed, 12, 4);  // 0x5
+uint32 byte1 = extract_bits(packed, 8, 8);     // 0x56
+```
+
+<a id="advanced-data-manipulation-techniques"></a>
+### **Shrinking Bitwise Shift & Mask Operations**
+**C**:
+```C
+len_block[0]  = (byte)((aad_bits    >> 56) & 0xFF);
+len_block[1]  = (byte)((aad_bits    >> 48) & 0xFF);
+len_block[2]  = (byte)((aad_bits    >> 40) & 0xFF);
+len_block[3]  = (byte)((aad_bits    >> 32) & 0xFF);
+len_block[4]  = (byte)((aad_bits    >> 24) & 0xFF);
+len_block[5]  = (byte)((aad_bits    >> 16) & 0xFF);
+len_block[6]  = (byte)((aad_bits    >>  8) & 0xFF);
+len_block[7]  = (byte)( aad_bits           & 0xFF);
+len_block[8]  = (byte)((cipher_bits >> 56) & 0xFF);
+len_block[9]  = (byte)((cipher_bits >> 48) & 0xFF);
+len_block[10] = (byte)((cipher_bits >> 40) & 0xFF);
+len_block[11] = (byte)((cipher_bits >> 32) & 0xFF);
+len_block[12] = (byte)((cipher_bits >> 24) & 0xFF);
+len_block[13] = (byte)((cipher_bits >> 16) & 0xFF);
+len_block[14] = (byte)((cipher_bits >>  8) & 0xFF);
+len_block[15] = (byte)( cipher_bits        & 0xFF);
+```
+
+**IDEKA Equivalent:**
+```idk
+len_block[0..7]  = (byte[8])(u64)aad_bits;
+len_block[8..15] = (byte[8])(u64)cipher_bits;
+```
+
+
+
+<a id="reworking-a-loop"></a>
+### **Reworking a loop**
+**C:**
+```
+for (i = 0; i < 4; i++)
+{
+    hash[i] = (byte)((ctx.state[0] >> (24 - i * 8)) & 0xFF);
+    hash[i + 4] = (byte)((ctx.state[1] >> (24 - i * 8)) & 0xFF);
+    hash[i + 8] = (byte)((ctx.state[2] >> (24 - i * 8)) & 0xFF);
+    hash[i + 12] = (byte)((ctx.state[3] >> (24 - i * 8)) & 0xFF);
+    hash[i + 16] = (byte)((ctx.state[4] >> (24 - i * 8)) & 0xFF);
+    hash[i + 20] = (byte)((ctx.state[5] >> (24 - i * 8)) & 0xFF);
+    hash[i + 24] = (byte)((ctx.state[6] >> (24 - i * 8)) & 0xFF);
+    hash[i + 28] = (byte)((ctx.state[7] >> (24 - i * 8)) & 0xFF);
+};
+```
+**IDEKA Equivalent:**
+```idk
+hash[0..3]   = (byte[4])(be32)ctx.state[0];
+hash[4..7]   = (byte[4])(be32)ctx.state[1];
+hash[8..11]  = (byte[4])(be32)ctx.state[2];
+hash[12..15] = (byte[4])(be32)ctx.state[3];
+hash[16..19] = (byte[4])(be32)ctx.state[4];
+hash[20..23] = (byte[4])(be32)ctx.state[5];
+hash[24..27] = (byte[4])(be32)ctx.state[6];
+hash[28..31] = (byte[4])(be32)ctx.state[7];
+```
+**If you wanna get really slick:**
+```idk
+hash[0..31] = (byte[32])(be32)ctx.state[0..7];
+```
+
+<a id="bit-slices"></a>
+### **Bit Slices**
+The bit-slice operator is a double backtick, **\`\`**, addresses individual bits of a value using one consistent
+numbering scheme: **bit 0 is the most significant bit of the entire value, and bit numbers
+increase moving toward the least significant bit.** This numbering runs across the whole
+source - for a struct, it continues across field boundaries in declaration order, exactly as if
+the struct's fields had been concatenated into one big-endian buffer. Because struct members
+are packed tightly with no padding between them (see "Structs"), bit numbering never has to skip
+over hidden padding bits when it crosses from one member into the next - member N's last bit is
+immediately followed by member N+1's first bit.
+
+A slice written with the start index greater than the end index (as in the example below) reads
+the same bit range but reverses the order of the bits in the result. Bit slices may span up to
+the full width of a native integer type (8 through 64 bits).
+
+Bit slices are distinct from array slices: `x[a:b]` selects elements of an array by index, while `` x[a``b] `` selects bits of a value.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    byte x = 55;
+
+    x[0``7] = x[7``0]; // Reverse the bits
+
+    println(int(x)); // 236
+
+    return 0;
+};
+```
+
+<a id="taking-bit-slices-from-structs"></a>
+### ***Taking bit slices from structs***
+Bit slicing structs can cross member boundaries, because structs members are packed tightly in memory.  
+If a type inside the struct has an alignment greater than its width, there will be padding in the struct.  
+Padding from alignment is filled with zeros.
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+struct xx { int a, b; };
+
+main() -> int
+{
+    data{4} as u4;
+    xx yy = {5,10};
+    u4 a = yy[60``63]; // 10 because 0b1010
+
+    print((int)a);
+
+    return 0;
+};
+```
+
+<a id="bit-slices-of-bit-slices"></a>
+### ***Bit slices of bit slices***
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+struct xx { int a, b; };
+
+main() -> int
+{
+    data{4} as u4;
+    data{2} as u2;
+    xx yy = {5,10};
+    u4 a = yy[60``63]; // 10 because 0b1010
+    u2 b = a[0``1];
+
+    print(int(b)); // 2, because 0b10
+
+    return 0;
+};
+```
+Bit-slice results are ordinary integer values of the slice's width, so a bit slice can itself be
+the source of another bit slice - there's no special chaining logic, it falls out naturally.
+
+Assigning into a bit slice (` x[a``b] = value;`) replaces just that bit range in place,
+leaving every other bit of the target untouched:
+```
+u32 packed = 0x12345678;
+packed[24``31] = 0xFF;   // replace just the lowest byte
+// packed == 0x123456FF
+```
+The assignment target must be a plain variable, and the start/end indices must be compile-time
+constants.
+
+<a id="bit-indexing"></a>
+### **Bit Indexing**
+Let's say you want to mess with individual bits without storing it in a new 1 bit type variable.  
+Bit indexing lets you target a specific bit of a value, or even a struct!
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+        byte b;
+
+        b[`7] = 1;
+
+        print("Success!") if (b == 1);
+        -> b[`0];
+};
+```
+
+<a id="bitwise-iteration"></a>
+### **Bit Iteration**
+To iterate over the bits of a value or struct, use bitwise iteration. Here's what that looks like:
+```
+#import <standard.idk>;
+
+using standard::io::console;
+
+def main() -> int
+{
+    int i = 420691337;
+
+    for (`x in i)  // "for bit x in i"
+    {
+        print((int)x);  // x is a data{1} type
+    };
+
+    -> 0;
+};
+```
+Output:
+```
+00011001000100110011110110001001
+```
+
+This iterates through the bits of `i`, where `x` equals the bit at **i[`current_iteration]**.
 
 <a id="the-ditto-operator"></a>
 ## **The Ditto Operator `#"`**
@@ -3417,7 +3781,7 @@ spliced into the operator's generated function body at compile time, so they run
 that dispatches to that specific overload, whether the call arrived through the
 rewritten-call-site path (new symbols) or the type-matched-dispatch path (built-in overloads).
 
-<a id="variadic-operator"></a>
+<a id="variadic-operators"></a>
 ## **Variadic Operators**
 A variadic operator is one symbol used in a chain of operands. Every use of the symbol and every operand is recorded, and the same operator function receives four values describing the chain:
 
@@ -3567,252 +3931,6 @@ Result: `60`
 
 ---
 
-<a id="memory-layout-and-alignment-tricks"></a>
-## **Memory Layout and Alignment Tricks**
-
-<a id="bitfield-manipulation"></a>
-### Bit-Field Manipulation
-```
-// 13-bit signed value, 16-bit aligned
-signed data{13:16} as strange13;
-
-strange13 value = 0x0FFF;  // Max positive value for 13 bits
-print(value);              // 4095
-
-value = 0x1000;            // Sign bit set (bit 12)
-print(value);              // -4096 (two's complement)
-
-// Extract specific bit ranges
-u32 packed = 0x12345678;
-
-def extract_bits(uint32 value, int start, int length) -> uint32
-{
-    uint32 mask = ((1 << length) - 1) << start;
-    return (value & mask) >> start;
-};
-
-uint32 nibble0 = extract_bits(packed, 0, 4);   // 0x8
-uint32 nibble3 = extract_bits(packed, 12, 4);  // 0x5
-uint32 byte1 = extract_bits(packed, 8, 8);     // 0x56
-```
-
----
-
-<a id="advanced-data-manipulation-techniques"></a>
-### ***Advanced data manipulation techniques***
-***C***:
-```
-len_block[0]  = (byte)((aad_bits    >> 56) & 0xFF);
-len_block[1]  = (byte)((aad_bits    >> 48) & 0xFF);
-len_block[2]  = (byte)((aad_bits    >> 40) & 0xFF);
-len_block[3]  = (byte)((aad_bits    >> 32) & 0xFF);
-len_block[4]  = (byte)((aad_bits    >> 24) & 0xFF);
-len_block[5]  = (byte)((aad_bits    >> 16) & 0xFF);
-len_block[6]  = (byte)((aad_bits    >>  8) & 0xFF);
-len_block[7]  = (byte)( aad_bits           & 0xFF);
-len_block[8]  = (byte)((cipher_bits >> 56) & 0xFF);
-len_block[9]  = (byte)((cipher_bits >> 48) & 0xFF);
-len_block[10] = (byte)((cipher_bits >> 40) & 0xFF);
-len_block[11] = (byte)((cipher_bits >> 32) & 0xFF);
-len_block[12] = (byte)((cipher_bits >> 24) & 0xFF);
-len_block[13] = (byte)((cipher_bits >> 16) & 0xFF);
-len_block[14] = (byte)((cipher_bits >>  8) & 0xFF);
-len_block[15] = (byte)( cipher_bits        & 0xFF);
-```
-
-***IDEKA equivalent***
-```
-len_block[0..7]  = (byte[8])(u64)aad_bits;
-len_block[8..15] = (byte[8])(u64)cipher_bits;
-```
-
-```
-uint* pd = @p.digits[0];
-
-// Proper IDEKA
-pd = [0xFFFFFFEDu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-      0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu];
-
-/// C-like
-pd[0] = 0xFFFFFFED;
-pd[1] = 0xFFFFFFFF;
-pd[2] = 0xFFFFFFFF;
-pd[3] = 0xFFFFFFFF;
-pd[4] = 0xFFFFFFFF;
-pd[5] = 0xFFFFFFFF;
-pd[6] = 0xFFFFFFFF;
-pd[7] = 0x7FFFFFFF;
-///
-```
-
-<a id="reworking-a-loop"></a>
-### **Reworking a loop**
-```
-for (i = 0; i < 4; i++)
-{
-    hash[i] = (byte)((ctx.state[0] >> (24 - i * 8)) & 0xFF);
-    hash[i + 4] = (byte)((ctx.state[1] >> (24 - i * 8)) & 0xFF);
-    hash[i + 8] = (byte)((ctx.state[2] >> (24 - i * 8)) & 0xFF);
-    hash[i + 12] = (byte)((ctx.state[3] >> (24 - i * 8)) & 0xFF);
-    hash[i + 16] = (byte)((ctx.state[4] >> (24 - i * 8)) & 0xFF);
-    hash[i + 20] = (byte)((ctx.state[5] >> (24 - i * 8)) & 0xFF);
-    hash[i + 24] = (byte)((ctx.state[6] >> (24 - i * 8)) & 0xFF);
-    hash[i + 28] = (byte)((ctx.state[7] >> (24 - i * 8)) & 0xFF);
-};
-```
-Turns into:
-```
-hash[0..3]   = (byte[4])(be32)ctx.state[0];
-hash[4..7]   = (byte[4])(be32)ctx.state[1];
-hash[8..11]  = (byte[4])(be32)ctx.state[2];
-hash[12..15] = (byte[4])(be32)ctx.state[3];
-hash[16..19] = (byte[4])(be32)ctx.state[4];
-hash[20..23] = (byte[4])(be32)ctx.state[5];
-hash[24..27] = (byte[4])(be32)ctx.state[6];
-hash[28..31] = (byte[4])(be32)ctx.state[7];
-```
-
-<a id="bit-slices"></a>
-### **Bit Slices**
-The bit-slice operator `` x[a``b] `` addresses individual bits of a value using one consistent
-numbering scheme: **bit 0 is the most significant bit of the entire value, and bit numbers
-increase moving toward the least significant bit.** This numbering runs across the whole
-source - for a struct, it continues across field boundaries in declaration order, exactly as if
-the struct's fields had been concatenated into one big-endian buffer. Because struct members
-are packed tightly with no padding between them (see "Structs"), bit numbering never has to skip
-over hidden padding bits when it crosses from one member into the next - member N's last bit is
-immediately followed by member N+1's first bit.
-
-A slice written with the start index greater than the end index (as in the example below) reads
-the same bit range but reverses the order of the bits in the result. Bit slices may span up to
-the full width of a native integer type (8 through 64 bits).
-
-Bit slices are distinct from array slices: `x[a:b]` selects elements of an array by index, while `` x[a``b] `` selects bits of a value.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-    byte x = 55;
-
-    x[0``7] = x[7``0]; // Reverse the bits
-
-    println(int(x)); // 236
-
-    return 0;
-};
-```
-
-<a id="taking-bit-slices-from-structs"></a>
-### ***Taking bit slices from structs***
-Bit slicing structs can cross member boundaries, because structs members are packed tightly in memory.  
-If a type inside the struct has an alignment greater than its width, there will be padding in the struct.  
-Padding from alignment is filled with zeros.
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-struct xx { int a, b; };
-
-main() -> int
-{
-    data{4} as u4;
-    xx yy = {5,10};
-    u4 a = yy[60``63]; // 10 because 0b1010
-
-    print((int)a);
-
-    return 0;
-};
-```
-
-<a id="bit-slices-of-bit-slices"></a>
-### ***Bit slices of bit slices***
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-struct xx { int a, b; };
-
-main() -> int
-{
-    data{4} as u4;
-    data{2} as u2;
-    xx yy = {5,10};
-    u4 a = yy[60``63]; // 10 because 0b1010
-    u2 b = a[0``1];
-
-    print(int(b)); // 2, because 0b10
-
-    return 0;
-};
-```
-Bit-slice results are ordinary integer values of the slice's width, so a bit slice can itself be
-the source of another bit slice - there's no special chaining logic, it falls out naturally.
-
-Assigning into a bit slice (` x[a``b] = value;`) replaces just that bit range in place,
-leaving every other bit of the target untouched:
-```
-u32 packed = 0x12345678;
-packed[24``31] = 0xFF;   // replace just the lowest byte
-// packed == 0x123456FF
-```
-The assignment target must be a plain variable, and the start/end indices must be compile-time
-constants.
-
-<a id="bit-indexing"></a>
-### **Bit Indexing**
-Let's say you want to mess with individual bits without storing it in a new 1 bit type variable.  
-Bit indexing lets you target a specific bit of a value, or even a struct!
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-main() -> int
-{
-        byte b;
-
-        b[`7] = 1;
-
-        print("Success!") if (b == 1);
-        -> b[`0];
-};
-```
-
-<a id="bitwise-iteration"></a>
-### **Bit Iteration**
-To iterate over the bits of a value or struct, use bitwise iteration. Here's what that looks like:
-```
-#import <standard.idk>;
-
-using standard::io::console;
-
-def main() -> int
-{
-    int i = 420691337;
-
-    for (`x in i)  // "for bit x in i"
-    {
-        print((int)x);  // x is a data{1} type
-    };
-
-    -> 0;
-};
-```
-Output:
-```
-00011001000100110011110110001001
-```
-
-This iterates through the bits of `i`, where `x` equals the bit at **i[`current_iteration]**.
-
----
-
 <a id="advanced-data-type-features"></a>
 ## **Advanced Data Type Features**
 
@@ -3897,7 +4015,10 @@ def main() -> int
 ```
 
 <a id="raw-bytecode-functions"></a>
-## **Raw bytecode functions**
+## **Raw Bytecode Functions - ACE as a Feature**
+Arbitrary Code Execution or ACE is normally a scary topic, and for good reason.
+
+This is an example of one of Ideka's sharp tools. Use it carefully.
 ```
 #import <standard.idk>;
 
@@ -3906,12 +4027,17 @@ using standard::io::console;
 def main() -> int
 {
     byte[] some_bytecode = [0x48, 0x31, 0xC0, 0xC3];  // xor rax,rax ; ret
-    def{}* fp()->void = @some_bytecode;
+    {}* fp()->void = @some_bytecode;
     fp();
     
     return 0;
 };
 ```
+The way this works is very straightforward. Whenever you obtain a function pointer to some target function, think about what the memory looks like at runtime. Somewhere in your program's memory space, there is an address and that address is the starting byte of the function you're targeting. It is merely a sequence of bytes that also can translate to machine instructions. The same principle is here, you obtain a function pointer to the starting machine byte, it just happens to be stored in an array.
+
+If your program is x86_64 and you point at a run of ARM64 bytes, calling that pointer will crash your program. The bytes must be valid machine instructions for the architecture your program is running on.
+
+This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing any bytes destined for execution in any application.
 
 ---
 
