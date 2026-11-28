@@ -11,8 +11,10 @@
 #def FHF_TYPES 1;
 
 #ifndef IDEKA_STANDARD_TYPES
-#import "redtypes.idk";
+#import <types.idk>;
 #endif;
+
+using standard::types;
 
 // ============================================================================
 //  Version

@@ -19,11 +19,11 @@
 #def FHF_CRYPTO 1;
 
 #ifndef FHF_TYPES
-#import "fhf\\fhf_types.idk";
+#import <fhf\\fhf_types.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_CRYPTO
-#import "redcrypto.idk";
+#import <cryptography.idk>;
 #endif;
 
 using standard::crypto::hashing::SHA256;

@@ -23,7 +23,7 @@
 #def FHF_THREADS 1;
 
 #ifndef FHF_TYPES
-#import "fhf\\fhf_types.idk";
+#import <fhf\\fhf_types.idk>;
 #endif;
 
 // Forward declarations

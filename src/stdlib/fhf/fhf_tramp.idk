@@ -25,15 +25,15 @@
 #def FHF_TRAMP 1;
 
 #ifndef FHF_TYPES
-#import "fhf\\fhf_types.idk";
+#import <fhf\\fhf_types.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_MEMORY
-#import "redmemory.idk";
+#import <memory.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_ATOMICS
-#import "atomics.idk";
+#import <atomics.idk>;
 #endif;
 
 using standard::atomic;

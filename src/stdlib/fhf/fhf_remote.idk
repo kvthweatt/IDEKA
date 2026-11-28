@@ -30,11 +30,11 @@
 #def FHF_REMOTE 1;
 
 #ifndef FHF_RUNTIME
-#import "fhf\\fhf_runtime.idk";
+#import <fhf\\fhf_runtime.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_NET
-#import "rednet_windows.idk";
+#import <net_windows.idk>;
 #endif;
 
 using standard::net;

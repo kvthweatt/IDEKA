@@ -30,22 +30,22 @@
 #def FHF_ENGINE 1;
 
 #ifndef FHF_TYPES
-#import "fhf\\fhf_types.idk";
+#import <fhf\\fhf_types.idk>;
 #endif;
 #ifndef FHF_SYM
-#import "fhf\\fhf_sym.idk";
+#import <fhf\\fhf_sym.idk>;
 #endif;
 #ifndef FHF_TRAMP
-#import "fhf\\fhf_tramp.idk";
+#import <fhf\\fhf_tramp.idk>;
 #endif;
 #ifndef FHF_THREADS
-#import "fhf\\fhf_threads.idk";
+#import <fhf\\fhf_threads.idk>;
 #endif;
 #ifndef FHF_CRYPTO
-#import "fhf\\fhf_crypto.idk";
+#import <fhf\\fhf_crypto.idk>;
 #endif;
 #ifndef IDEKA_STANDARD_MEMORY
-#import "redmemory.idk";
+#import <memory.idk>;
 #endif;
 
 // ============================================================================

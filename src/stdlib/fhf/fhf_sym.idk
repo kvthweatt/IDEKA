@@ -19,11 +19,11 @@
 #def FHF_SYM 1;
 
 #ifndef FHF_TYPES
-#import "fhf\\fhf_types.idk";
+#import <fhf\\fhf_types.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_MEMORY
-#import "redmemory.idk";
+#import <memory.idk>;
 #endif;
 
 // ============================================================================

@@ -21,11 +21,11 @@
 #def FHF_RUNTIME 1;
 
 #ifndef FHF_ENGINE
-#import "fhf\\fhf_engine.idk";
+#import <fhf\\fhf_engine.idk>;
 #endif;
 
 #ifndef IDEKA_STANDARD_MEMORY
-#import "redmemory.idk";
+#import <memory.idk>;
 #endif;
 
 using standard::io::console;

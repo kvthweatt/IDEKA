@@ -30,20 +30,20 @@
 // The CLI maintains a single process-global FHFManager instance.
 
 #ifndef IDEKA_STANDARD
-#import "standard.idk";
+#import <standard.idk>;
 #endif;
 
 #ifndef FHF_CLI
 #def FHF_CLI 1;
 
 #ifndef FHF_RUNTIME
-#import "fhf\\fhf_runtime.idk";
+#import <fhf\\fhf_runtime.idk>;
 #endif;
 #ifndef FHF_REMOTE
-#import "fhf\\fhf_remote.idk";
+#import <fhf\\fhf_remote.idk>;
 #endif;
 #ifndef FHF_BUNDLE
-#import "fhf\\fhf_bundle.idk";
+#import <fhf\\fhf_bundle.idk>;
 #endif;
 
 
@@ -180,7 +180,7 @@ def _cli_ensure_ready(byte* key_hex) -> int
     {
         if (!_cli_parse_hex_key(key_hex, @key[0]))
         {
-            print("[IDEKApatch] ERROR: invalid key hex string\n\0");
+            print("[IDEKApatch] ERROR: invalid key hex string\n");
             return FHF_ERR_INVALID_ARG;
         };
     };
@@ -188,9 +188,9 @@ def _cli_ensure_ready(byte* key_hex) -> int
     int rc = fhf_init(@g_fhf_mgr, (key_hex != (byte*)0) ? @key[0] : (byte*)0);
     if (rc != FHF_OK)
     {
-        print("[IDEKApatch] ERROR: fhf_init failed: \0");
+        print("[IDEKApatch] ERROR: fhf_init failed: ");
         print(rc);
-        print("\n\0");
+        print("\n");
         return rc;
     };
 
@@ -204,41 +204,41 @@ def cmd_apply(byte* bundle_path, byte* key_hex) -> int
     int rc = _cli_ensure_ready(key_hex);
     if (rc != FHF_OK) { return rc; };
 
-    print("[IDEKApatch apply] loading bundle: \0");
+    print("[IDEKApatch apply] loading bundle: ");
     print(bundle_path);
-    print("\n\0");
+    print("\n");
 
     #ifdef __WINDOWS__
     int bundle_size = 0;
     byte* bundle = _cli_read_file(bundle_path, @bundle_size);
     if (bundle == (byte*)0)
     {
-        print("[IDEKApatch apply] ERROR: could not read file\n\0");
+        print("[IDEKApatch apply] ERROR: could not read file\n");
         return FHF_ERR_IO;
     };
 
-    print("[IDEKApatch apply] bundle size: \0");
+    print("[IDEKApatch apply] bundle size: ");
     print(bundle_size);
-    print(" bytes\n\0");
+    print(" bytes\n");
 
     rc = fhf_apply_bundle(@g_fhf_mgr, bundle, bundle_size);
     free((void*)bundle);
 
     if (rc == FHF_OK)
     {
-        print("[IDEKApatch apply] SUCCESS\n\0");
+        print("[IDEKApatch apply] SUCCESS\n");
     }
     else
     {
-        print("[IDEKApatch apply] FAILED: error code \0");
+        print("[IDEKApatch apply] FAILED: error code ");
         print(rc);
-        print("\n\0");
+        print("\n");
     };
 
     return rc;
     #endif;
     #ifndef __WINDOWS__
-    print("[IDEKApatch apply] ERROR: file I/O not implemented on this platform\n\0");
+    print("[IDEKApatch apply] ERROR: file I/O not implemented on this platform\n");
     return FHF_ERR_IO;
     #endif;
 };
@@ -248,29 +248,29 @@ def cmd_rollback(byte* idx_str) -> int
 {
     if (g_fhf_ready == 0)
     {
-        print("[IDEKApatch rollback] ERROR: no active manager\n\0");
+        print("[IDEKApatch rollback] ERROR: no active manager\n");
         return FHF_ERR_INVALID_ARG;
     };
 
     int idx = _cli_parse_int(idx_str);
     if (idx < 0)
     {
-        print("[IDEKApatch rollback] ERROR: invalid index\n\0");
+        print("[IDEKApatch rollback] ERROR: invalid index\n");
         return FHF_ERR_INVALID_ARG;
     };
 
     int rc = fhf_rollback(@g_fhf_mgr, idx);
     if (rc == FHF_OK)
     {
-        print("[IDEKApatch rollback] patch \0");
+        print("[IDEKApatch rollback] patch ");
         print(idx);
-        print(" rolled back\n\0");
+        print(" rolled back\n");
     }
     else
     {
-        print("[IDEKApatch rollback] FAILED: error code \0");
+        print("[IDEKApatch rollback] FAILED: error code ");
         print(rc);
-        print("\n\0");
+        print("\n");
     };
     return rc;
 };
@@ -280,11 +280,11 @@ def cmd_rollback_all() -> int
 {
     if (g_fhf_ready == 0)
     {
-        print("[IDEKApatch rollback-all] ERROR: no active manager\n\0");
+        print("[IDEKApatch rollback-all] ERROR: no active manager\n");
         return FHF_ERR_INVALID_ARG;
     };
     fhf_rollback_all(@g_fhf_mgr);
-    print("[IDEKApatch rollback-all] all patches rolled back\n\0");
+    print("[IDEKApatch rollback-all] all patches rolled back\n");
     return FHF_OK;
 };
 
@@ -293,7 +293,7 @@ def cmd_inspect() -> int
 {
     if (g_fhf_ready == 0)
     {
-        print("[IDEKApatch inspect] no active manager\n\0");
+        print("[IDEKApatch inspect] no active manager\n");
         return FHF_OK;
     };
     fhf_inspect(@g_fhf_mgr);
@@ -306,40 +306,40 @@ def cmd_serve(byte* bundle_path, int port, byte* key_hex) -> int
     int rc = _cli_ensure_ready(key_hex);
     if (rc != FHF_OK) { return rc; };
 
-    print("[IDEKApatch serve] loading bundle: \0");
+    print("[IDEKApatch serve] loading bundle: ");
     print(bundle_path);
-    print("\n\0");
+    print("\n");
 
     #ifdef __WINDOWS__
     int bundle_size = 0;
     byte* bundle = _cli_read_file(bundle_path, @bundle_size);
     if (bundle == (byte*)0)
     {
-        print("[IDEKApatch serve] ERROR: could not read bundle file\n\0");
+        print("[IDEKApatch serve] ERROR: could not read bundle file\n");
         return FHF_ERR_IO;
     };
 
-    print("[IDEKApatch serve] listening on port \0");
+    print("[IDEKApatch serve] listening on port ");
     print(port);
-    print("...\n\0");
+    print("...\n");
 
     rc = fhf_remote_serve(@g_fhf_mgr, (u16)port, bundle, bundle_size);
     free((void*)bundle);
 
     if (rc == FHF_OK)
     {
-        print("[IDEKApatch serve] bundle delivered and ACKed\n\0");
+        print("[IDEKApatch serve] bundle delivered and ACKed\n");
     }
     else
     {
-        print("[IDEKApatch serve] FAILED: error code \0");
+        print("[IDEKApatch serve] FAILED: error code ");
         print(rc);
-        print("\n\0");
+        print("\n");
     };
     return rc;
     #endif;
     #ifndef __WINDOWS__
-    print("[IDEKApatch serve] ERROR: not implemented on this platform\n\0");
+    print("[IDEKApatch serve] ERROR: not implemented on this platform\n");
     return FHF_ERR_IO;
     #endif;
 };
@@ -350,22 +350,22 @@ def cmd_receive(byte* host, int port, byte* key_hex) -> int
     int rc = _cli_ensure_ready(key_hex);
     if (rc != FHF_OK) { return rc; };
 
-    print("[IDEKApatch receive] connecting to \0");
+    print("[IDEKApatch receive] connecting to ");
     print(host);
-    print(":\0");
+    print(":");
     print(port);
-    print("...\n\0");
+    print("...\n");
 
     rc = fhf_remote_receive(@g_fhf_mgr, host, (u16)port);
     if (rc == FHF_OK)
     {
-        print("[IDEKApatch receive] bundle applied successfully\n\0");
+        print("[IDEKApatch receive] bundle applied successfully\n");
     }
     else
     {
-        print("[IDEKApatch receive] FAILED: error code \0");
+        print("[IDEKApatch receive] FAILED: error code ");
         print(rc);
-        print("\n\0");
+        print("\n");
     };
     return rc;
 };
@@ -376,15 +376,15 @@ def cmd_receive(byte* host, int port, byte* key_hex) -> int
 
 def cmd_help() -> void
 {
-    print("IDEKA Hotpatch Framework CLI\n\0");
-    print("Usage:\n\0");
-    print("  IDEKApatch apply   <bundle.fhfb> [--key <hex64>]\n\0");
-    print("  IDEKApatch rollback <index>\n\0");
-    print("  IDEKApatch rollback-all\n\0");
-    print("  IDEKApatch inspect\n\0");
-    print("  IDEKApatch serve   <bundle.fhfb> [--port <n>] [--key <hex64>]\n\0");
-    print("  IDEKApatch receive [--host <ip>] [--port <n>] [--key <hex64>]\n\0");
-    print("  IDEKApatch help\n\0");
+    print("IDEKA Hotpatch Framework CLI\n");
+    print("Usage:\n");
+    print("  IDEKApatch apply   <bundle.fhfb> [--key <hex64>]\n");
+    print("  IDEKApatch rollback <index>\n");
+    print("  IDEKApatch rollback-all\n");
+    print("  IDEKApatch inspect\n");
+    print("  IDEKApatch serve   <bundle.fhfb> [--port <n>] [--key <hex64>]\n");
+    print("  IDEKApatch receive [--host <ip>] [--port <n>] [--key <hex64>]\n");
+    print("  IDEKApatch help\n");
 };
 
 // ============================================================================
@@ -393,21 +393,20 @@ def cmd_help() -> void
 
 def main(int argc, byte** argv) -> int
 {
-
-    if (argc < 1)
+    if (argc < 2)
     {
         cmd_help();
-        return 0;
+        ->0;
     };
 
     byte* cmd = argv[1];
 
     // --- apply ---
-    if (_cli_str_eq(cmd, "apply\0"))
+    if (_cli_str_eq(cmd, "apply"))
     {
         if (argc < 3)
         {
-            print("ERROR: apply requires a bundle path\n\0");
+            print("ERROR: apply requires a bundle path\n");
             return 1;
         };
         byte* bundle_path = argv[2];
@@ -415,40 +414,40 @@ def main(int argc, byte** argv) -> int
         int i;
         for (i = 3; i < argc - 1; i++)
         {
-            if (_cli_str_eq(argv[i], "--key\0")) { key_hex = argv[i + 1]; };
+            if (_cli_str_eq(argv[i], "--key")) { key_hex = argv[i + 1]; };
         };
         return cmd_apply(bundle_path, key_hex) == FHF_OK ? 0 : 1;
     };
 
     // --- rollback ---
-    if (_cli_str_eq(cmd, "rollback\0"))
+    if (_cli_str_eq(cmd, "rollback"))
     {
         if (argc < 3)
         {
-            print("ERROR: rollback requires an index\n\0");
+            print("ERROR: rollback requires an index\n");
             return 1;
         };
         return cmd_rollback(argv[2]) == FHF_OK ? 0 : 1;
     };
 
     // --- rollback-all ---
-    if (_cli_str_eq(cmd, "rollback-all\0"))
+    if (_cli_str_eq(cmd, "rollback-all"))
     {
         return cmd_rollback_all() == FHF_OK ? 0 : 1;
     };
 
     // --- inspect ---
-    if (_cli_str_eq(cmd, "inspect\0"))
+    if (_cli_str_eq(cmd, "inspect"))
     {
         return cmd_inspect() == FHF_OK ? 0 : 1;
     };
 
     // --- serve ---
-    if (_cli_str_eq(cmd, "serve\0"))
+    if (_cli_str_eq(cmd, "serve"))
     {
         if (argc < 3)
         {
-            print("ERROR: serve requires a bundle path\n\0");
+            print("ERROR: serve requires a bundle path\n");
             return 1;
         };
         byte* bundle_path = argv[2];
@@ -457,32 +456,32 @@ def main(int argc, byte** argv) -> int
         int i;
         for (i = 3; i < argc - 1; i++)
         {
-            if (_cli_str_eq(argv[i], "--port\0"))
+            if (_cli_str_eq(argv[i], "--port"))
             {
                 int p = _cli_parse_int(argv[i + 1]);
                 if (p > 0) { port = p; };
             };
-            if (_cli_str_eq(argv[i], "--key\0")) { key_hex = argv[i + 1]; };
+            if (_cli_str_eq(argv[i], "--key")) { key_hex = argv[i + 1]; };
         };
         return cmd_serve(bundle_path, port, key_hex) == FHF_OK ? 0 : 1;
     };
 
     // --- receive ---
-    if (_cli_str_eq(cmd, "receive\0"))
+    if (_cli_str_eq(cmd, "receive"))
     {
-        byte* host    = "127.0.0.1\0";
+        byte* host    = "127.0.0.1";
         int   port    = 9901;
         byte* key_hex = (byte*)0;
         int i;
         for (i = 2; i < argc - 1; i++)
         {
-            if (_cli_str_eq(argv[i], "--host\0")) { host    = argv[i + 1]; };
-            if (_cli_str_eq(argv[i], "--port\0"))
+            if (_cli_str_eq(argv[i], "--host")) { host    = argv[i + 1]; };
+            if (_cli_str_eq(argv[i], "--port"))
             {
                 int p = _cli_parse_int(argv[i + 1]);
                 if (p > 0) { port = p; };
             };
-            if (_cli_str_eq(argv[i], "--key\0"))  { key_hex = argv[i + 1]; };
+            if (_cli_str_eq(argv[i], "--key"))  { key_hex = argv[i + 1]; };
         };
         return cmd_receive(host, port, key_hex) == FHF_OK ? 0 : 1;
     };
