@@ -1986,6 +1986,8 @@ module IDEKA_Compiler_Entrypoint
                 mu_register(munit, path, ps.lx.src, ps.lx.length, ps.lmap, ps.lmapn, ps.lfiles);
                 #ifdef __WINDOWS__
                 byte* plat_name = "Windows\0";
+                #elif __MACOS__
+                byte* plat_name = "Darwin\0";
                 #else
                 byte* plat_name = "Linux\0";
                 #endif;
