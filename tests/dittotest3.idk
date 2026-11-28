@@ -1,0 +1,18 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+trait UserStore
+{
+    selected_name() -> byte*;
+    rename(byte*) -> void;
+};
+
+main() -> int
+{
+    int x;
+
+    println(x++);
+    #";
+    -> 0;
+};

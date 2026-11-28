@@ -251,6 +251,28 @@ object A64Module
             __init(byte* name) -> this
             {
                 this.s_mod_init(name);
+                this.sm_st = (AI*)0;
+                this.sm_val = (i64)0;
+                this.ccm_on = false;
+                this.ccm_cc = 0;
+                this.ccm_nz = 0;
+                this.sel_nx = (SI*)0;
+                this.lz_val = (IRValue*)0;
+                this.lz_src = (AM*)0;
+                this.x16ok = false;
+                this.x16b = 0;
+                this.x16o = (i64)0;
+                this.eplab = 0;
+                this.tco = false;
+                this.tbok = false;
+                this.ad_b = 0;
+                this.ad_i = 0;
+                this.ad_sc = 0;
+                this.ad_fo = 0;
+                this.ad_ma = 0;
+                this.ad_imm = (i64)0;
+                this.ad_sym = (byte*)0;
+                this.rprev = 0;
                 this.gfn = 0;
                 this.bf_sh = 0;
                 this.bf_w = 0;

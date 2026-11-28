@@ -1,0 +1,44 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+effect StringSanitizer.SQL
+{
+    *IO & *Alloc
+};
+
+sanitize_sql(byte* query) -> byte*
+{
+    -> query;
+} # effect {StringSanitizer.SQL};
+
+recv() -> byte*
+{
+    int maxlen = 512; // size in bytes
+    byte[maxlen] msg = "test message from the socket"; // 0 as bytes from socket
+
+    if (msg!?)
+    {
+        msg = sanitize_sql(msg); // satisfying the effect requirement
+        for (x in msg[0..maxlen])
+        {
+            // ...
+        };
+    };
+    -> rdata;
+};///
+# unsafe
+{
+    // msg must be not null checked *after* assignment then
+    sanitize_sql(msg=!?) has effect {StringSanitizer.SQL}; // enforces "this ran through a function that has effect StringSanitizer.SQL"
+
+    for _ in msg[0..maxlen]; // must use for _ in _ pattern
+};///
+
+main() -> int
+{
+    byte* msg = "SELECT * FROM USERS WHERE 1=1;";
+
+    sanitize_sql(msg);
+    -> 0;
+};

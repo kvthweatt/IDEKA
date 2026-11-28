@@ -559,6 +559,8 @@ namespace standard
 
                     sha384_transform(ctx, ctx.buffer);
 
+                    hash[0..63] = (byte[64])(be64)ctx.state[0..7];
+                    ///
                     hash[0..7]   = (byte[8])(be64)ctx.state[0];
                     hash[8..15]  = (byte[8])(be64)ctx.state[1];
                     hash[16..23] = (byte[8])(be64)ctx.state[2];
@@ -567,8 +569,7 @@ namespace standard
                     hash[40..47] = (byte[8])(be64)ctx.state[5];
                     hash[48..55] = (byte[8])(be64)ctx.state[6];
                     hash[56..63] = (byte[8])(be64)ctx.state[7];
-
-                    
+                    ///
                 };
 
                 // Convenience: SHA-512 of a single buffer

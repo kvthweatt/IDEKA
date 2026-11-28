@@ -7,6 +7,13 @@
             s_mod_init(byte* name) -> void
             {
                 this.mod_name = ts_dup(name);
+                this.bf_ok = false;
+                this.cx_sym = (byte*)0;
+                this.cx_off = (i64)0;
+                this.sck = 0;
+                this.sel_off = 0;
+                this.scv = (i64)0;
+                this.scs = (byte*)0;
                 this.triple = (byte*)0;
                 this.layout = (byte*)0;
                 this.nul = (IRType*)0;

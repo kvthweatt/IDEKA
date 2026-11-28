@@ -7,6 +7,11 @@ constraint MyConstr(A, B, C, D)
     D !~= B & [A !@ A] !~= C !`< D !-= A
 };
 
+constraint XXX(T)
+{
+    T !`< T
+};
+
 foo<W,X,Y,Z, :{MyConstr}>(W w, X x, Y y, Z z) -> W -> 0;
 
 struct AA

@@ -3280,6 +3280,23 @@ namespace IDEKA
                 -> r;
             };
 
+            // Abandons the current body after a real error was reported with fail_at: the error is
+            // the report, so the body is not logged as an unsupported construct
+            stop_body(Node* n) -> void
+            {
+                switch (this.bad)
+                {
+                    case (true) { ->; }
+                    default
+                    {
+                        this.bad = true;
+                        this.bad_what = (byte*)0;
+                        switch (n != (Node*)0) { case (true) { this.bad_line = n.line; } default {}; };
+                        ->;
+                    };
+                };
+            };
+
             unsup(Node* n, byte* what) -> void
             {
                 i64* box;
@@ -7143,7 +7160,7 @@ namespace IDEKA
                             this.sc.clear();
                             this.sc.put_str(f"Use after untie: variable '{n.a.text}' was moved\0");
                             this.fail_at(n, this.sc.mem);
-                            this.unsup(n, g"use after untie\0");
+                            this.stop_body(n);
                             -> (IRValue*)0;
                         }
                             default
@@ -8285,7 +8302,7 @@ namespace IDEKA
                             this.sc.clear();
                             this.sc.put_str(f"Use after untie: variable '{n.text}' was moved\0");
                             this.fail_at(n, this.sc.mem);
-                            this.unsup(n, g"use after untie\0");
+                            this.stop_body(n);
                             -> (IRValue*)0;
                         }
                             default
@@ -11205,7 +11222,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                             this.sc.clear();
                             this.sc.put_str(f"Use after invalidation: '{target.text}' was previously invalidated by a tie-transfer (~) and cannot be assigned to. Redeclare '{target.text}' here.\0");
                             this.fail_at(target, this.sc.mem);
-                            this.unsup(target, g"assign to an untied variable\0");
+                            this.stop_body(target);
                             -> (IRValue*)0;
                         }
                             default
@@ -25034,6 +25051,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
             // Remembers why the body of fd stays a declaration: function, line, construct, name
             log_skip(Node* fd) -> void
             {
+                if (this.bad_what == (byte*)0) { ->; };
                 FvmBuf b;
                 byte* t;
                 b.__init();

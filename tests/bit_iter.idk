@@ -1,0 +1,23 @@
+#import <standard.idk>;
+
+using standard::io::console;
+
+main() -> int
+{
+    u64 some_value = 0xDEADBEEFCAFEF00D;
+
+    byte[65] buf;
+    byte c;
+
+    for (`x in some_value)
+    {
+        buf[c++] = f"{int(x)}";
+        print(f"{int(x)}");
+    };
+    print();
+    flush();
+
+    println(strlen(buf));
+
+    -> 0;
+};

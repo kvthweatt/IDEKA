@@ -209,6 +209,10 @@ extern
 #endif;
 };
 
+#ifdef __MACOS__
+extern cdecl dlsym(void*, byte*) -> void*;
+#endif;
+
 #ifdef __LINUX__
 def !!exit(int code) -> void
 {

@@ -876,6 +876,23 @@ namespace IDEKA
                     }
                         default
                         {
+                            // The ditto token `#"` is not a quote
+                            switch (ch == 35 & i + 1 < n)
+                            {
+                                case (true) {
+                                switch (c[i + 1] == 34)
+                                {
+                                    case (true) {
+                                    this.put(ch);
+                                    this.put(34);
+                                    i = i + 2;
+                                    continue;
+                                }
+                                    default {};
+                                };
+                            }
+                                default {};
+                            };
                             switch (ch == 34 | ch == 39)
                             {
                                 case (true) {
@@ -4582,6 +4599,26 @@ namespace IDEKA
                                 while (i < tn)
                                 {
                                     c = (int)t[i];
+                                    // The ditto token `#"` is taken whole before a quote is considered
+                                    switch (c == 35 & !in_quotes & i + 1 < tn)
+                                    {
+                                        case (true) {
+                                        switch (t[i + 1] == 34)
+                                        {
+                                            case (true) {
+                                            switch (ts < 0)
+                                            {
+                                                case (true) { ts = i; }
+                                                default {};
+                                            };
+                                            i = i + 2;
+                                            continue;
+                                        }
+                                            default {};
+                                        };
+                                    }
+                                        default {};
+                                    };
                                     switch (c == 34)
                                     {
                                         case (true) {
