@@ -1278,6 +1278,9 @@ module IDEKA_Compiler_Entrypoint
         #ifdef __WINDOWS__
         if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Windows)\0"); }
         else { log_step("compiler\0", "Compiling to object file (Windows)\0"); };
+        #elif __MACOS__
+        if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Darwin)\0"); }
+        else { log_step("compiler\0", "Compiling to object file (Darwin)\0"); };
         #else
         if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Linux)\0"); }
         else { log_step("compiler\0", "Compiling to object file (Linux)\0"); };
