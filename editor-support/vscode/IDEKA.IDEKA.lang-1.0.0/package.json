@@ -2,25 +2,39 @@
   "name": "IDEKA.lang",
   "publisher": "IDEKA",
   "displayName": "IDEKA Language Support",
-  "description": "Syntax highlighting and language support for IDEKA",
+  "description": "IDEKA syntax highlighting, editor configuration, and snippets",
   "version": "1.0.0",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"
   ],
   "contributes": {
-    "languages": [{
-      "id": "IDEKA",
-      "aliases": ["IDEKA", "IDEKA"],
-      "extensions": [".idk"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "IDEKA",
-      "scopeName": "source.IDEKA",
-      "path": "./syntaxes/IDEKA.tmLanguage.json"
-    }]
+    "languages": [
+      {
+        "id": "IDEKA",
+        "aliases": [
+          "IDEKA"
+        ],
+        "extensions": [
+          ".idk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "IDEKA",
+        "scopeName": "source.IDEKA",
+        "path": "./syntaxes/IDEKA.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "IDEKA",
+        "path": "./snippets/IDEKA.snippet.lang-1.0.0.json"
+      }
+    ]
   }
 }

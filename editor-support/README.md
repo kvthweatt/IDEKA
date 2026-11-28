@@ -12,6 +12,22 @@ Files in `sublime/` directory:
 
 ## VSCode
 
-Files in `vscode/` directory:
+The extension in `vscode/IDEKA.IDEKA.lang-1.0.0/` provides `.idk` syntax
+highlighting, editor configuration, and snippets. This is editor-only support:
+it does not start `flsp.py` or provide language-server features or compiler
+diagnostics.
 
-- todo -
+The 72 snippets cover imports and preprocessor directives, generic functions
+and FFI, types and interfaces, control flow, arrays and dictionaries, pointers
+and memory, errors, strings, macros and constraints, compile-time code
+generation, assembly, async, and modules.
+
+### Setup
+
+Open the extension folder in VS Code to develop it, or package and install it
+as a VS Code extension for regular use. No Python, compiler, or language-server
+dependencies are required for its current syntax, editor configuration, and
+snippet features.
+
+The extension does not currently provide completions, hover, navigation,
+diagnostics, or other LSP features.
