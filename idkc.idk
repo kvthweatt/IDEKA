@@ -1079,7 +1079,7 @@ module IDEKA_Compiler_Entrypoint
         byte** objs = (byte**)fmalloc(8 * 2);
         byte* lkerr;
         objs[0] = obj;
-        lkerr = lk_macho_link(objs, 1, "_main\0", exe);
+        lkerr = lk_macho_link(objs, 1, "__start\0", exe);
         if (lkerr == (byte*)0) { *rc = 0; }
         else
         {
