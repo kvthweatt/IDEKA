@@ -4040,6 +4040,8 @@ If your program is x86_64 and you point at a run of ARM64 bytes, calling that po
 
 This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing and verifying any bytes destined for execution, integrity checking, trust chains, and auth updates in any application.
 
+Here's an example of a legitimate use case: Say you have a multiplayer FPS game and it had some hit registration bug because some leaf function of your main hit registration routine was hitting an exception in some cases. The leaf can be hot patched at runtime while the game performs an update to the local contents in the background, fixing the problem mid-match.
+
 <a id="code-smuggling"></a>
 ## **Code Smuggling**
 Code smuggling is achieved by hiding machine bytes in the symbol table, rather than in `.text`.  
