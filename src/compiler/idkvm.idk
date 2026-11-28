@@ -257,14 +257,6 @@ extern
 };
 #endif;
 
-#ifdef __MACOS__
-extern
-{
-    def !!
-        dlsym(void*, byte*) -> void*;
-};
-#endif;
-
 namespace IDEKA
 {
     namespace IDKVM
@@ -1333,8 +1325,7 @@ namespace IDEKA
             -> sym;
 #endif;
 #ifdef __MACOS__
-            // RTLD_DEFAULT is (void*)-2 on macOS and covers libSystem (libc and libm)
-            hl = (void*)idkvm_i2p((i64)0 - (i64)2);
+            hl = (void*)idkvm_i2p(-2l);
             sym = dlsym(hl, name);
             -> sym;
 #endif;
@@ -1431,8 +1422,7 @@ namespace IDEKA
             -> idkvm_i2p(r);
 #endif;
 #ifdef __MACOS__
-            // not supported on macOS yet (RWX pages need MAP_JIT on Apple Silicon): the host refuses
-            -> (byte*)0;
+            -> 0;
 #endif;
         };
 
