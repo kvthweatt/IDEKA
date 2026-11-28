@@ -1324,6 +1324,11 @@ namespace IDEKA
             };
             -> sym;
 #endif;
+#ifdef __MACOS__
+            hl = (void*)idkvm_i2p(-2l);
+            sym = dlsym(hl, name);
+            -> sym;
+#endif;
         };
 
         // ===== INLINE ASM at comptime =====
@@ -1415,6 +1420,9 @@ namespace IDEKA
             r = mm((i64)0, (i64)n, (i64)7, (i64)34, (i64)0 - (i64)1, (i64)0);
             if (r == (i64)0 - (i64)1) { -> (byte*)0; };
             -> idkvm_i2p(r);
+#endif;
+#ifdef __MACOS__
+            -> 0;
 #endif;
         };
 

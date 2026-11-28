@@ -947,7 +947,13 @@ module IDEKA_Compiler_Entrypoint
         };
         bool wrote;
         #ifdef __MACOS__
+        #ifndef IDEKA_NO_X64
         wrote = iasm_write_macho(a, dst);
+        #else
+        // ARM64 hosts build without the x86 backend, so iasm_macho.idk leaves out iasm_write_macho
+        a.err = "x86-64 Mach-O output is not built into this compiler\0";
+        wrote = false;
+        #endif;
         #else
         if (X64_ABI == 1) { wrote = iasm_write_coff(a, dst); }
         else { wrote = iasm_write_elf(a, dst); };
