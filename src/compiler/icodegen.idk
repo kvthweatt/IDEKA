@@ -18327,7 +18327,23 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
                 IRValue* coll = this.visit(n.a);
                 IRType* ct, et;
-                IRBlock* cond_b, body_b, end_b, ob, oc;
+                IRBlock* cond_b, body_b, end_b, ob, oc, latch_b;
+                // An array range (b[x..y]) is a copy of the slice held as a value: iterate it in a slot
+                switch (coll != (IRValue*)0 & n.a.kind == NodeKind.ARRAY_ACCESS & n.a.b != (Node*)0 & !this.bad)
+                {
+                    case (true) {
+                    switch (n.a.b.kind == NodeKind.RANGE_EXPRESSION & coll.ty.kind == LK.ARRAY)
+                    {
+                        case (true) {
+                        IRValue* sl = this.mod.alloca_here(coll.ty, g"forin.slice\0");
+                        this.mod.store(coll, sl);
+                        coll = sl;
+                    }
+                        default {};
+                    };
+                }
+                    default {};
+                };
                 IRValue* idxp, curp, cur, ep, ev, vp, cv, slot, nxt, fp, fa;
                 SInfo* si;
                 LVar* lv;
@@ -18533,14 +18549,18 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                         ob = this.brk;
                                         oc = this.cont;
                                         this.brk = end_b;
-                                        this.cont = cond_b;
+                                        // continue runs the step of the iteration, so it goes to the latch
+                                        latch_b = this.mod.append_block(this.fn, g"forin.latch\0");
+                                        this.cont = latch_b;
                                         this.visit(n.b);
                                         switch (this.bad)
                                         {
                                             case (true) { ->; }
                                             default
                                             {
-                                                switch (!this.mod.is_terminated())
+                                                switch (!this.mod.is_terminated()) { case (true) { this.mod.br(latch_b); } default {}; };
+                                                this.mod.position(this.fn, latch_b);
+                                                switch (true)
                                                 {
                                                     case (true) {
                                                     switch (et.kind == LK.ARRAY | sized)

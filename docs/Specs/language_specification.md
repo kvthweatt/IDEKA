@@ -2307,7 +2307,6 @@ def variadic(...) -> void
 };
 
 
-
 def main() -> int
 {
     variadic(1,2,3,4);
@@ -2321,6 +2320,49 @@ Result:
 2
 3
 4
+```
+
+<a id="volatile-functions"></a>
+## Volatile Functions
+A volatile function is a function that can only be called once. They are self-destructing. On x86_64 the function's machine bytes are overwritten with `INT3`, and `BRK #0` on ARM64. Here's an example from `examples/volatile_func.idk`:
+```
+///
+
+        Volatile Function Example
+        File: examples/volatile_func.idk
+        Author: Karac V. Thweatt
+
+        A volatile function can only be called once.
+        Calling it a second time is a runtime error.
+
+        Use Cases:
+            Security, anti-tamper, & RE defense
+            In-memory unpacking / decryption stubs
+            Ephemeral key derivation & licensing checks
+            Anti-replay & single-shot auth gates
+            Reclaiming .text footprint on microcontrollers
+            Eliminating ROP gadgets
+            Self destructing code for whatever reason
+
+///
+
+#import <standard.idk>;
+
+using standard::io::console;
+
+volatile foo() -> void
+{
+    println("Hello World!");
+};
+
+main() -> int
+{
+    foo();
+    // compiler inserts a call to overwrite foo's machine bytes with 0xCC on x86_64 after calling
+    foo(); // now calling debugger trap
+    // inserted here as well but unreachable
+    ->0;
+};
 ```
 
 <a id="function-pointers"></a>
@@ -4039,8 +4081,6 @@ The way this works is very straightforward. Whenever you obtain a function point
 If your program is x86_64 and you point at a run of ARM64 bytes, calling that pointer will crash your program. The bytes must be valid machine instructions for the architecture your program is running on.
 
 This feature makes it possible to perform hot patching of code very easily, however, any code doing hot patching like this should be highly secured and guarded as best as possible. You could easily accept any bytes over the network, point to them, and call them. And if those bytes are an entire malicious payload, you're done for. The obvious solution is encryption, compression, and digitally signing and verifying any bytes destined for execution, integrity checking, trust chains, and auth updates in any application.
-
-Here's an example of a legitimate use case: Say you have a multiplayer FPS game and it had some hit registration bug because some leaf function of your main hit registration routine was hitting an exception in some cases. The leaf can be hot patched at runtime while the game performs an update to the local contents in the background, fixing the problem mid-match.
 
 <a id="code-smuggling"></a>
 ## **Code Smuggling**

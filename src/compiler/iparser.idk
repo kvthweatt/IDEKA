@@ -618,6 +618,8 @@ namespace IDEKA
             int assign_count;       // assignment nodes built so far (ternary condition check)
             int loop_serial, loop_n;    // loop ids handed out, loops enclosing the token being parsed
             int* loop_ids;              // ids of the enclosing loops, outermost first (first 256)
+            Node* sw_pre;               // switch loop: the loop variable as the switch expression, already parsed
+            bool swl_next;              // switch loop: the next for_statement starts at a bare switch
             PtrVec* lbls;               // LblRec of each label in the function being parsed
             PtrVec* gtos;               // LblRec of each goto in it
             int cond_depth;         // >0 while parsing an if/elif/while/do-while/for/switch condition (assignment banned)
@@ -704,6 +706,8 @@ namespace IDEKA
                 this.strs = pv_new();
                 this.loop_serial = 0;
                 this.loop_n = 0;
+                this.sw_pre = (Node*)0;
+                this.swl_next = false;
                 this.loop_ids = (int*)fmalloc((u64)256 * (u64)((sizeof(int) + 7) / 8));
                 this.lbls = pv_new();
                 this.gtos = pv_new();
@@ -15037,12 +15041,78 @@ namespace IDEKA
                 };
             };
 
+            // Body of a switch loop: a block holding a switch on the loop variable. The cases follow
+            // the iteration header, and the switch ends with its own ';'
+            switch_loop_body(Node* loop) -> Node*
+            {
+                Node* b = this.mk(NodeKind.BLOCK, this.cur_line(), this.cur_col());
+                Node* id;
+                Node* sw;
+                Node* v;
+                switch (this.failed)
+                {
+                    case (true) { -> b; }
+                    default
+                    {
+                        switch (node_count(loop, 0) != 1 | (loop.flags `& (NF_DESTRUCTURE `| NF_BIT_ITER)) != 0)
+                        {
+                            case (true) {
+                            this.error_exp(g"A switch loop iterates one plain variable\0", TokenType.IDENTIFIER);
+                            -> b;
+                        }
+                            default {};
+                        };
+                        v = node_child(loop, 0, 0);
+                        id = this.mk(NodeKind.IDENTIFIER, v.line, v.col);
+                        switch (this.failed)
+                        {
+                            case (true) { -> b; }
+                            default {};
+                        };
+                        id.text = ts_dup(v.text);
+                        this.loop_depth++;
+                        this.loop_serial++;
+                        if (this.loop_n < 256) { this.loop_ids[this.loop_n] = this.loop_serial; };
+                        this.loop_n++;
+                        this.sw_pre = id;
+                        sw = this.switch_statement();
+                        this.loop_n--;
+                        this.loop_depth--;
+                        switch (this.failed)
+                        {
+                            case (true) { -> b; }
+                            default {};
+                        };
+                        node_push(b, 0, sw);
+                        -> this.done(b);
+                    };
+                };
+            };
+
             // for_statement -> 'for' '(' (for_in | init ';' cond ';' update) ')' block ';'
             for_statement() -> Node*
             {
                 int line = this.cur_line();
                 int col = this.cur_col();
-                this.consume(TokenType.FOR);
+                bool swl = false;
+                // A switch loop: `for switch (a in b) { ... }`, or `switch (a in b) { ... }` where the
+                // iteration pattern alone makes the switch a loop
+                switch (this.swl_next)
+                {
+                    case (true) {
+                    this.swl_next = false;
+                    swl = true;
+                    this.consume(TokenType.SWITCH);
+                }
+                    default {
+                    this.consume(TokenType.FOR);
+                    switch (!this.failed & this.expect(TokenType.SWITCH))
+                    {
+                        case (true) { swl = true; this.advance(); }
+                        default {};
+                    };
+                };
+                };
                 switch (!this.failed)
                 {
                     case (true) { this.consume(TokenType.LEFT_PAREN); }
@@ -15134,20 +15204,40 @@ namespace IDEKA
                                 case (true) { this.consume(TokenType.RIGHT_PAREN); }
                                 default {};
                             };
-                            switch (!this.failed)
+                            switch (swl)
                             {
-                                case (true) { n.b = this.loop_block(); }
-                                default {};
+                                case (true) {
+                                switch (!this.failed)
+                                {
+                                    case (true) { n.b = this.switch_loop_body(n); }
+                                    default {};
+                                };
+                            }
+                                default {
+                                switch (!this.failed)
+                                {
+                                    case (true) { n.b = this.loop_block(); }
+                                    default {};
+                                };
+                                switch (!this.failed)
+                                {
+                                    case (true) { this.consume(TokenType.SEMICOLON); }
+                                    default {};
+                                };
                             };
-                            switch (!this.failed)
-                            {
-                                case (true) { this.consume(TokenType.SEMICOLON); }
-                                default {};
                             };
                             -> this.done(n);
                         }
                             default
                             {
+                                switch (swl)
+                                {
+                                    case (true) {
+                                    this.error_exp(g"A switch loop needs an iteration pattern: for switch (x in y)\0", TokenType.IN);
+                                    -> n;
+                                }
+                                    default {};
+                                };
                                 // C style
                                 n = this.mk(NodeKind.FOR_LOOP, line, col);
                                 switch (this.failed)
@@ -15328,21 +15418,48 @@ namespace IDEKA
                     case (true) { -> n; }
                     default
                     {
-                        this.consume(TokenType.SWITCH);
-                        switch (!this.failed)
+                        switch (this.sw_pre != (Node*)0)
                         {
-                            case (true) { this.consume(TokenType.LEFT_PAREN); }
-                            default {};
+                            case (true) {
+                            // the switch of a switch loop: its expression is the loop variable
+                            n.a = this.sw_pre;
+                            this.sw_pre = (Node*)0;
+                        }
+                            default {
+                            this.consume(TokenType.SWITCH);
+                            switch (!this.failed)
+                            {
+                                case (true) { this.consume(TokenType.LEFT_PAREN); }
+                                default {};
+                            };
+                            switch (!this.failed)
+                            {
+                                case (true) {
+                                // switch (a in b): an iteration pattern makes the switch a loop
+                                bool sd, sb;
+                                switch (this.is_for_in(@sd, @sb))
+                                {
+                                    case (true) {
+                                    this.reset(start);
+                                    this.swl_next = true;
+                                    -> this.for_statement();
+                                }
+                                    default {};
+                                };
+                            }
+                                default {};
+                            };
+                            switch (!this.failed)
+                            {
+                                case (true) { n.a = this.cond_expression(); }
+                                default {};
+                            };
+                            switch (!this.failed)
+                            {
+                                case (true) { this.consume(TokenType.RIGHT_PAREN); }
+                                default {};
+                            };
                         };
-                        switch (!this.failed)
-                        {
-                            case (true) { n.a = this.cond_expression(); }
-                            default {};
-                        };
-                        switch (!this.failed)
-                        {
-                            case (true) { this.consume(TokenType.RIGHT_PAREN); }
-                            default {};
                         };
                         switch (!this.failed)
                         {

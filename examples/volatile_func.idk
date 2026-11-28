@@ -1,25 +1,19 @@
 ///
 
         Volatile Function Example
+        File: examples/volatile_func.idk
         Author: Karac V. Thweatt
 
         A volatile function can only be called once.
         Calling it a second time is a runtime error.
 
-        Useful for security, anti-tamper, & RE defense.
-
         Use Cases:
-
+            Security, anti-tamper, & RE defense
             In-memory unpacking / decryption stubs
-
             Ephemeral key derivation & licensing checks
-
             Anti-replay & single-shot auth gates
-
             Reclaiming .text footprint on microcontrollers
-
             Eliminating ROP gadgets
-
             Self destructing code for whatever reason
 
 ///
@@ -36,7 +30,8 @@ volatile foo() -> void
 main() -> int
 {
     foo();
-    // compiler inserts code to "invalidate" foo's machine code
-    foo(); // now calling invalid instructions, will crash
+    // compiler inserts a call to overwrite foo's machine bytes with 0xCC on x86_64 after calling
+    foo(); // now calling debugger trap
+    // inserted here as well but unreachable
     ->0;
 };
