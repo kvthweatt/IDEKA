@@ -710,5 +710,10 @@ def !!FRTStartup() -> int
     standard::io::console::flush();
     return return_code;
 };
+
+def !!_start() -> int
+{
+    return FRTStartup();
+};
 #endif; // __MACOS__
 #endif; // IDEKA_RUNTIME

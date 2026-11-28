@@ -481,6 +481,50 @@
             // ----------------------------------------------------------
 
             // a naked function has no prologue, epilogue or spilled arguments
+            a_vwipe(IRFunc* f) -> bool
+            {
+                int i = 0;
+                while (i < f.attrs.len)
+                {
+                    if (this.a_seq((byte*)f.attrs.items[i], g"vwipe\0")) { -> true; };
+                    i++;
+                };
+                -> false;
+            };
+
+            // End label of a volatile function, placed before the size directive
+            a_vend(Buf* out) -> void
+            {
+                out.put_str(g".Lvend\0");
+                out.put_int(this.gfn);
+                out.put_str(g":\n\0");
+                ->;
+            };
+
+            // Read only length of a volatile function in bytes, read by the call sites that wipe it
+            a_vlen(Buf* out, IRFunc* f, byte* nm) -> void
+            {
+                byte* vsym;
+                this.tb.clear();
+                this.tb.put(64);
+                this.mb.clear();
+                this.mb.put_str(f.name);
+                this.mb.put_str(g"__vlen\0");
+                put_quoted(@this.tb, this.mb.mem);
+                vsym = this.a_sym(this.tb.mem);
+                out.put_str(this.a_rodata());
+                out.put_str(g"\t.balign 8\n\t.globl \0");
+                out.put_str(vsym);
+                out.put(10);
+                out.put_str(vsym);
+                out.put_str(g":\n\t.quad .Lvend\0");
+                out.put_int(this.gfn);
+                out.put_str(g" - \0");
+                out.put_str(nm);
+                out.put_str(g"\n\t.text\n\0");
+                ->;
+            };
+
             a_naked(IRFunc* f) -> bool
             {
                 int i = 0;

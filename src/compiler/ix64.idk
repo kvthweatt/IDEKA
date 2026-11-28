@@ -12769,6 +12769,7 @@ struct MI
                     };
                     i++;
                 };
+                if (this.a_vwipe(f)) { this.a_vend(out); };
                 if (!this.a_win())
                 {
                     out.put_str(g"\t.size \0");
@@ -12778,6 +12779,7 @@ struct MI
                     out.put(10);
                 };
                 this.e_tables(out);
+                if (this.a_vwipe(f)) { this.a_vlen(out, f, nm); };
                 ->;
             };
 

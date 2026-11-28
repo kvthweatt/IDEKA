@@ -37,6 +37,63 @@ def !!memset(void* dst, int c, size_t n) -> void*
     return dst;
 };
 
+#ifdef __ARCH_ARM64__
+// Makes the bytes of [p, p + n) visible to instruction fetch after they were written (the code of a
+// volatile function that was just wiped): clean the data cache, invalidate the instruction cache
+def !!__idk_clear_cache(void* p, ulong n) -> void
+{
+    ulong pa = (ulong)p;
+    volatile asm
+    {
+        mrs x9, ctr_el0
+        ubfx x10, x9, #16, #4
+        mov x11, #4
+        lsl x10, x11, x10
+        and x9, x9, #15
+        lsl x9, x11, x9
+        add x12, $0, $1
+        sub x13, x10, #1
+        bic x14, $0, x13
+    .Lidk_cc_d:
+        dc cvau, x14
+        add x14, x14, x10
+        cmp x14, x12
+        b.lo .Lidk_cc_d
+        dsb ish
+        sub x13, x9, #1
+        bic x14, $0, x13
+    .Lidk_cc_i:
+        ic ivau, x14
+        add x14, x14, x9
+        cmp x14, x12
+        b.lo .Lidk_cc_i
+        dsb ish
+        isb
+    } : : "r"(pa), "r"(n) : "x9","x10","x11","x12","x13","x14","memory";
+    return;
+};
+#endif;
+
+// Fills the code of a volatile function that has just run with trap instructions: int3 (0xCC) on
+// x86_64, brk #0 on arm64. The call site passes the function's address and length.
+def !!__idk_wipe_code(void* p, ulong n) -> void
+{
+#ifdef __ARCH_ARM64__
+    u32* w = (u32*)p;
+    ulong i;
+    ulong cnt = n / 4ul;
+    while (i < cnt)
+    {
+        w[i] = 3558866944u;
+        i++;
+    };
+    __idk_clear_cache(p, n);
+#else
+    memset(p, 204, (size_t)n);
+#endif;
+    return;
+};
+
 def fmemcpy(void* dest, void* src, ulong count) -> void*
 {
     void* ret = dest;

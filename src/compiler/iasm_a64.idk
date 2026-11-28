@@ -1963,6 +1963,43 @@ namespace IDEKA
                 if (a6_ins(a, w `| ((i64)b << 8), 0, -1, 0)) { -> 1; };
                 -> 0;
             };
+            if (a6_eq(m, ml, "dc\0") | a6_eq(m, ml, "ic\0"))
+            {
+                // Cache maintenance, the SYS aliases: dc cvau, xt / ic ivau, xt / ic iallu
+                int tl = 0;
+                byte* tx = (byte*)0;
+                i64 sysw = 0 - 1;
+                bool wantreg = true;
+                if (n < 1 | n > 2) { a6_fail(a, "bad operands\0"); -> 0; };
+                tx = @a.lp[a.ost[0]];
+                tl = a.oen[0] - a.ost[0];
+                if (m[0] == 'd')
+                {
+                    if (a6_eq(tx, tl, "cvau\0")) { sysw = 0xD50B7B20; };
+                    if (a6_eq(tx, tl, "cvac\0")) { sysw = 0xD50B7A20; };
+                    if (a6_eq(tx, tl, "civac\0")) { sysw = 0xD50B7E20; };
+                    if (a6_eq(tx, tl, "ivac\0")) { sysw = 0xD5087620; };
+                    if (a6_eq(tx, tl, "zva\0")) { sysw = 0xD50B7420; };
+                }
+                else
+                {
+                    if (a6_eq(tx, tl, "ivau\0")) { sysw = 0xD50B7520; };
+                    if (a6_eq(tx, tl, "iallu\0")) { sysw = 0xD508751F; wantreg = false; };
+                    if (a6_eq(tx, tl, "ialluis\0")) { sysw = 0xD508711F; wantreg = false; };
+                };
+                if (sysw < 0) { a6_fail(a, "unknown cache operation\0"); -> 0; };
+                if (wantreg)
+                {
+                    if (n != 2 | o[1].k != A6K_REG) { a6_fail(a, "bad operands\0"); -> 0; };
+                    sysw = sysw `| (i64)o[1].num;
+                }
+                else
+                {
+                    if (n != 1) { a6_fail(a, "bad operands\0"); -> 0; };
+                };
+                if (a6_ins(a, sysw, 0, -1, 0)) { -> 1; };
+                -> 0;
+            };
             if (a6_eq(m, ml, "clrex\0"))
             {
                 b = 15;

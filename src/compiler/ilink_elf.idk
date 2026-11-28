@@ -1214,8 +1214,8 @@ namespace IDEKA
                 lk_w64(o.m, off + 32, lk_strlen(interp) + 1); lk_w64(o.m, off + 40, lk_strlen(interp) + 1); lk_w64(o.m, off + 48, 1);
                 off = off + 56;
             };
-            // PT_LOAD read and execute
-            lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 5);
+            // PT_LOAD read, write and execute: a volatile function's code is overwritten after it runs
+            lk_w32(o.m, off, 1); lk_w32(o.m, off + 4, 7);
             lk_w64(o.m, off + 8, 0); lk_w64(o.m, off + 16, base); lk_w64(o.m, off + 24, base);
             lk_w64(o.m, off + 32, rodata_off + gsize[1]); lk_w64(o.m, off + 40, rodata_off + gsize[1]); lk_w64(o.m, off + 48, pgal);
             off = off + 56;

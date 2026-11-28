@@ -947,7 +947,13 @@ module IDEKA_Compiler_Entrypoint
         };
         bool wrote;
         #ifdef __MACOS__
+        #ifndef IDEKA_NO_X64
         wrote = iasm_write_macho(a, dst);
+        #else
+        // ARM64 hosts build without the x86 backend, so iasm_macho.idk leaves out iasm_write_macho
+        a.err = "x86-64 Mach-O output is not built into this compiler\0";
+        wrote = false;
+        #endif;
         #else
         if (X64_ABI == 1) { wrote = iasm_write_coff(a, dst); }
         else { wrote = iasm_write_elf(a, dst); };
@@ -1073,7 +1079,7 @@ module IDEKA_Compiler_Entrypoint
         byte** objs = (byte**)fmalloc(8 * 2);
         byte* lkerr;
         objs[0] = obj;
-        lkerr = lk_macho_link(objs, 1, "_main\0", exe);
+        lkerr = lk_macho_link(objs, 1, "_start\0", exe);
         if (lkerr == (byte*)0) { *rc = 0; }
         else
         {
@@ -1272,6 +1278,9 @@ module IDEKA_Compiler_Entrypoint
         #ifdef __WINDOWS__
         if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Windows)\0"); }
         else { log_step("compiler\0", "Compiling to object file (Windows)\0"); };
+        #elif __MACOS__
+        if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Darwin)\0"); }
+        else { log_step("compiler\0", "Compiling to object file (Darwin)\0"); };
         #else
         if (ASM_ONLY) { log_step("compiler\0", "Compiling to assembly (Linux)\0"); }
         else { log_step("compiler\0", "Compiling to object file (Linux)\0"); };
@@ -1980,6 +1989,8 @@ module IDEKA_Compiler_Entrypoint
                 mu_register(munit, path, ps.lx.src, ps.lx.length, ps.lmap, ps.lmapn, ps.lfiles);
                 #ifdef __WINDOWS__
                 byte* plat_name = "Windows\0";
+                #elif __MACOS__
+                byte* plat_name = "Darwin\0";
                 #else
                 byte* plat_name = "Linux\0";
                 #endif;

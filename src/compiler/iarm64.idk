@@ -6372,11 +6372,13 @@ object A64Module
                     };
                     j++;
                 };
+                if (this.a_vwipe(f)) { this.a_vend(out); };
                 out.put_str(g"\t.size \0");
                 out.put_str(nm);
                 out.put_str(g", .-\0");
                 out.put_str(nm);
                 out.put(10);
+                if (this.a_vwipe(f)) { this.a_vlen(out, f, nm); };
                 ->;
             };
 
@@ -6609,12 +6611,14 @@ object A64Module
                     };
                     i++;
                 };
+                if (this.a_vwipe(f)) { this.a_vend(out); };
                 out.put_str(g"\t.size \0");
                 out.put_str(nm);
                 out.put_str(g", .-\0");
                 out.put_str(nm);
                 out.put(10);
                 if (this.jb.len > 0) { out.put_str(this.jb.mem); };
+                if (this.a_vwipe(f)) { this.a_vlen(out, f, nm); };
                 ->;
             };
         };

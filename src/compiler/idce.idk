@@ -1695,6 +1695,8 @@ namespace IDEKA
                 // memset is emitted by code generation itself (llvm.memset for zero
                 // initialization), so no source reference to it exists for DCE to see
                 this.add_suffixes(seed, g"memset\0");
+                // the call after a volatile function fills its code with traps
+                this.add_suffixes(seed, g"__idk_wipe_code\0");
 
                 // declarations a later pass (async lowering) will reference but no source mentions yet
                 if (this.extra_roots != (PtrVec*)0)

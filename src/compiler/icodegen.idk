@@ -2683,6 +2683,15 @@ namespace IDEKA
                                         }
                                         default {};
                                     };
+                                    // A volatile function runs once: the call site wipes its code afterwards
+                                    switch ((fd.flags `& NF_VOLATILE) != 0)
+                                    {
+                                        case (true) {
+                                            pv_push(f.attrs, (void*)this.mod.own(g"vwipe\0"));
+                                            pv_push(f.attrs, (void*)this.mod.own(g"noinline\0"));
+                                        }
+                                        default {};
+                                    };
                                     this.name_args(f, fd, 0);
                                 }
                                     default {};
@@ -10596,6 +10605,58 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                 };
             };
 
+            // True for a function declared volatile
+            is_vwipe(IRFunc* f) -> bool
+            {
+                int i;
+                while (i < f.attrs.len)
+                {
+                    switch (cstr_eq((byte*)f.attrs.items[i], g"vwipe\0")) { case (true) { -> true; } default {}; };
+                    i++;
+                };
+                -> false;
+            };
+
+            // After a call to a volatile function: fill its code with trap instructions (0xCC on x86_64,
+            // brk on arm64) so a stray jump into it cannot slide, the length being the distance from the
+            // function's label to the label the backend puts at its end
+            wipe_volatile(IRFunc* f, Node* n) -> void
+            {
+                IRFunc* wf;
+                IRGlobal* lg;
+                IRValue** wa;
+                IRValue* ln;
+                byte* vn;
+                switch (!this.is_vwipe(f)) { case (true) { ->; } default {}; };
+                wf = this.mod.find_function(g"__idk_wipe_code\0");
+                switch (wf == (IRFunc*)0)
+                {
+                    case (true) {
+                    this.fail_at(n, g"A call to a volatile function needs __idk_wipe_code from the runtime, which is not declared\0");
+                    this.stop_body(n);
+                    ->;
+                }
+                    default {};
+                };
+                vn = join3(f.name, g"__vlen\0", g"\0");
+                lg = this.mod.find_global(vn);
+                switch (lg == (IRGlobal*)0)
+                {
+                    case (true) {
+                    lg = this.mod.add_global(this.t_i64, vn, (byte*)0);
+                    lg.linkage = this.mod.own(g"external\0");
+                    lg.constant = true;
+                }
+                    default {};
+                };
+                ln = this.mod.load(lg.self, g"vlen\0");
+                wa = (IRValue**)this.zbuf(2);
+                wa[0] = this.convert_arg(f.self, wf.ftype.items[0], 0, n);
+                wa[1] = this.convert_arg(ln, wf.ftype.items[1], 1, n);
+                this.mod.call_ex(wf.self, wa, 2, (byte*)0, wf.cconv, false);
+                ->;
+            };
+
             x_call(Node* n) -> IRValue*
             {
                 int argc = node_count(n, 0);
@@ -10790,6 +10851,7 @@ has_op_overload(int op) -> bool -> this.op_overloads(op) != (PtrVec*)0;
                                                 r = this.mod.call_ex(f.self, args, total, (byte*)0, f.cconv, this.fn == f);
                                             };
                                         };
+                                        this.wipe_volatile(f, n);
                                         // the result carries the declared return type, so a cast of it knows the signedness
                                         if (r != (IRValue*)0) { rts = (TypeSpec*)nm_get(this.frspec, f.name); if (rts != (TypeSpec*)0) { r.spec = rts; }; };
                                         -> r;
